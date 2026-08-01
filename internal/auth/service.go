@@ -1,0 +1,167 @@
+package auth
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Service provides authentication operations.
+type Service struct {
+	store   SessionStore
+	rbac    *RBACManager
+	users   map[string]*User // username -> User
+}
+
+// NewService creates a new auth service with default seed users.
+func NewService(store SessionStore, rbac *RBACManager) *Service {
+	s := &Service{
+		store: store,
+		rbac:  rbac,
+		users: make(map[string]*User),
+	}
+
+	// Seed users
+	s.seedUsers()
+	return s
+}
+
+func (s *Service) seedUsers() {
+	s.users["admin"] = &User{
+		ID:           "u_admin",
+		Username:     "admin",
+		PasswordHash: hashPassword("admin123"),
+		Roles:        []string{"admin"},
+	}
+	s.users["visitor"] = &User{
+		ID:           "u_visitor",
+		Username:     "visitor",
+		PasswordHash: hashPassword("visitor123"),
+		Roles:        []string{"visitor"},
+	}
+}
+
+// Login validates credentials and creates a session.
+func (s *Service) Login(ctx context.Context, username, password string) (*LoginResponse, error) {
+	user, ok := s.users[username]
+	if !ok {
+		return nil, fmt.Errorf("invalid credentials")
+	}
+
+	if user.PasswordHash != hashPassword(password) {
+		return nil, fmt.Errorf("invalid credentials")
+	}
+
+	sessionID := "s_" + uuid.New().String()
+	session := Session{
+		ID:        sessionID,
+		UserID:    user.ID,
+		Username:  user.Username,
+		Roles:     user.Roles,
+		CreatedAt: time.Now(),
+	}
+
+	if err := s.store.Create(ctx, session); err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+
+	return &LoginResponse{
+		SessionID: sessionID,
+		User: UserPublic{
+			ID:       user.ID,
+			Username: user.Username,
+			Roles:    user.Roles,
+		},
+	}, nil
+}
+
+// ValidateSession checks if a session ID is valid and returns the session.
+func (s *Service) ValidateSession(ctx context.Context, sessionID string) (*Session, error) {
+	session, ok, err := s.store.Get(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session lookup error: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("unauthorized: invalid session")
+	}
+	return &session, nil
+}
+
+// Logout deletes a session.
+func (s *Service) Logout(ctx context.Context, sessionID string) error {
+	return s.store.Delete(ctx, sessionID)
+}
+
+// GetUser retrieves a user by username.
+func (s *Service) GetUser(ctx context.Context, username string) (*User, bool) {
+	u, ok := s.users[username]
+	return u, ok
+}
+
+// GetUserByID retrieves a user by ID.
+func (s *Service) GetUserByID(ctx context.Context, userID string) (*User, bool) {
+	for _, u := range s.users {
+		if u.ID == userID {
+			return u, true
+		}
+	}
+	return nil, false
+}
+
+// ListUsers returns all users (without password hashes).
+func (s *Service) ListUsers(ctx context.Context) []UserPublic {
+	result := make([]UserPublic, 0, len(s.users))
+	for _, u := range s.users {
+		result = append(result, UserPublic{
+			ID:       u.ID,
+			Username: u.Username,
+			Roles:    u.Roles,
+		})
+	}
+	return result
+}
+
+// CreateUser adds a new user.
+func (s *Service) CreateUser(ctx context.Context, username, password string, roles []string) (*UserPublic, error) {
+	if _, exists := s.users[username]; exists {
+		return nil, fmt.Errorf("user already exists: %s", username)
+	}
+	user := &User{
+		ID:           "u_" + uuid.New().String()[:8],
+		Username:     username,
+		PasswordHash: hashPassword(password),
+		Roles:        roles,
+	}
+	s.users[username] = user
+	return &UserPublic{ID: user.ID, Username: user.Username, Roles: user.Roles}, nil
+}
+
+// UpdateUserRoles updates the roles of a user.
+func (s *Service) UpdateUserRoles(ctx context.Context, userID string, roles []string) error {
+	for _, u := range s.users {
+		if u.ID == userID {
+			u.Roles = roles
+			return nil
+		}
+	}
+	return fmt.Errorf("user not found: %s", userID)
+}
+
+// RBAC returns the RBAC manager.
+func (s *Service) RBAC() *RBACManager {
+	return s.rbac
+}
+
+// Store returns the session store.
+func (s *Service) Store() SessionStore {
+	return s.store
+}
+
+func hashPassword(password string) string {
+	h := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(h[:])
+}
