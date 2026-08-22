@@ -28,12 +28,21 @@ const (
 
 // ChatRunResult is the full result of an agent run.
 type ChatRunResult struct {
-	RunID       string     `json:"run_id"`
-	Status      RunStatus  `json:"status"`
-	Answer      string     `json:"answer,omitempty"`
-	Interrupt   *Interrupt `json:"interrupt,omitempty"`
-	Events      []Event    `json:"events,omitempty"`
-	RoutedAgent string     `json:"routed_agent,omitempty"`
+	RunID         string     `json:"run_id"`
+	Status        RunStatus  `json:"status"`
+	Answer        string     `json:"answer,omitempty"`
+	Interrupt     *Interrupt `json:"interrupt,omitempty"`
+	Events        []Event    `json:"events,omitempty"`
+	RoutedAgent   string     `json:"routed_agent,omitempty"`
+	ContextTokens *TokenInfo `json:"context_tokens,omitempty"`
+}
+
+// TokenInfo shows the context window usage for the current turn.
+type TokenInfo struct {
+	Current   int `json:"current"`   // tokens in the context sent to the LLM
+	Threshold int `json:"threshold"` // compression trigger threshold
+	Max       int `json:"max"`       // context window limit
+	Compressed bool `json:"compressed,omitempty"` // true if compression was applied
 }
 
 // Interrupt describes an interruption in an agent run.
@@ -58,6 +67,7 @@ type Runner struct {
 	summarizer    *contextmgr.Summarizer
 	counter       contextmgr.TokenCounter
 	runs          map[string]*ChatRunResult
+	resumeResults map[string]ChatRunResult // interruptID -> Resume result (for idempotent retry)
 	threads       map[string][]*schema.Message // threadID -> conversation history (Eino schema.Message)
 	maxTokens     int
 }
@@ -83,6 +93,7 @@ func NewRunner(
 		summarizer:    summarizer,
 		counter:       contextmgr.NewSimpleTokenCounter(),
 		runs:          make(map[string]*ChatRunResult),
+		resumeResults: make(map[string]ChatRunResult),
 		threads:       make(map[string][]*schema.Message),
 		maxTokens:     maxTokens,
 	}
@@ -152,7 +163,7 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 	// This ensures long conversations don't exceed the token window.
 	// If compression happened, replace the thread history with the compressed version
 	// so that we don't re-compress the same old messages on every turn.
-	compressedMessages := r.compressMessages(ctx, messages, recorder)
+	compressedMessages, tokenInfo := r.compressMessages(ctx, messages, recorder)
 	wasCompressed := len(compressedMessages) < len(messages)
 	messages = compressedMessages
 
@@ -308,8 +319,9 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 				Message:     interruptMsg,
 				Type:        interruptType,
 			},
-			Events:      recorder.Events(),
-			RoutedAgent: result.RoutedAgent,
+			Events:        recorder.Events(),
+			RoutedAgent:   result.RoutedAgent,
+			ContextTokens: tokenInfo,
 		}
 
 		r.mu.Lock()
@@ -345,11 +357,12 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, userMessage)
 
 	runResult := ChatRunResult{
-		RunID:       runID,
-		Status:      StatusCompleted,
-		Answer:      result.Answer,
-		Events:      recorder.Events(),
-		RoutedAgent: result.RoutedAgent,
+		RunID:         runID,
+		Status:        StatusCompleted,
+		Answer:        result.Answer,
+		Events:        recorder.Events(),
+		RoutedAgent:   result.RoutedAgent,
+		ContextTokens: tokenInfo,
 	}
 
 	r.mu.Lock()
@@ -394,7 +407,7 @@ func (r *Runner) ChatStream(authCtx *auth.AuthContext, threadID, userMessage str
 	messages = append(messages, schema.UserMessage(userMessage))
 
 	// Apply context compression before streaming
-	messages = r.compressMessages(ctx, messages, nil)
+	messages, _ = r.compressMessages(ctx, messages, nil)
 
 	// Save user message
 	threadMessages = append(threadMessages, schema.UserMessage(userMessage))
@@ -426,6 +439,16 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	req, ok := r.hitlSvc.GetApproval(interruptID)
 	if !ok {
 		return ChatRunResult{Status: StatusError, Answer: "审批请求不存在"}
+	}
+
+	// Idempotency: if this interrupt was already resumed (e.g. the user
+	// double-clicked approve), return the cached result from the first call
+	// instead of re-executing the gated tool and re-running the ReAct loop.
+	r.mu.RLock()
+	cached, resumeExists := r.resumeResults[interruptID]
+	r.mu.RUnlock()
+	if resumeExists {
+		return cached
 	}
 
 	ctx := context.Background()
@@ -487,36 +510,52 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 					r.threads[req.ThreadID] = threadMessages
 					r.mu.Unlock()
 
-					return ChatRunResult{
+					result := ChatRunResult{
 						RunID:  req.RunID,
 						Status: StatusCompleted,
 						Answer: steppedState.Answer,
 					}
+					r.mu.Lock()
+					r.resumeResults[interruptID] = result
+					r.mu.Unlock()
+					return result
 				}
 
 				// Still interrupted (another interrupt hit during resume)
-				return ChatRunResult{
+				result := ChatRunResult{
 					RunID:  req.RunID,
 					Status: StatusInterrupted,
 					Answer: steppedState.Answer,
 				}
+				r.mu.Lock()
+				r.resumeResults[interruptID] = result
+				r.mu.Unlock()
+				return result
 			}
 		}
 
 		// Fallback for node-level interrupt without checkpoint:
 		// Treat like a completed run with the approval result
 		if decision.Approved {
-			return ChatRunResult{
+			result := ChatRunResult{
 				RunID:  req.RunID,
 				Status: StatusCompleted,
 				Answer: "计划已批准，继续执行。",
 			}
+			r.mu.Lock()
+			r.resumeResults[interruptID] = result
+			r.mu.Unlock()
+			return result
 		}
-		return ChatRunResult{
+		result := ChatRunResult{
 			RunID:  req.RunID,
 			Status: StatusCompleted,
 			Answer: "计划已被拒绝：" + decision.Reason,
 		}
+		r.mu.Lock()
+		r.resumeResults[interruptID] = result
+		r.mu.Unlock()
+		return result
 	}
 
 	// Tool-level interrupt handling: try checkpoint-based resume first
@@ -525,17 +564,42 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	if r.steppedRunner != nil && r.memorySvc != nil {
 		steppedState, loadErr := LoadFromCheckpoint(ctx, authCtx.UserID, req.ThreadID, req.RunID, r.memorySvc.GetCheckpointStore())
 		if loadErr == nil && steppedState != nil {
-			// Resume from full state: apply approval and continue ReAct loop
-			_, handleErr := r.steppedRunner.HandleApproval(ctx, steppedState, &InterruptRequest{
-				InterruptID: req.InterruptID,
-				Type:        hitl.InterruptTypeTool,
-				ToolName:    req.ToolName,
-				Arguments:   req.Arguments,
-				RunID:       req.RunID,
-				ThreadID:    req.ThreadID,
-			}, decision.Approved, decision.Reason)
-			if handleErr != nil {
-				return ChatRunResult{Status: StatusError, Answer: fmt.Sprintf("工具恢复处理失败：%v", handleErr)}
+		}
+		if loadErr == nil && steppedState != nil {
+			// Determine whether the gated tool is a direct pending call or
+			// nested inside a sub-agent. When the supervisor routes to a
+			// sub-agent (e.g. general_agent) and the sub-agent's internal
+			// ReAct hits a dangerous tool (e.g. delete_order), the interrupt's
+			// ToolName (delete_order) is NOT in the outer PendingToolCalls
+			// (which holds general_agent). The two cases need different handling.
+			isNestedTool := true
+			for _, tc := range steppedState.PendingToolCalls {
+				if tc.Name == req.ToolName {
+					isNestedTool = false
+					break
+				}
+			}
+
+			if isNestedTool {
+				// Nested sub-agent tool interrupt: resolve the decision at the
+				// outer level by executing the gated tool (if approved) and
+				// feeding its result as the sub-agent call's tool observation.
+				if err := r.resolveNestedToolInterrupt(ctx, authCtx, steppedState, req, decision); err != nil {
+					return ChatRunResult{Status: StatusError, Answer: err.Error()}
+				}
+			} else {
+				// Direct tool interrupt: use HandleApproval to execute/skip
+				_, handleErr := r.steppedRunner.HandleApproval(ctx, steppedState, &InterruptRequest{
+					InterruptID: req.InterruptID,
+					Type:        hitl.InterruptTypeTool,
+					ToolName:    req.ToolName,
+					Arguments:   req.Arguments,
+					RunID:       req.RunID,
+					ThreadID:    req.ThreadID,
+				}, decision.Approved, decision.Reason)
+				if handleErr != nil {
+					return ChatRunResult{Status: StatusError, Answer: fmt.Sprintf("工具恢复处理失败：%v", handleErr)}
+				}
 			}
 
 			recorder := NewEventRecorder(req.RunID)
@@ -560,9 +624,17 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 				r.mu.Lock()
 				r.threads[req.ThreadID] = threadMessages
 				r.mu.Unlock()
-				return ChatRunResult{RunID: req.RunID, Status: StatusCompleted, Answer: steppedState.Answer}
+				result := ChatRunResult{RunID: req.RunID, Status: StatusCompleted, Answer: steppedState.Answer}
+				r.mu.Lock()
+				r.resumeResults[interruptID] = result
+				r.mu.Unlock()
+				return result
 			}
-			return ChatRunResult{RunID: req.RunID, Status: StatusInterrupted, Answer: steppedState.Answer}
+			result := ChatRunResult{RunID: req.RunID, Status: StatusInterrupted, Answer: steppedState.Answer}
+			r.mu.Lock()
+			r.resumeResults[interruptID] = result
+			r.mu.Unlock()
+			return result
 		}
 	}
 
@@ -665,7 +737,7 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	}
 
 	messages := append([]*schema.Message{schema.SystemMessage(systemContent)}, threadMessages...)
-	messages = r.compressMessages(ctx, messages, nil)
+	messages, _ = r.compressMessages(ctx, messages, nil)
 
 	// Run the agent again with the full conversation (including tool result)
 	var result SupervisorRunResult
@@ -681,11 +753,62 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	r.threads[req.ThreadID] = threadMessages
 	r.mu.Unlock()
 
-	return ChatRunResult{
+	finalResult := ChatRunResult{
 		RunID:  req.RunID,
 		Status: StatusCompleted,
 		Answer: result.Answer,
 	}
+	r.mu.Lock()
+	r.resumeResults[interruptID] = finalResult
+	r.mu.Unlock()
+
+	return finalResult
+}
+
+// resolveNestedToolInterrupt handles a tool-level interrupt that originated
+// inside a sub-agent. The outer SteppedRunner's PendingToolCalls holds the
+// sub-agent call (e.g. general_agent), not the gated tool itself (e.g.
+// delete_order). The sub-agent's internal state is not preserved across the
+// interrupt, so we resolve the decision at the outer level: execute the gated
+// tool (if approved) — or record the rejection — and feed the result as the
+// sub-agent call's tool observation, so the outer ReAct loop continues with a
+// concrete outcome instead of re-running the sub-agent and re-triggering the
+// interrupt in a loop.
+func (r *Runner) resolveNestedToolInterrupt(ctx context.Context, authCtx *auth.AuthContext, state *SteppedRunState, req *hitl.ApprovalRequest, decision hitl.ApprovalDecision) error {
+	if len(state.PendingToolCalls) == 0 {
+		return fmt.Errorf("no pending tool calls to resume")
+	}
+	// The sub-agent call is the first (typically only) pending call.
+	subAgentTC := state.PendingToolCalls[0]
+
+	var content string
+	if decision.Approved {
+		tool, found := r.registry.Get(req.ToolName)
+		if !found {
+			return fmt.Errorf("工具 %s 不存在", req.ToolName)
+		}
+		toolCtx := map[string]any{"user_id": authCtx.UserID, "roles": authCtx.Roles}
+		result := tool.Fn(toolCtx, req.Arguments)
+		if result.Error != "" {
+			content = result.Error
+		} else {
+			content = result.Content
+		}
+	} else {
+		content = "❌ 用户拒绝执行该操作"
+		if decision.Reason != "" {
+			content += "：" + decision.Reason
+		}
+	}
+
+	state.Messages = append(state.Messages, SchemaMessage{
+		Role:       "tool",
+		Content:    content,
+		ToolCallID: subAgentTC.ID,
+		Name:       subAgentTC.Name,
+	})
+	state.PendingToolCalls = nil
+	return nil
 }
 
 // GetRun returns a stored run result.
@@ -807,32 +930,45 @@ func isRateLimitError(errMsg string) bool {
 
 // compressMessages applies context compression to the message list before sending
 // to the agent. Converts between Eino schema.Message and contextmgr.Message formats.
-func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) []*schema.Message {
+// Returns the (possibly compressed) messages and a TokenInfo snapshot.
+func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) ([]*schema.Message, *TokenInfo) {
 	if r.summarizer == nil || len(messages) <= 4 {
-		return messages // Not enough to compress or no summarizer configured
+		// Still compute token info for display even when skipping compression
+		if r.summarizer != nil {
+			ctxMsgs := einoToContextMessages(messages)
+			tokens := r.summarizer.CountTokens(ctxMsgs)
+			threshold := int(float64(r.maxTokens) * r.summarizer.ThresholdRatio())
+			return messages, &TokenInfo{Current: tokens, Threshold: threshold, Max: r.maxTokens}
+		}
+		return messages, nil
 	}
 
 	// Convert Eino schema.Message -> contextmgr.Message
 	ctxMsgs := einoToContextMessages(messages)
+	currentTokens := r.summarizer.CountTokens(ctxMsgs)
+	threshold := int(float64(r.maxTokens) * r.summarizer.ThresholdRatio())
 
 	// Check if compression is needed
 	if !r.summarizer.ShouldSummarize(ctxMsgs, r.maxTokens) {
-		return messages
+		return messages, &TokenInfo{Current: currentTokens, Threshold: threshold, Max: r.maxTokens}
 	}
 
 	// Compress using LLM-based summarization (with rule-based fallback)
 	compressed := r.summarizer.Compress(ctx, ctxMsgs, r.maxTokens)
+	compressedTokens := r.summarizer.CountTokens(compressed)
 
 	// Record the compression event
 	if recorder != nil {
-		recorder.Record(EventSummaryCompress, fmt.Sprintf("Context compressed: %d -> %d messages", len(ctxMsgs), len(compressed)), map[string]any{
-			"before": len(ctxMsgs),
-			"after":  len(compressed),
+		recorder.Record(EventSummaryCompress, fmt.Sprintf("Context compressed: %d -> %d messages, %d -> %d tokens", len(ctxMsgs), len(compressed), currentTokens, compressedTokens), map[string]any{
+			"before":        len(ctxMsgs),
+			"after":         len(compressed),
+			"tokens_before": currentTokens,
+			"tokens_after":  compressedTokens,
 		})
 	}
 
 	// Convert back: contextmgr.Message -> Eino schema.Message
-	return contextToEinoMessages(compressed)
+	return contextToEinoMessages(compressed), &TokenInfo{Current: compressedTokens, Threshold: threshold, Max: r.maxTokens, Compressed: true}
 }
 
 // einoToContextMessages converts Eino schema.Message slice to contextmgr.Message slice.

@@ -66,10 +66,10 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 }
 
 // chatStream handles SSE streaming for chat responses.
-// It streams message chunks as Server-Sent Events, then sends a final [DONE] event.
-// When the LLM needs to call tools (ReAct loop), Eino's Stream() only returns the
-// first turn. We detect this and fall back to non-streaming Chat() to get the
-// complete result, then send it as a single chunk.
+// It always uses the non-streaming Chat() to ensure complete results with events,
+// interrupts, and run metadata, then sends the answer as SSE events.
+// The SteppedRunner-based Chat() is the only execution path that correctly
+// records events, handles HITL interrupts, and provides runId for follow-up.
 func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *auth.AuthContext, req *ChatRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -83,100 +83,49 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	stream, err := h.runner.ChatStream(ac, req.ThreadID, req.Message)
-	if err != nil {
-		// Send error as SSE event
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", jsonEncode(map[string]string{"error": err.Error()}))
-		flusher.Flush()
-		return
-	}
-	defer stream.Close()
+	// Always use Chat() — it goes through SteppedRunner which records events,
+	// handles interrupts, and provides complete results.
+	result := h.runner.Chat(ac, req.ThreadID, req.Message)
 
-	var fullContent string
-	hasToolCalls := false
-
-	for {
-		chunk, err := stream.Recv()
-		if err != nil {
-			// Stream ended (io.EOF) or error
-			break
-		}
-
-		if chunk.Content != "" {
-			fullContent += chunk.Content
-			// Send content chunk as SSE event
-			fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{
-				"content": chunk.Content,
-			}))
-			flusher.Flush()
-		}
-
-		// If there are tool calls, the ReAct loop hasn't finished.
-		// Eino's Stream() only streams the first turn, so we need to
-		// fall back to non-streaming to get the complete result.
-		if len(chunk.ToolCalls) > 0 {
-			hasToolCalls = true
-			for _, tc := range chunk.ToolCalls {
-				fmt.Fprintf(w, "event: tool_call\ndata: %s\n\n", jsonEncode(map[string]any{
-					"name":      tc.Function.Name,
-					"arguments": tc.Function.Arguments,
-				}))
-				flusher.Flush()
-			}
-		}
-	}
-
-	// Extract preferences asynchronously (don't block the response)
+	// Extract preferences asynchronously
 	go h.runner.ExtractAndSavePreferences(ac, req.Message)
 
-	// Fetch current memory for the done event
+	// Fetch current memory
 	memEntries, _ := h.memorySvc.ListPreferences(r.Context(), ac.UserID)
 
-	// If tool calls were detected, the stream only contains the first LLM turn.
-	// Fall back to non-streaming Chat() to get the complete ReAct result.
-	if hasToolCalls {
-		result := h.runner.Chat(ac, req.ThreadID, req.Message)
-
-		if result.Status == "interrupted" {
-			fmt.Fprintf(w, "event: done\ndata: %s\n\n", jsonEncode(map[string]any{
-				"status":    "interrupted",
-				"answer":    result.Answer,
-				"threadId":  req.ThreadID,
-				"interrupt": result.Interrupt,
-				"memory":    memEntries,
-			}))
-			flusher.Flush()
-			return
-		}
-
-		// Send the complete answer as a single chunk
-		if result.Answer != "" {
-			fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{
-				"content": result.Answer,
-			}))
-			flusher.Flush()
-		}
-
+	if result.Status == "interrupted" {
+		// Send interrupt event
 		fmt.Fprintf(w, "event: done\ndata: %s\n\n", jsonEncode(map[string]any{
-			"status":   "completed",
-			"answer":   result.Answer,
-			"threadId": req.ThreadID,
-			"memory":   memEntries,
+			"status":    "interrupted",
+			"answer":    result.Answer,
+			"threadId":  req.ThreadID,
+			"interrupt": result.Interrupt,
+			"memory":    memEntries,
+			"runId":     result.RunID,
+			"events":    result.Events,
+				"contextTokens": result.ContextTokens,
 		}))
 		flusher.Flush()
 		return
 	}
 
-	// No tool calls — the stream has the complete answer
-	// Save the full assistant message to thread history
-	h.runner.SaveAssistantMessage(req.ThreadID, fullContent)
+	// Send the complete answer as a single chunk (no streaming typing effect,
+	// but ensures events, memory, and interrupt handling are all correct).
+	if result.Answer != "" {
+		fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{
+			"content": result.Answer,
+		}))
+		flusher.Flush()
+	}
 
-	// Send done event with full answer and memory
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", jsonEncode(map[string]any{
 		"status":   "completed",
-		"answer":   fullContent,
+		"answer":   result.Answer,
 		"threadId": req.ThreadID,
 		"memory":   memEntries,
+		"runId":    result.RunID,
+		"events":   result.Events,
+		"contextTokens": result.ContextTokens,
 	}))
 	flusher.Flush()
 }

@@ -291,8 +291,14 @@ func BuildDefaultSupervisor(ctx context.Context, chatModel model.ToolCallingChat
 			MaxIterations: 10,
 		},
 		{
-			Name:          "general_agent",
-			Instruction:   "你是一个通用助手，可以查询订单、删除订单、发送邮件。请使用相关工具来帮助用户。",
+			Name: "general_agent",
+			Instruction: "你是一个通用业务助手，负责处理订单查询、删除订单、发送邮件。可用工具：query_order（查询订单）、delete_order（删除订单）、send_email（发送邮件）。\n\n" +
+				"核心规则（必须严格遵守）：\n" +
+				"- 必须直接调用工具完成任务，禁止用文字要求用户确认。系统内置审批机制：delete_order、send_email 等高危操作在工具执行前会自动触发人工审批，无需你自行询问用户。\n" +
+				"- 当用户要求删除订单时，从用户消息中提取订单号（如 A-1001、B-2003），立即调用 delete_order 工具，参数为 {\"order_id\": \"<订单号>\"}。不要回复\"是否确认删除\"之类的话。\n" +
+				"- 当用户要求发送邮件时，提取收件人邮箱和内容，立即调用 send_email 工具。\n" +
+				"- 当用户要求查询订单时，调用 query_order 工具。\n" +
+				"- 调用工具后，根据工具返回结果用自然语言回复用户。",
 			ToolNames:     []string{"query_order", "delete_order", "send_email"},
 			MaxIterations: 10,
 		},

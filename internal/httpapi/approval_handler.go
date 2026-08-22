@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/example/agent-eino-demo/internal/agent"
 	"github.com/example/agent-eino-demo/internal/auth"
 	"github.com/example/agent-eino-demo/internal/hitl"
 )
@@ -11,11 +12,12 @@ import (
 // ApprovalHandler handles HITL approval API endpoints.
 type ApprovalHandler struct {
 	hitlSvc *hitl.Service
+	runner  *agent.Runner
 }
 
 // NewApprovalHandler creates a new ApprovalHandler.
-func NewApprovalHandler(hitlSvc *hitl.Service) *ApprovalHandler {
-	return &ApprovalHandler{hitlSvc: hitlSvc}
+func NewApprovalHandler(hitlSvc *hitl.Service, runner *agent.Runner) *ApprovalHandler {
+	return &ApprovalHandler{hitlSvc: hitlSvc, runner: runner}
 }
 
 // ListApprovals handles GET /api/approvals
@@ -71,25 +73,20 @@ func (h *ApprovalHandler) MakeDecision(w http.ResponseWriter, r *http.Request) {
 		Reason:   req.Reason,
 	}
 
-	// Process the approval decision
-	approvalReq, err := h.hitlSvc.Approve(r.Context(), interruptID, decision)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	// Resume the interrupted run: this applies the approval decision internally,
+	// executes the gated tool (if approved), and re-enters the ReAct loop so the
+	// LLM continues reasoning from where it paused. The returned answer reflects
+	// the tool execution result, not a hardcoded message.
+	result := h.runner.Resume(ac, interruptID, decision)
+	if result.Status == "error" {
+		writeError(w, http.StatusBadRequest, result.Answer)
 		return
 	}
 
-	// Execute or reject the tool
-	var answer string
-	if decision.Approved {
-		answer = "操作已批准并执行。"
-	} else {
-		answer = "操作已被拒绝：" + decision.Reason
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
-		"runId":    approvalReq.RunID,
-		"status":   "completed",
-		"answer":   answer,
+		"runId":    result.RunID,
+		"status":   result.Status,
+		"answer":   result.Answer,
 		"approved": decision.Approved,
 	})
 }

@@ -247,6 +247,57 @@ body {
     font-size: 13px;
 }
 
+.msg-system {
+    background: linear-gradient(135deg, #fef3c7, #fffbeb);
+    border: 1px solid #fbbf24;
+    margin-right: auto;
+    font-size: 13px;
+    font-weight: 500;
+    color: #92400e;
+}
+
+/* Context Token Bar */
+.token-bar {
+    padding: 6px 16px;
+    background: #fafafa;
+    border-top: 1px solid #eee;
+}
+.token-bar-track {
+    position: relative;
+    height: 6px;
+    background: #e5e7eb;
+    border-radius: 3px;
+    overflow: visible;
+}
+.token-bar-fill {
+    height: 100%;
+    background: #10b981;
+    border-radius: 3px;
+    transition: width 0.4s ease, background 0.4s ease;
+}
+.token-bar-fill.warn { background: #f59e0b; }
+.token-bar-fill.compress { background: #f59e0b; }
+.token-bar-fill.danger { background: #ef4444; }
+.token-bar-threshold {
+    position: absolute;
+    top: -2px;
+    width: 2px;
+    height: 10px;
+    background: #92400e;
+    border-radius: 1px;
+}
+.token-bar-label {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-size: 11px;
+    color: #6b7280;
+}
+.token-bar-label .compressed-badge {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
 .msg-summary {
     background: #faf5ff;
     border: 1px solid #e9d5ff;
@@ -275,6 +326,75 @@ body {
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 12px;
+}
+
+/* Approval Modal */
+.approval-modal-box {
+    width: 480px;
+}
+.approval-modal-box .approval-card {
+    background: #fffbeb;
+    border: 2px solid #f59e0b;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 12px;
+    font-size: 14px;
+    animation: pulseIn 0.3s ease-out;
+}
+@keyframes pulseIn {
+    0% { opacity: 0; transform: scale(0.95); }
+    100% { opacity: 1; transform: scale(1); }
+}
+.approval-modal-box .approval-card .card-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #92400e;
+    margin-bottom: 6px;
+}
+.approval-modal-box .approval-card .card-detail {
+    font-size: 13px;
+    color: #78716c;
+    line-height: 1.6;
+}
+.approval-modal-box .approval-card .card-actions {
+    margin-top: 12px;
+    gap: 8px;
+}
+.approval-modal-box .approval-card .card-actions input {
+    padding: 6px 10px;
+    font-size: 13px;
+}
+.approval-modal-box .approval-card .card-actions .btn {
+    padding: 6px 16px;
+    font-size: 13px;
+}
+
+/* Sidebar Approval Indicator */
+.approval-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.approval-indicator:hover { background: #fffbeb; }
+.approval-indicator .indicator-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #f59e0b;
+    animation: blink 1.5s ease-in-out infinite;
+}
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+.approval-indicator .indicator-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: #92400e;
 }
 
 /* Tool List */

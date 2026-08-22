@@ -88,7 +88,14 @@ func (m *InterruptManager) Resume(ctx context.Context, interruptID string, decis
 		return nil, fmt.Errorf("interrupt not found: %s", interruptID)
 	}
 
+	// Idempotent: if the same decision was already applied (e.g. the user
+	// double-clicked the approve button, or the request was retried), return
+	// the existing request instead of erroring. This prevents a confusing
+	// "审批失败" message when the action actually succeeded.
 	if req.Status != StatusPending {
+		if req.Decision != nil && req.Decision.Approved == decision.Approved {
+			return req, nil
+		}
 		return nil, fmt.Errorf("interrupt already decided: %s (status: %s)", interruptID, req.Status)
 	}
 
@@ -102,19 +109,11 @@ func (m *InterruptManager) Resume(ctx context.Context, interruptID string, decis
 		req.Status = StatusRejected
 	}
 
-	// Update checkpoint
-	cp := memory.Checkpoint{
-		UserID:      req.UserID,
-		ThreadID:    req.ThreadID,
-		RunID:       req.RunID,
-		State:       []byte(fmt.Sprintf(`{"interrupt_id":"%s","approved":%v}`, interruptID, decision.Approved)),
-		Interrupted: false,
-		CreatedAt:   req.CreatedAt,
-		UpdatedAt:   now,
-	}
-	if err := m.checkpoint.Save(ctx, cp); err != nil {
-		return nil, fmt.Errorf("failed to update checkpoint: %w", err)
-	}
+	// Update the approval status in memory.
+	// Do NOT overwrite the checkpoint here — the full SteppedRunState is
+	// already saved at Step=0 by SaveToCheckpoint. Overwriting it with
+	// this lightweight approval record would destroy the state needed for
+	// Resume to reconstruct the execution context.
 
 	return req, nil
 }

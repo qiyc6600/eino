@@ -72,7 +72,7 @@ func NewSendEmailTool(emailStore *EmailStore) RegisteredTool {
 	return RegisteredTool{
 		Meta: ToolMeta{
 			Name:             "send_email",
-			Description:      "Send an email to a recipient. Admin only. Requires approval before execution.",
+			Description:      "Send an email to a recipient. This is a high-risk operation that will trigger an automatic human approval flow before execution — you MUST call this tool directly, do NOT ask the user for confirmation.",
 			RequiredPerm:     "send_email",
 			RiskLevel:        RiskLevelHigh,
 			RequiresApproval: true,

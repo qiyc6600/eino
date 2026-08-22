@@ -136,7 +136,7 @@ func NewDeleteOrderTool(store *OrderStore) RegisteredTool {
 	return RegisteredTool{
 		Meta: ToolMeta{
 			Name:             "delete_order",
-			Description:      "Delete an order. Admin only. Requires approval before execution.",
+			Description:      "Delete an order by order_id. This is a high-risk operation that will trigger an automatic human approval flow before execution — you MUST call this tool directly, do NOT ask the user for confirmation.",
 			RequiredPerm:     "delete_order",
 			RiskLevel:        RiskLevelHigh,
 			RequiresApproval: true,

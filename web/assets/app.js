@@ -7,6 +7,7 @@ let isStreaming = false; // prevent duplicate sends
 let currentModelId = 'mock'; // current model profile ID
 let modelProfiles = []; // available model profiles
 let pendingSwitchProfileId = null; // profile waiting for API key
+let currentApprovals = []; // current pending approval requests
 
 // ========== Persistence ==========
 function cacheKey(threadId) {
@@ -216,7 +217,8 @@ function renderChat() {
                     msg.role === 'assistant' ? 'msg-assistant' :
                     msg.role === 'interrupt' ? 'msg-interrupt' :
                     msg.role === 'acl-denied' ? 'msg-acl-denied' :
-                    msg.role === 'approval' ? 'msg-approval' : 'msg-assistant';
+                    msg.role === 'approval' ? 'msg-approval' :
+                    msg.role === 'system' ? 'msg-system' : 'msg-assistant';
         // Use data-streaming attribute to mark the streaming message
         const streaming = msg._streaming ? ' data-streaming="true"' : '';
         html += `<div class="msg ${cls}" style="white-space:pre-wrap"${streaming}>${escaped}</div>`;
@@ -364,9 +366,27 @@ async function chatStream(threadId, message) {
                         } else if (eventType === 'tool_call') {
                             // Tool call notification — could show in UI
                         } else if (eventType === 'done') {
-                            // Final event — save complete message
-                            finalizeStreamingMessage(threadId, data.answer || fullContent);
-                            renderChat();
+                            // Handle HITL interrupt: show interrupt message + refresh approval cards
+                            if (data.status === 'interrupted' && data.interrupt) {
+                                const interruptInfo = data.interrupt;
+                                const interruptMsg = `⏸️ 运行已中断，等待审批\n工具：${interruptInfo.tool_name || interruptInfo.node_name || ''}\n原因：${interruptInfo.message || ''}`;
+                                finalizeStreamingMessage(threadId, interruptMsg);
+                                // Mark as interrupt type for distinct rendering
+                                const msgs = loadMessages(threadId);
+                                for (let i = msgs.length - 1; i >= 0; i--) {
+                                    if (!msgs[i]._streaming) {
+                                        msgs[i].role = 'interrupt';
+                                        break;
+                                    }
+                                }
+                                saveMessages(threadId, msgs);
+                                renderChat();
+                                refreshApprovals();
+                            } else {
+                                // Normal completion — save complete message
+                                finalizeStreamingMessage(threadId, data.answer || fullContent);
+                                renderChat();
+                            }
 
                             // Use server-provided memory if available, else refresh via API
                             if (data.memory && data.memory.length > 0) {
@@ -375,6 +395,16 @@ async function chatStream(threadId, message) {
                                 renderMemory([]);
                             } else {
                                 setTimeout(refreshMemory, 500);
+                            }
+
+                            // Render run events (supervisor routing, tool calls, compressions, etc.)
+                            if (data.events && data.events.length > 0) {
+                                renderEvents(data.events);
+                            }
+
+                            // Update context token bar
+                            if (data.contextTokens) {
+                                updateTokenBar(data.contextTokens);
                             }
                         } else if (eventType === 'error') {
                             finalizeStreamingMessage(threadId, `❌ ${data.error}`);
@@ -424,20 +454,50 @@ function finalizeStreamingMessage(threadId, content) {
 }
 
 // ========== Approvals ==========
+// Track which pending interrupts the user has dismissed from the modal, so we
+// don't re-pop the modal for an item the user explicitly chose to handle later.
+let dismissedInterruptIds = new Set();
+
 async function refreshApprovals() {
     try {
         const data = await api('GET', '/api/approvals');
-        renderApprovals(data);
+        currentApprovals = data || [];
+        renderApprovals(currentApprovals);
     } catch (e) {}
 }
 
 function renderApprovals(approvals) {
+    // Sidebar: show a compact indicator with pending count
     const listDiv = document.getElementById('approvalList');
-    if (!approvals || approvals.length === 0) {
-        listDiv.innerHTML = '<div class="empty-state">暂无待审批项</div>';
+    const pending = (approvals || []).filter(a => a.Status === 'pending');
+
+    if (pending.length === 0) {
+        listDiv.innerHTML = '<div class="empty-state">无待审批项</div>';
+        closeApprovalModal();
+        dismissedInterruptIds.clear();
         return;
     }
-    listDiv.innerHTML = approvals.map(a => `
+
+    listDiv.innerHTML = `
+        <div class="approval-indicator" onclick="openApprovalModal()">
+            <span class="indicator-dot"></span>
+            <span class="indicator-text">${pending.length} 个待审批</span>
+        </div>
+        <button onclick="openApprovalModal()" class="btn btn-sm btn-full" style="margin-top:6px;">查看并处理</button>
+    `;
+
+    // Auto-open the modal if there's a new pending interrupt the user hasn't
+    // dismissed yet. If all current pending items were already dismissed, keep
+    // the modal closed (user chose "稍后处理").
+    const hasNew = pending.some(a => !dismissedInterruptIds.has(a.InterruptID));
+    if (hasNew) {
+        openApprovalModal();
+    }
+}
+
+function renderApprovalCards(containerId, approvals) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = approvals.map(a => `
         <div class="approval-card">
             <div class="card-title">${a.Type === 'tool' ? '🔧 ' : '📋 '}${a.ToolName || a.NodeName}</div>
             <div class="card-detail">
@@ -454,6 +514,25 @@ function renderApprovals(approvals) {
     `).join('');
 }
 
+function openApprovalModal() {
+    const modal = document.getElementById('approvalModal');
+    const pending = currentApprovals.filter(a => a.Status === 'pending');
+    if (pending.length === 0) return;
+    renderApprovalCards('approvalModalList', pending);
+    modal.style.display = 'flex';
+}
+
+function closeApprovalModal() {
+    const modal = document.getElementById('approvalModal');
+    if (modal.style.display === 'none') return;
+    modal.style.display = 'none';
+    // Mark all currently pending interrupts as dismissed so we don't auto-reopen
+    // for the same items.
+    currentApprovals.filter(a => a.Status === 'pending').forEach(a => {
+        dismissedInterruptIds.add(a.InterruptID);
+    });
+}
+
 async function decideApproval(interruptId, approved) {
     const reasonEl = document.getElementById(`rr-${interruptId}`);
     const reason = reasonEl ? reasonEl.value : '';
@@ -462,7 +541,9 @@ async function decideApproval(interruptId, approved) {
         pushMessage(currentThread, 'approval',
             `${approved ? '✅' : '🚫'} 审批结果：${data.answer || (approved ? '已批准' : '已拒绝')}`);
         renderChat();
-        refreshApprovals();
+        // This interrupt is resolved — no longer dismissed-tracking needed.
+        dismissedInterruptIds.delete(interruptId);
+        await refreshApprovals();
     } catch (e) {
         alert('审批操作失败：' + e.message);
     }
@@ -536,11 +617,18 @@ function renderEvents(events) {
     const listDiv = document.getElementById('eventList');
     listDiv.innerHTML = (events || []).map(e => {
         let cls = '';
-        if (e.type === 'supervisor_route') cls = 'route';
-        else if (e.type === 'tool_call_start' || e.type === 'tool_call_end') cls = 'tool';
-        else if (e.type === 'acl_denied') cls = 'denied';
-        else if (e.type === 'hitl_interrupt') cls = 'interrupt';
-        return `<div class="event-item ${cls}">${e.type}: ${e.detail}</div>`;
+        let icon = '•';
+        if (e.type === 'supervisor_route') { cls = 'route'; icon = '🔀'; }
+        else if (e.type === 'tool_call_start') { cls = 'tool'; icon = '🔧'; }
+        else if (e.type === 'tool_call_end') { cls = 'tool'; icon = '✅'; }
+        else if (e.type === 'acl_denied') { cls = 'denied'; icon = '🚫'; }
+        else if (e.type === 'hitl_interrupt') { cls = 'interrupt'; icon = '⏸️'; }
+        else if (e.type === 'hitl_resume') { cls = 'interrupt'; icon = '▶️'; }
+        else if (e.type === 'summary_compress') { cls = 'route'; icon = '📦'; }
+        else if (e.type === 'agent_start') { cls = 'route'; icon = '🤖'; }
+        else if (e.type === 'model_call_start') { cls = 'tool'; icon = '💭'; }
+        else if (e.type === 'model_call_end') { cls = 'tool'; icon = '💬'; }
+        return `<div class="event-item ${cls}">${icon} ${e.detail || e.type}</div>`;
     }).join('');
     listDiv.scrollTop = listDiv.scrollHeight;
 }
@@ -548,28 +636,86 @@ function renderEvents(events) {
 // ========== Demo Scripts ==========
 async function runDemo(type) {
     switch (type) {
+        // 场景 1：Visitor 越权 — ACL 拒绝
         case 'visitor_deny':
-            if (currentUser.username !== 'visitor') { alert('请先切换到 visitor 账号'); return; }
-            document.getElementById('chatInput').value = '删除订单 A-1001';
-            sendMessage(); break;
+            if (currentUser.username !== 'visitor') {
+                alert('请先用 visitor 账号登录（visitor / visitor123）');
+                return;
+            }
+            pushMessage(currentThread, 'system', '🎬 演示开始：visitor 尝试删除订单 → ACL 拒绝');
+            renderChat();
+            document.getElementById('chatInput').value = '删除订单A-1001';
+            await sendMessageAsync();
+            break;
+
+        // 场景 2：Admin 审批 — 高危工具审批
         case 'admin_approve':
-            if (currentUser.username !== 'admin') { alert('请先切换到 admin 账号'); return; }
-            document.getElementById('chatInput').value = '删除订单 A-1001';
-            sendMessage(); break;
+            if (currentUser.username !== 'admin') {
+                alert('请先用 admin 账号登录（admin / admin123）');
+                return;
+            }
+            pushMessage(currentThread, 'system', '🎬 演示开始：删除订单 → 触发审批弹窗 → 批准/拒绝');
+            renderChat();
+            document.getElementById('chatInput').value = '删除订单A-1001';
+            await sendMessageAsync();
+            break;
+
+        // 场景 3：不同工具路由 — Supervisor 路由到不同子 Agent
         case 'diff_tools':
-            document.getElementById('chatInput').value = '搜索日志中的error';
-            sendMessage(); break;
+            pushMessage(currentThread, 'system', '🎬 演示开始：依次调用不同工具，展示 Supervisor 路由');
+            renderChat();
+            for (const msg of ['计算 123*456', '上海天气怎么样', '查询我的订单']) {
+                document.getElementById('chatInput').value = msg;
+                await sendMessageAsync();
+                await sleep(500);
+            }
+            break;
+
+        // 场景 4：长对话裁剪 — 上下文管理 + LLM 摘要压缩
         case 'long_chat':
-            for (let i = 0; i < 10; i++) {
-                document.getElementById('chatInput').value = `这是第${i+1}条测试消息。时间 ${new Date().toLocaleTimeString()}`;
-                await sendMessageAsync(); await sleep(300);
-            } break;
+            pushMessage(currentThread, 'system', '🎬 演示开始：连续多轮对话 → 触发上下文裁剪 → 事件面板显示 summary_compress');
+            renderChat();
+            const chatMsgs = [
+                '你好，我是admin',
+                '查询我的订单',
+                '计算 99*88',
+                '北京天气怎么样',
+                '查询我的订单',
+                '计算 1024/8',
+                '查询我的订单',
+                '上海天气怎么样',
+                '查询我的订单',
+                '计算 256+512',
+            ];
+            for (let i = 0; i < chatMsgs.length; i++) {
+                document.getElementById('chatInput').value = chatMsgs[i];
+                await sendMessageAsync();
+                await sleep(300);
+            }
+            const eventItems = document.querySelectorAll('#eventList .event-item');
+            const hasCompress = Array.from(eventItems).some(el => el.textContent.includes('compress'));
+            if (hasCompress) {
+                pushMessage(currentThread, 'system', '✅ 上下文裁剪已触发！查看右侧运行事件面板的 📦 事件。');
+            } else {
+                pushMessage(currentThread, 'system', '💡 当前消息量尚未超过裁剪阈值。可继续对话，或启动时设低阈值：MAX_TOKENS=1500 SUMMARIZE_THRESHOLD_RATIO=0.5 ./agent-server.exe');
+            }
+            renderChat();
+            break;
+
+        // 场景 5：记忆管理 — 偏好保存 + 跨会话验证
         case 'memory':
-            if (currentUser.username !== 'admin') { alert('请先用 admin 登录'); return; }
-            document.getElementById('chatInput').value = '我喜欢用Python';
-            await sendMessageAsync(); await sleep(500);
-            document.getElementById('chatInput').value = '帮我写个脚本';
-            await sendMessageAsync(); refreshMemory(); break;
+            pushMessage(currentThread, 'system', '🎬 演示开始：表达偏好 → 保存记忆 → 验证跨会话记忆');
+            renderChat();
+            document.getElementById('chatInput').value = '我喜欢用Python，偏好深色主题';
+            await sendMessageAsync();
+            await sleep(500);
+            document.getElementById('chatInput').value = '我的偏好吗？';
+            await sendMessageAsync();
+            await sleep(500);
+            await refreshMemory();
+            pushMessage(currentThread, 'system', '💡 查看右侧 🧠 用户记忆面板确认偏好已保存。切换会话后再次询问偏好可验证跨会话记忆。');
+            renderChat();
+            break;
     }
 }
 
@@ -710,4 +856,37 @@ function confirmApiKey() {
 function cancelApiKey() {
     document.getElementById('apiKeyModal').style.display = 'none';
     pendingSwitchProfileId = null;
+}
+
+// ========== Context Token Bar ==========
+function updateTokenBar(info) {
+    const fill = document.getElementById('tokenBarFill');
+    const text = document.getElementById('tokenBarText');
+    const thresholdMark = document.getElementById('tokenBarThreshold');
+    if (!fill || !text) return;
+
+    const current = info.current || 0;
+    const max = info.max || 8000;
+    const threshold = info.threshold || Math.floor(max * 0.8);
+
+    // Bar width relative to max (cap at 100%)
+    const pct = Math.min(100, Math.round((current / max) * 100));
+    fill.style.width = pct + '%';
+
+    // Threshold marker position
+    const thresholdPct = Math.min(100, Math.round((threshold / max) * 100));
+    thresholdMark.style.left = thresholdPct + '%';
+
+    // Color by usage
+    fill.className = 'token-bar-fill';
+    if (info.compressed) {
+        fill.classList.add('compress');
+    } else if (current >= threshold) {
+        fill.classList.add('warn');
+    } else if (pct >= 70) {
+        fill.classList.add('warn');
+    }
+
+    const compressedBadge = info.compressed ? ' <span class="compressed-badge">📦 已压缩</span>' : '';
+    text.innerHTML = `上下文: ${current} / ${max} tokens（阈值 ${threshold}）${compressedBadge}`;
 }

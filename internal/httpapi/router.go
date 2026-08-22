@@ -39,7 +39,7 @@ func NewRouter(
 	return &Router{
 		authHandler:     NewAuthHandler(authSvc),
 		agentHandler:    NewAgentHandler(runner, memSvc),
-		approvalHandler: NewApprovalHandler(hitlSvc),
+		approvalHandler: NewApprovalHandler(hitlSvc, runner),
 		memoryHandler:   NewMemoryHandler(memSvc),
 		userHandler:     NewUserHandler(registry),
 		modelHandler:    NewModelHandler(modelSwitcher),

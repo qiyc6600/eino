@@ -49,6 +49,16 @@ func (s *Summarizer) ShouldSummarize(messages []Message, maxTokens int) bool {
 	return currentTokens > threshold
 }
 
+// CountTokens returns the estimated token count of the messages.
+func (s *Summarizer) CountTokens(messages []Message) int {
+	return s.counter.CountMessages(messages)
+}
+
+// ThresholdRatio returns the configured summarization threshold ratio.
+func (s *Summarizer) ThresholdRatio() float64 {
+	return s.summarizeThreshold
+}
+
 // SummarizeOldMessages takes old messages and produces a summary string.
 // When chatModel is available, calls the LLM to generate a semantic summary.
 // Otherwise, falls back to rule-based extraction.
