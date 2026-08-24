@@ -334,6 +334,7 @@ go test ./...
 
 | 文档 | 说明 |
 |------|------|
+| [`docs/agent-system-architecture.md`](docs/agent-system-architecture.md) | 从 Agent 运行时角度介绍总体架构、五大模块实现、调用链与生产化边界 |
 | [`docs/design.md`](docs/design.md) | 总体架构、模块设计、接口定义、隔离策略、恢复语义 |
 | [`docs/api.md`](docs/api.md) | 全部 API 端点、请求/响应示例 |
 | [`docs/demo-script.md`](docs/demo-script.md) | 6 个演示场景 + 5 分钟快速版 |
