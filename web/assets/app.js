@@ -381,6 +381,10 @@ async function chatStream(threadId, message) {
                                 }
                                 saveMessages(threadId, msgs);
                                 renderChat();
+                                // Show the approval modal immediately using the interrupt info
+                                // from the SSE response (don't wait for the approvals API round-trip).
+                                showApprovalModalFromInterrupt(interruptInfo);
+                                // Also refresh the full approvals list (async, updates sidebar + modal).
                                 refreshApprovals();
                             } else {
                                 // Normal completion — save complete message
@@ -519,6 +523,31 @@ function openApprovalModal() {
     const pending = currentApprovals.filter(a => a.Status === 'pending');
     if (pending.length === 0) return;
     renderApprovalCards('approvalModalList', pending);
+    modal.style.display = 'flex';
+}
+
+// Show the approval modal immediately using interrupt info from the SSE
+// response, without waiting for the /api/approvals round-trip.
+function showApprovalModalFromInterrupt(info) {
+    const modal = document.getElementById('approvalModal');
+    const card = document.createElement('div');
+    card.className = 'approval-card';
+    card.innerHTML = `
+        <div class="card-title">${info.type === 'tool' ? '🔧 ' : '📋 '}${info.tool_name || info.node_name || ''}</div>
+        <div class="card-detail">
+            ${info.arguments ? '参数：' + info.arguments + '<br>' : ''}
+            风险：high<br>
+            原因：${info.message || 'N/A'}
+        </div>
+        <div class="card-actions">
+            <input type="text" placeholder="拒绝原因（可选）" id="rr-${info.interrupt_id}">
+            <button class="btn btn-sm btn-approve" onclick="decideApproval('${info.interrupt_id}', true)">批准</button>
+            <button class="btn btn-sm btn-reject" onclick="decideApproval('${info.interrupt_id}', false)">拒绝</button>
+        </div>
+    `;
+    const list = document.getElementById('approvalModalList');
+    list.innerHTML = '';
+    list.appendChild(card);
     modal.style.display = 'flex';
 }
 
