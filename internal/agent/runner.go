@@ -459,6 +459,11 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 		return ChatRunResult{Status: StatusError, Answer: fmt.Sprintf("审批处理失败：%v", err)}
 	}
 
+	// Patch thread history: the interrupt stored an assistant message with tool_calls
+	// but no corresponding tool result. We must append the tool result now, otherwise
+	// subsequent LLM calls will 400 with "insufficient tool messages following tool_calls".
+	r.patchInterruptToolResult(authCtx, req, decision)
+
 	// Step 1: Determine the tool result to feed back into the ReAct loop
 	var toolResultContent string
 	var toolName string
@@ -1130,4 +1135,71 @@ func (r *Runner) buildSupervisorPrompt(roles []string) string {
 		strings.Join(agentLines, "\n")
 
 	return prompt
+}
+
+// patchInterruptToolResult fixes the thread history after an interrupt.
+// When a tool-level interrupt occurred, Chat() stored an assistant message with
+// tool_calls but no corresponding tool result. This violates the LLM API contract
+// (assistant+tool_calls must be followed by a tool message). We append the tool
+// result now so subsequent requests won't 400.
+func (r *Runner) patchInterruptToolResult(authCtx *auth.AuthContext, req *hitl.ApprovalRequest, decision hitl.ApprovalDecision) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	threadMsgs := r.threads[req.ThreadID]
+
+	// Find the last assistant message with tool_calls that has no matching tool result
+	var toolCallID string
+	var toolCallName string
+	for i := len(threadMsgs) - 1; i >= 0; i-- {
+		msg := threadMsgs[i]
+		if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
+			tc := msg.ToolCalls[len(msg.ToolCalls)-1]
+			toolCallID = tc.ID
+			toolCallName = tc.Function.Name
+			break
+		}
+	}
+	if toolCallID == "" {
+		return // no orphan tool_call found
+	}
+
+	// Check if a tool result already exists for this toolCallID
+	for _, msg := range threadMsgs {
+		if msg.Role == schema.Tool && msg.ToolCallID == toolCallID {
+			return // already patched
+		}
+	}
+
+	// Build the tool result content
+	var content string
+	if decision.Approved {
+		// Execute the tool to get real result
+		tool, found := r.registry.Get(req.ToolName)
+		if found {
+			toolCtx := map[string]any{"user_id": authCtx.UserID, "roles": authCtx.Roles}
+			result := tool.Fn(toolCtx, req.Arguments)
+			if result.Error != "" {
+				content = result.Error
+			} else {
+				content = result.Content
+			}
+		} else {
+			content = fmt.Sprintf("工具 %s 已批准并执行", req.ToolName)
+		}
+	} else {
+		content = "❌ 用户拒绝执行该操作"
+		if decision.Reason != "" {
+			content += "：" + decision.Reason
+		}
+	}
+
+	// Append the tool result message
+	threadMsgs = append(threadMsgs, &schema.Message{
+		Role:       schema.Tool,
+		Content:    content,
+		ToolCallID: toolCallID,
+		Name:       toolCallName,
+	})
+	r.threads[req.ThreadID] = threadMsgs
 }
