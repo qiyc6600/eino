@@ -266,6 +266,15 @@ async function sendMessage() {
 
     input.value = '';
 
+    // Notify user if there's a pending approval for this thread.
+    // The backend sanitizes orphaned tool_calls so the request will still work,
+    // but it's helpful to remind the user to resolve pending approvals.
+    const pendingForThread = (currentApprovals || []).filter(a => a.Status === 'pending' && a.ThreadID === currentThread);
+    if (pendingForThread.length > 0) {
+        pushMessage(currentThread, 'system', `⏸️ 提示：当前会话有 ${pendingForThread.length} 个待审批项，建议先在审批中心处理。`);
+        renderChat();
+    }
+
     // Save user message
     pushMessage(currentThread, 'user', message);
     renderChat();

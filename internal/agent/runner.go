@@ -55,6 +55,58 @@ type Interrupt struct {
 	Type        string `json:"type"`
 }
 
+// sanitizeMessages ensures every assistant message with tool_calls has
+// corresponding tool result messages following it. If any tool_call is
+// missing its result (e.g., because the run was interrupted before the tool
+// executed), a placeholder tool result is inserted. This prevents 400 errors
+// from the LLM API ("An assistant message with 'tool_calls' must be followed
+// by tool messages") when a thread contains orphaned tool_calls from
+// interrupted runs.
+func sanitizeMessages(messages []*schema.Message) []*schema.Message {
+	var result []*schema.Message
+
+	for i, msg := range messages {
+		result = append(result, msg)
+
+		// Only check assistant messages with tool_calls
+		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			continue
+		}
+
+		// Collect tool_call IDs that need results
+		neededIDs := make(map[string]bool)
+		for _, tc := range msg.ToolCalls {
+			neededIDs[tc.ID] = true
+		}
+
+		// Check subsequent messages for tool results
+		for j := i + 1; j < len(messages); j++ {
+			next := messages[j]
+			if next.Role == schema.Tool {
+				delete(neededIDs, next.ToolCallID)
+			}
+			// Stop scanning at the next assistant/user message boundary
+			// (tool results must immediately follow their tool_call)
+			if next.Role == schema.Assistant || next.Role == schema.User {
+				break
+			}
+		}
+
+		// Insert placeholder tool results for any missing IDs
+		if len(neededIDs) > 0 {
+			for id := range neededIDs {
+				placeholder := schema.ToolMessage(
+					"⏸️ 该操作已被中断，等待人工审批。如需继续，请在审批中心处理。",
+					id,
+				)
+				result = append(result, placeholder)
+			}
+		}
+	}
+
+	return result
+}
+
 // Runner is the main agent execution entry point.
 type Runner struct {
 	mu            sync.RWMutex
@@ -157,6 +209,14 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 	messages := []*schema.Message{schema.SystemMessage(systemContent)}
 	messages = append(messages, threadMessages...)
 	messages = append(messages, schema.UserMessage(userMessage))
+
+	// Sanitize the message history: insert placeholder tool results for any
+	// assistant tool_call that lacks a corresponding tool result. This happens
+	// when a previous run in this thread was interrupted (e.g., a delete_order
+	// request awaiting approval) and the user sends a new message before
+	// resolving it. Without this, the LLM API rejects the orphaned tool_call
+	// with a 400 error and the approval card never appears.
+	messages = sanitizeMessages(messages)
 
 	// Apply context compression before sending to the agent.
 	// Converts Eino schema.Message -> contextmgr.Message -> compress -> convert back.
@@ -405,6 +465,9 @@ func (r *Runner) ChatStream(authCtx *auth.AuthContext, threadID, userMessage str
 	messages := []*schema.Message{schema.SystemMessage(systemContent)}
 	messages = append(messages, threadMessages...)
 	messages = append(messages, schema.UserMessage(userMessage))
+
+	// Sanitize orphaned tool_calls from interrupted runs (see Chat()).
+	messages = sanitizeMessages(messages)
 
 	// Apply context compression before streaming
 	messages, _ = r.compressMessages(ctx, messages, nil)
@@ -1171,22 +1234,19 @@ func (r *Runner) patchInterruptToolResult(authCtx *auth.AuthContext, req *hitl.A
 		}
 	}
 
-	// Build the tool result content
+	// Build the tool result content.
+	// NOTE: we deliberately do NOT execute the real tool here. The actual
+	// execution happens later in this Resume() call — either in
+	// resolveNestedToolInterrupt (checkpoint path) or the thread-based
+	// fallback. Executing here too would run the tool TWICE, which breaks
+	// non-idempotent tools like delete_order (the second run finds the order
+	// already deleted and reports "not found", masking the real success).
+	// The outer thread only needs a syntactically valid tool result so the
+	// conversation history doesn't 400 on the next request; the real outcome
+	// is captured in the final assistant answer appended by the resume path.
 	var content string
 	if decision.Approved {
-		// Execute the tool to get real result
-		tool, found := r.registry.Get(req.ToolName)
-		if found {
-			toolCtx := map[string]any{"user_id": authCtx.UserID, "roles": authCtx.Roles}
-			result := tool.Fn(toolCtx, req.Arguments)
-			if result.Error != "" {
-				content = result.Error
-			} else {
-				content = result.Content
-			}
-		} else {
-			content = fmt.Sprintf("工具 %s 已批准并执行", req.ToolName)
-		}
+		content = fmt.Sprintf("✅ 操作已批准，正在执行 %s。", req.ToolName)
 	} else {
 		content = "❌ 用户拒绝执行该操作"
 		if decision.Reason != "" {

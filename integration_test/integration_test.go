@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/example/agent-eino-demo/internal/app"
@@ -239,14 +240,109 @@ func TestIntegration_ApprovalFlow(t *testing.T) {
 		"message":  "删除订单A-1001",
 		"threadId": "t_approval",
 	})
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	// GET pending approvals
+	// The chat response (non-streaming JSON) should report an interrupted run.
+	var chatResp map[string]any
+	json.NewDecoder(resp.Body).Decode(&chatResp)
+	if chatResp["status"] != "interrupted" {
+		t.Fatalf("expected status=interrupted for delete_order, got %v", chatResp["status"])
+	}
+
+	// GET pending approvals — should contain the delete_order approval.
 	resp2 := doGet(t, server.URL, "/api/approvals", sessionID)
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != 200 {
 		t.Fatalf("expected 200 for approvals list, got %d", resp2.StatusCode)
+	}
+
+	var approvals []map[string]any
+	json.NewDecoder(resp2.Body).Decode(&approvals)
+	if len(approvals) == 0 {
+		t.Fatal("expected at least 1 pending approval after delete_order interrupt")
+	}
+
+	// Regression test for the orphaned-tool_call bug: send a second delete
+	// request to the SAME thread without resolving the first approval.
+	// Previously this caused a 400 error from the LLM API ("An assistant
+	// message with 'tool_calls' must be followed by tool messages") because
+	// the thread contained an orphaned tool_call. sanitizeMessages should now
+	// insert a placeholder tool result so the request succeeds.
+	resp3 := doPost(t, server.URL, "/api/agent/chat", sessionID, map[string]string{
+		"message":  "删除订单B-2003",
+		"threadId": "t_approval",
+	})
+	defer resp3.Body.Close()
+
+	var chatResp3 map[string]any
+	json.NewDecoder(resp3.Body).Decode(&chatResp3)
+	if chatResp3["status"] == nil {
+		t.Errorf("expected a valid response for same-thread retry, got: %v", chatResp3)
+	}
+	if answer, _ := chatResp3["answer"].(string); strings.Contains(answer, "400 Bad Request") ||
+		strings.Contains(answer, "tool_calls") {
+		t.Errorf("same-thread retry hit the orphaned tool_call 400 error: %v", chatResp3["answer"])
+	}
+}
+
+// TestIntegration_ApprovalResumeNoDoubleExec is a regression test for the
+// double-execution bug: patchInterruptToolResult and resolveNestedToolInterrupt
+// both executed delete_order, so the second call found the order already deleted
+// and returned "not found" instead of the real success result.
+func TestIntegration_ApprovalResumeNoDoubleExec(t *testing.T) {
+	application := createTestApp(t)
+	server := httptest.NewServer(application.Router.Handler())
+	defer server.Close()
+
+	sessionID := doLogin(t, server.URL, "admin", "admin123")
+
+	// 1. Request delete of A-1002 (which exists in seed data for u_admin)
+	resp := doPost(t, server.URL, "/api/agent/chat", sessionID, map[string]string{
+		"message":  "删除订单A-1002",
+		"threadId": "t_dbl_exec",
+	})
+	defer resp.Body.Close()
+
+	var chatResp map[string]any
+	json.NewDecoder(resp.Body).Decode(&chatResp)
+	if chatResp["status"] != "interrupted" {
+		t.Fatalf("expected status=interrupted, got %v", chatResp["status"])
+	}
+
+	// 2. Get the interrupt ID from approvals
+	resp2 := doGet(t, server.URL, "/api/approvals", sessionID)
+	defer resp2.Body.Close()
+	var approvals []map[string]any
+	json.NewDecoder(resp2.Body).Decode(&approvals)
+	if len(approvals) == 0 {
+		t.Fatal("expected at least 1 pending approval")
+	}
+	interruptID, _ := approvals[0]["InterruptID"].(string)
+
+	// 3. Approve the delete — the tool should execute ONCE and succeed
+	decReq, _ := json.Marshal(map[string]any{"approved": true, "reason": ""})
+	req, _ := http.NewRequest("POST", server.URL+"/api/approvals/"+interruptID+"/decision", bytes.NewReader(decReq))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	req.Header.Set("Content-Type", "application/json")
+	resp3, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("approve request failed: %v", err)
+	}
+	defer resp3.Body.Close()
+
+	var approveResp map[string]any
+	json.NewDecoder(resp3.Body).Decode(&approveResp)
+	answer, _ := approveResp["answer"].(string)
+
+	// The answer should indicate SUCCESS (order deleted), NOT "not found"
+	// (which would happen if the tool ran twice and the second call found
+	// the order already gone).
+	if strings.Contains(answer, "not found") || strings.Contains(answer, "未找到") || strings.Contains(answer, "不存在") {
+		t.Errorf("approve returned 'not found' — tool was likely executed twice: %s", answer)
+	}
+	if approveResp["approved"] != true {
+		t.Errorf("expected approved=true, got %v", approveResp["approved"])
 	}
 }
 
