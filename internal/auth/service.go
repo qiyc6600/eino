@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,8 +16,11 @@ const DefaultSessionTTL = 30 * time.Minute
 
 // Service provides authentication operations.
 type Service struct {
-	store      SessionStore
-	rbac       *RBACManager
+	store SessionStore
+	rbac  *RBACManager
+	// usersMu guards the users map: login, user management, and role
+	// updates arrive on concurrent HTTP goroutines.
+	usersMu    sync.RWMutex
 	users      map[string]*User // username -> User
 	sessionTTL time.Duration    // sliding session lifetime
 }
@@ -57,7 +61,9 @@ func (s *Service) seedUsers() {
 
 // Login validates credentials and creates a session.
 func (s *Service) Login(ctx context.Context, username, password string) (*LoginResponse, error) {
+	s.usersMu.RLock()
 	user, ok := s.users[username]
+	s.usersMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("invalid credentials")
 	}
@@ -129,12 +135,16 @@ func (s *Service) Logout(ctx context.Context, sessionID string) error {
 
 // GetUser retrieves a user by username.
 func (s *Service) GetUser(ctx context.Context, username string) (*User, bool) {
+	s.usersMu.RLock()
+	defer s.usersMu.RUnlock()
 	u, ok := s.users[username]
 	return u, ok
 }
 
 // GetUserByID retrieves a user by ID.
 func (s *Service) GetUserByID(ctx context.Context, userID string) (*User, bool) {
+	s.usersMu.RLock()
+	defer s.usersMu.RUnlock()
 	for _, u := range s.users {
 		if u.ID == userID {
 			return u, true
@@ -145,6 +155,7 @@ func (s *Service) GetUserByID(ctx context.Context, userID string) (*User, bool) 
 
 // ListUsers returns all users (without password hashes).
 func (s *Service) ListUsers(ctx context.Context) []UserPublic {
+	s.usersMu.RLock()
 	result := make([]UserPublic, 0, len(s.users))
 	for _, u := range s.users {
 		result = append(result, UserPublic{
@@ -153,11 +164,15 @@ func (s *Service) ListUsers(ctx context.Context) []UserPublic {
 			Roles:    u.Roles,
 		})
 	}
+	s.usersMu.RUnlock()
 	return result
 }
 
 // CreateUser adds a new user.
 func (s *Service) CreateUser(ctx context.Context, username, password string, roles []string) (*UserPublic, error) {
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+
 	if _, exists := s.users[username]; exists {
 		return nil, fmt.Errorf("user already exists: %s", username)
 	}
@@ -173,6 +188,9 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, rol
 
 // UpdateUserRoles updates the roles of a user.
 func (s *Service) UpdateUserRoles(ctx context.Context, userID string, roles []string) error {
+	s.usersMu.Lock()
+	defer s.usersMu.Unlock()
+
 	for _, u := range s.users {
 		if u.ID == userID {
 			u.Roles = roles
