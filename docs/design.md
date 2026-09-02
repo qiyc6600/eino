@@ -384,13 +384,26 @@ type MemoryStore interface {
 
 ### 5.2 工具参数不可信原则
 
-`user_id` 从 `AuthContext` 中提取（通过 `WithToolContext` 注入 Go context），**不从工具参数中读取**。这防止用户伪造 `user_id` 访问他人数据。
+工具身份由框架从 Go context 中间件注入的 `AuthContext` 派生为**类型化的 `auth.ToolIdentity`**（UserID/Roles/ThreadID/RunID），经 `ToolFunc` 签名强制传入工具，**不从工具参数中读取**，也没有可伪造的非类型化 map 通道。这防止用户伪造 `user_id` 访问他人数据。
 
 ```go
-// 工具函数内部
-userID, _ := ctx["user_id"].(string)  // ← 从 AuthContext 透传，不信任参数
-orders := store.QueryByUser(userID)     // ← 只能查自己的数据
+// 工具函数内部（identity 由框架构造，无法从 LLM 参数伪造）
+if identity == nil || identity.UserID == "" { ... }  // ← 无身份即拒绝
+orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的数据
 ```
+
+### 5.3 框架强制机制（非调用方自觉）
+
+隔离不是靠各处代码"记得用 AuthContext.UserID"，而是由框架在四个层面强制：
+
+| 层 | 机制 | 效果 |
+|----|------|------|
+| 工具边界 | `ToolFunc func(*auth.ToolIdentity, string) ToolResult` — 身份是类型化参数，只能由框架从 `AuthContext` 构造（`auth.ToolIdentityFromContext`），无身份（nil）即拒绝 | 工具拿不到伪造的身份 |
+| 运行时资源 | 线程按 `(userID, threadID)` 复合键存储（`threadStore`）；run 事件记录属主（`runOwners`）；审批/恢复校验 `req.UserID == 当前用户` | 任何用户无法读/删他人线程、事件、审批 |
+| 存储层 | `auth.CheckUserScope(ctx, userID)`：当 ctx 携带身份时，所有 Memory/Checkpoint/Vector 访问的 userID 参数必须与之一致，否则报"cross-user access denied" | 即使上游某处传错 userID，框架调用链内也无法跨用户读写 |
+| ACL 预检 | RBAC 预检无条件执行（空角色/无身份一律拒绝，无旁路） | 无角色的调用不可能触达工具 |
+
+> 存储层校验对"无身份 ctx"（内部后台任务，如快照落盘 goroutine）放行，避免误伤合法的框架内部调用。
 
 ---
 

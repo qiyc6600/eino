@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/example/agent-eino-demo/internal/auth"
 	"strings"
 )
 
@@ -45,7 +46,7 @@ var mockLogs = []string{
 	"[2026-07-20 10:30:00] INFO  system: Scheduled backup completed",
 }
 
-func executeGrep(ctx map[string]any, arguments string) ToolResult {
+func executeGrep(_ *auth.ToolIdentity, arguments string) ToolResult {
 	var args GrepArgs
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return BusinessErrorResult("grep", "invalid arguments: "+err.Error())

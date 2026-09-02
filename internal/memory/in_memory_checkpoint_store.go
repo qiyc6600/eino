@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // InMemoryCheckpointStore is the default in-memory implementation of CheckpointStore.
+// Every method rejects calls whose userID (from the checkpoint key) does not
+// match the authenticated identity in ctx (auth.CheckUserScope).
 type InMemoryCheckpointStore struct {
 	mu          sync.RWMutex
 	checkpoints map[string]Checkpoint // key: userID:threadID:runID:step
@@ -27,6 +31,10 @@ func checkpointKey(k CheckpointKey) string {
 // Save stores a checkpoint. If a checkpoint with the same key already exists,
 // it is updated (the Step field prevents accidental overwrites of different steps).
 func (s *InMemoryCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) error {
+	if err := auth.CheckUserScope(ctx, checkpoint.UserID); err != nil {
+		return err
+	}
+
 	key := checkpointKey(CheckpointKey{
 		UserID:   checkpoint.UserID,
 		ThreadID: checkpoint.ThreadID,
@@ -48,6 +56,10 @@ func (s *InMemoryCheckpointStore) Save(ctx context.Context, checkpoint Checkpoin
 
 // Load retrieves a checkpoint by key.
 func (s *InMemoryCheckpointStore) Load(ctx context.Context, key CheckpointKey) (Checkpoint, bool, error) {
+	if err := auth.CheckUserScope(ctx, key.UserID); err != nil {
+		return Checkpoint{}, false, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -57,6 +69,10 @@ func (s *InMemoryCheckpointStore) Load(ctx context.Context, key CheckpointKey) (
 
 // Delete removes a checkpoint by key.
 func (s *InMemoryCheckpointStore) Delete(ctx context.Context, key CheckpointKey) error {
+	if err := auth.CheckUserScope(ctx, key.UserID); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -66,6 +82,10 @@ func (s *InMemoryCheckpointStore) Delete(ctx context.Context, key CheckpointKey)
 
 // ListByThread returns all checkpoints for a user+thread, sorted by CreatedAt descending (newest first).
 func (s *InMemoryCheckpointStore) ListByThread(ctx context.Context, userID, threadID string) ([]Checkpoint, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

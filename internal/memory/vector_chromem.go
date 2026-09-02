@@ -7,6 +7,8 @@ import (
 	"time"
 
 	chromem "github.com/philippgille/chromem-go"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // ChromemVectorStore implements VectorStore using chromem-go with real embeddings.
@@ -64,6 +66,10 @@ func NewChromemVectorStoreWithOpenAI(modelName, baseURL, apiKey string) (*Chrome
 
 // Store saves a memory entry with its embedding vector via chromem-go.
 func (s *ChromemVectorStore) Store(ctx context.Context, userID, content string, metadata map[string]any) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+
 	collectionName := fmt.Sprintf("user_%s", userID)
 
 	// Get or create collection for this user
@@ -92,6 +98,10 @@ func (s *ChromemVectorStore) Store(ctx context.Context, userID, content string, 
 
 // Query returns the top-K most similar memories for a query string.
 func (s *ChromemVectorStore) Query(ctx context.Context, userID, query string, topK int) ([]VectorResult, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	collectionName := fmt.Sprintf("user_%s", userID)
 
 	collection, err := s.db.GetOrCreateCollection(collectionName, nil, s.embedFunc)

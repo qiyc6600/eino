@@ -119,8 +119,9 @@ type Runner struct {
 	summarizer    *contextmgr.Summarizer
 	counter       contextmgr.TokenCounter
 	runs          map[string]*ChatRunResult
+	runOwners     map[string]string        // runID -> owner userID (isolation for run events)
 	resumeResults map[string]ChatRunResult // interruptID -> Resume result (for idempotent retry)
-	threads       map[string][]*schema.Message // threadID -> conversation history (Eino schema.Message)
+	threads       *threadStore             // per-user conversation threads
 	maxTokens     int
 }
 
@@ -145,8 +146,9 @@ func NewRunner(
 		summarizer:    summarizer,
 		counter:       contextmgr.NewSimpleTokenCounter(),
 		runs:          make(map[string]*ChatRunResult),
+		runOwners:     make(map[string]string),
 		resumeResults: make(map[string]ChatRunResult),
-		threads:       make(map[string][]*schema.Message),
+		threads:       newThreadStore(),
 		maxTokens:     maxTokens,
 	}
 }
@@ -177,8 +179,8 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 	runID := "r_" + uuid.New().String()[:8]
 	recorder := NewEventRecorder(runID)
 
-	// Load thread history
-	threadMessages := r.getThreadMessages(threadID)
+	// Load thread history (scoped to the calling user)
+	threadMessages := r.threads.Copy(authCtx.UserID, threadID)
 
 	// Build context for tool execution (injected via Go context)
 	ctx := context.Background()
@@ -386,8 +388,9 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 
 		r.mu.Lock()
 		r.runs[runID] = &runResult
-		r.threads[threadID] = threadMessagesWithToolCall
+		r.runOwners[runID] = authCtx.UserID
 		r.mu.Unlock()
+		r.threads.Replace(authCtx.UserID, threadID, threadMessagesWithToolCall)
 
 		// Save full SteppedRunState to checkpoint for crash recovery.
 		// This enables resuming an interrupted run even after a process restart,
@@ -427,8 +430,9 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 
 	r.mu.Lock()
 	r.runs[runID] = &runResult
-	r.threads[threadID] = savedThreadMessages
+	r.runOwners[runID] = authCtx.UserID
 	r.mu.Unlock()
+	r.threads.Replace(authCtx.UserID, threadID, savedThreadMessages)
 
 	// Save conversation snapshot for crash recovery
 	go func() {
@@ -445,7 +449,7 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 // Returns a schema.StreamReader[*schema.Message] for the caller to consume chunks.
 // The caller is responsible for saving messages to thread history after streaming completes.
 func (r *Runner) ChatStream(authCtx *auth.AuthContext, threadID, userMessage string) (*schema.StreamReader[*schema.Message], error) {
-	threadMessages := r.getThreadMessages(threadID)
+	threadMessages := r.threads.Copy(authCtx.UserID, threadID)
 
 	ctx := context.Background()
 	ctx = injectAuthContext(ctx, authCtx, threadID, "r_stream")
@@ -474,20 +478,14 @@ func (r *Runner) ChatStream(authCtx *auth.AuthContext, threadID, userMessage str
 
 	// Save user message
 	threadMessages = append(threadMessages, schema.UserMessage(userMessage))
-	r.mu.Lock()
-	r.threads[threadID] = threadMessages
-	r.mu.Unlock()
+	r.threads.Replace(authCtx.UserID, threadID, threadMessages)
 
 	return r.supervisor.Stream(ctx, messages)
 }
 
 // SaveAssistantMessage persists an assistant message to thread history.
-func (r *Runner) SaveAssistantMessage(threadID, content string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	threadMessages := r.threads[threadID]
-	threadMessages = append(threadMessages, schema.AssistantMessage(content, nil))
-	r.threads[threadID] = threadMessages
+func (r *Runner) SaveAssistantMessage(userID, threadID, content string) {
+	r.threads.Append(userID, threadID, schema.AssistantMessage(content, nil))
 }
 
 // Resume resumes an interrupted run after an approval decision.
@@ -501,6 +499,13 @@ func (r *Runner) SaveAssistantMessage(threadID, content string) {
 func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision hitl.ApprovalDecision) ChatRunResult {
 	req, ok := r.hitlSvc.GetApproval(interruptID)
 	if !ok {
+		return ChatRunResult{Status: StatusError, Answer: "审批请求不存在"}
+	}
+
+	// Ownership check: only the user who triggered the interrupt may approve
+	// or reject it. Non-owners get the same "not found" answer so interrupt
+	// IDs of other users are not even confirmed to exist.
+	if req.UserID != authCtx.UserID {
 		return ChatRunResult{Status: StatusError, Answer: "审批请求不存在"}
 	}
 
@@ -572,11 +577,9 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 
 				if steppedState.Done {
 					// Save final state
-					threadMessages := r.getThreadMessages(req.ThreadID)
+					threadMessages := r.threads.Copy(authCtx.UserID, req.ThreadID)
 					threadMessages = append(threadMessages, schema.AssistantMessage(steppedState.Answer, nil))
-					r.mu.Lock()
-					r.threads[req.ThreadID] = threadMessages
-					r.mu.Unlock()
+					r.threads.Replace(authCtx.UserID, req.ThreadID, threadMessages)
 
 					result := ChatRunResult{
 						RunID:  req.RunID,
@@ -687,11 +690,9 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 			}
 
 			if steppedState.Done {
-				threadMessages := r.getThreadMessages(req.ThreadID)
+				threadMessages := r.threads.Copy(authCtx.UserID, req.ThreadID)
 				threadMessages = append(threadMessages, schema.AssistantMessage(steppedState.Answer, nil))
-				r.mu.Lock()
-				r.threads[req.ThreadID] = threadMessages
-				r.mu.Unlock()
+				r.threads.Replace(authCtx.UserID, req.ThreadID, threadMessages)
 				result := ChatRunResult{RunID: req.RunID, Status: StatusCompleted, Answer: steppedState.Answer}
 				r.mu.Lock()
 				r.resumeResults[interruptID] = result
@@ -714,8 +715,8 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 			return ChatRunResult{Status: StatusError, Answer: fmt.Sprintf("工具 %s 不存在", req.ToolName)}
 		}
 
-		toolCtx := map[string]any{"user_id": authCtx.UserID, "roles": authCtx.Roles}
-		result := tool.Fn(toolCtx, req.Arguments)
+		identity := auth.ToolIdentityFromContext(ctx)
+		result := tool.Fn(identity, req.Arguments)
 		toolName = req.ToolName
 
 		if result.Error != "" {
@@ -735,7 +736,7 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	// Step 2: Load thread messages and reconstruct the conversation
 	// Chat() already saved the assistant message with tool_calls to the thread
 	// when it detected the interrupt. So we just need to append the tool result.
-	threadMessages := r.getThreadMessages(req.ThreadID)
+	threadMessages := r.threads.Copy(authCtx.UserID, req.ThreadID)
 
 	// Generate ToolCallID if not already set (for backward compat)
 	toolCallID := req.ToolCallID
@@ -817,9 +818,7 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 
 	// Step 4: Save the final assistant message to thread history
 	threadMessages = append(threadMessages, schema.AssistantMessage(result.Answer, nil))
-	r.mu.Lock()
-	r.threads[req.ThreadID] = threadMessages
-	r.mu.Unlock()
+	r.threads.Replace(authCtx.UserID, req.ThreadID, threadMessages)
 
 	finalResult := ChatRunResult{
 		RunID:  req.RunID,
@@ -855,8 +854,8 @@ func (r *Runner) resolveNestedToolInterrupt(ctx context.Context, authCtx *auth.A
 		if !found {
 			return fmt.Errorf("工具 %s 不存在", req.ToolName)
 		}
-		toolCtx := map[string]any{"user_id": authCtx.UserID, "roles": authCtx.Roles}
-		result := tool.Fn(toolCtx, req.Arguments)
+		identity := auth.ToolIdentityFromContext(ctx)
+		result := tool.Fn(identity, req.Arguments)
 		if result.Error != "" {
 			content = result.Error
 		} else {
@@ -879,60 +878,43 @@ func (r *Runner) resolveNestedToolInterrupt(ctx context.Context, authCtx *auth.A
 	return nil
 }
 
-// GetRun returns a stored run result.
-func (r *Runner) GetRun(runID string) (*ChatRunResult, bool) {
+// GetRun returns a stored run result, but only when it belongs to userID.
+// Runs of other users are reported as not found so run IDs (short, guessable)
+// leak neither events nor existence across users.
+func (r *Runner) GetRun(runID, userID string) (*ChatRunResult, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.runOwners[runID] != userID {
+		return nil, false
+	}
 	result, ok := r.runs[runID]
 	return result, ok
 }
 
-// GetThreadMessages returns messages for a thread.
-func (r *Runner) GetThreadMessages(threadID string) []*schema.Message {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.threads[threadID]
+// GetThreadMessages returns messages for the user's thread.
+func (r *Runner) GetThreadMessages(userID, threadID string) []*schema.Message {
+	return r.threads.Copy(userID, threadID)
 }
 
-func (r *Runner) getThreadMessages(threadID string) []*schema.Message {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	msgs := r.threads[threadID]
-	result := make([]*schema.Message, len(msgs))
-	copy(result, msgs)
-	return result
+// CreateThread idempotently creates a thread in the user's namespace.
+func (r *Runner) CreateThread(userID, threadID string) {
+	r.threads.Create(userID, threadID)
 }
 
-// CreateThread creates a new thread.
-func (r *Runner) CreateThread(threadID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.threads[threadID]; !ok {
-		r.threads[threadID] = []*schema.Message{}
-	}
+// DeleteThread removes the user's thread. Returns false when the user has
+// no such thread (a thread owned by another user is never deleted).
+func (r *Runner) DeleteThread(userID, threadID string) bool {
+	return r.threads.Delete(userID, threadID)
 }
 
-// DeleteThread removes a thread and its messages.
-func (r *Runner) DeleteThread(threadID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.threads, threadID)
-}
-
-// ListThreads returns all thread IDs.
-func (r *Runner) ListThreads() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	ids := make([]string, 0, len(r.threads))
-	for id := range r.threads {
-		ids = append(ids, id)
-	}
-	return ids
+// ListThreads returns the thread IDs owned by the user.
+func (r *Runner) ListThreads(userID string) []string {
+	return r.threads.List(userID)
 }
 
 // ThreadMessagesJSON returns thread messages as JSON-serializable maps.
-func (r *Runner) ThreadMessagesJSON(threadID string) []map[string]any {
-	msgs := r.GetThreadMessages(threadID)
+func (r *Runner) ThreadMessagesJSON(userID, threadID string) []map[string]any {
+	msgs := r.GetThreadMessages(userID, threadID)
 	result := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		result = append(result, map[string]any{
@@ -943,20 +925,11 @@ func (r *Runner) ThreadMessagesJSON(threadID string) []map[string]any {
 	return result
 }
 
-// injectAuthContext injects auth context values into the Go context for tool execution.
-// Uses the exported auth.ContextKey so all packages can read the values.
+// injectAuthContext injects the authenticated identity into the Go context
+// for the whole agent run. The AuthContext copy carries ThreadID/RunID so the
+// typed ToolIdentity derived downstream (tools, ACL, HITL) is complete.
 func injectAuthContext(ctx context.Context, authCtx *auth.AuthContext, threadID, runID string) context.Context {
-	// Inject AuthContext itself (for auth checks)
-	ctx = auth.WithAuthContext(ctx, authCtx)
-	// Inject tool context map (for tool execution — user_id, roles, etc.)
-	toolCtxMap := map[string]any{
-		"user_id":   authCtx.UserID,
-		"roles":     authCtx.Roles,
-		"thread_id": threadID,
-		"run_id":    runID,
-	}
-	ctx = auth.WithToolContext(ctx, toolCtxMap)
-	return ctx
+	return auth.WithAuthContext(ctx, authCtx.WithThread(threadID).WithRun(runID))
 }
 
 // isRateLimitError checks if the error message indicates a 429 rate limit.
@@ -1206,10 +1179,7 @@ func (r *Runner) buildSupervisorPrompt(roles []string) string {
 // (assistant+tool_calls must be followed by a tool message). We append the tool
 // result now so subsequent requests won't 400.
 func (r *Runner) patchInterruptToolResult(authCtx *auth.AuthContext, req *hitl.ApprovalRequest, decision hitl.ApprovalDecision) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	threadMsgs := r.threads[req.ThreadID]
+	threadMsgs := r.threads.Copy(authCtx.UserID, req.ThreadID)
 
 	// Find the last assistant message with tool_calls that has no matching tool result
 	var toolCallID string
@@ -1261,5 +1231,5 @@ func (r *Runner) patchInterruptToolResult(authCtx *auth.AuthContext, req *hitl.A
 		ToolCallID: toolCallID,
 		Name:       toolCallName,
 	})
-	r.threads[req.ThreadID] = threadMsgs
+	r.threads.Replace(authCtx.UserID, req.ThreadID, threadMsgs)
 }

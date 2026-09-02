@@ -33,11 +33,19 @@ func (h *ApprovalHandler) ListApprovals(w http.ResponseWriter, r *http.Request) 
 }
 
 // GetApproval handles GET /api/approvals/{interruptId}
+// Only the requesting user can see the approval; other users' approvals
+// return 404 so interrupt IDs are not confirmed to exist cross-user.
 func (h *ApprovalHandler) GetApproval(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
 	interruptID := extractPathSuffix(r.URL.Path, "/api/approvals/")
 
 	req, ok := h.hitlSvc.GetApproval(interruptID)
-	if !ok {
+	if !ok || req.UserID != ac.UserID {
 		writeError(w, http.StatusNotFound, "approval not found")
 		return
 	}

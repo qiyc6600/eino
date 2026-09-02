@@ -334,8 +334,10 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 			continue
 		}
 
-		// ACL check: verify the user's roles permit this tool/sub-agent
-		if r.rbac != nil && len(roles) > 0 {
+		// ACL check: verify the user's roles permit this tool/sub-agent.
+		// Runs whenever the framework has an RBAC manager — an identity with
+		// no roles (or no identity at all) is denied here, never bypassed.
+		if r.rbac != nil {
 			toolName := tc.Name
 			if entry.IsSubAgent {
 				// For sub-agents, check if the user has permission for ANY tool
@@ -507,15 +509,11 @@ func (r *SteppedRunner) executeTool(ctx context.Context, tc ToolCallInfo) string
 		return fmt.Sprintf(`{"error":"tool %s not found"}`, tc.Name)
 	}
 
-	// Build tool context from auth context if available
-	toolCtx := map[string]any{}
-	ac := auth.FromContext(ctx)
-	if ac != nil {
-		toolCtx["user_id"] = ac.UserID
-		toolCtx["roles"] = ac.Roles
-	}
+	// Typed identity derived from the authenticated context; nil when the
+	// caller chain carries no identity, which tools reject.
+	identity := auth.ToolIdentityFromContext(ctx)
 
-	result := regTool.Fn(toolCtx, tc.Arguments)
+	result := regTool.Fn(identity, tc.Arguments)
 	if result.Error != "" {
 		return result.Error
 	}

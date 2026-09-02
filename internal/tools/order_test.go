@@ -3,6 +3,8 @@ package tools
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 func TestOrderStore_UserIsolation(t *testing.T) {
@@ -72,7 +74,7 @@ func TestQueryOrderTool_OnlyOwnOrders(t *testing.T) {
 	}
 
 	// Admin queries own orders
-	adminCtx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	adminCtx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 	result := tool.Fn(adminCtx, "{}")
 	if result.Error != "" {
 		t.Errorf("admin query failed: %s", result.Error)
@@ -88,7 +90,7 @@ func TestQueryOrderTool_OnlyOwnOrders(t *testing.T) {
 	}
 
 	// Visitor queries own orders
-	visitorCtx := map[string]any{"user_id": "u_visitor", "roles": []string{"visitor"}}
+	visitorCtx := &auth.ToolIdentity{UserID: "u_visitor", Roles: []string{"visitor"}}
 	result2 := tool.Fn(visitorCtx, "{}")
 	if result2.Error != "" {
 		t.Errorf("visitor query failed: %s", result2.Error)
@@ -106,7 +108,7 @@ func TestQueryOrderTool_SpecificOrder(t *testing.T) {
 	registry.Register(NewQueryOrderTool(orderStore))
 
 	tool, _ := registry.Get("query_order")
-	ctx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 
 	result := tool.Fn(ctx, `{"order_id":"A-1001"}`)
 	if result.Error != "" {
@@ -120,7 +122,7 @@ func TestQueryOrderTool_MissingUserID(t *testing.T) {
 	registry.Register(NewQueryOrderTool(orderStore))
 
 	tool, _ := registry.Get("query_order")
-	ctx := map[string]any{"roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "", Roles: []string{"admin"}}
 
 	result := tool.Fn(ctx, "{}")
 	if result.Error == "" {
@@ -137,7 +139,7 @@ func TestDeleteOrderTool_Success(t *testing.T) {
 	registry.Register(NewDeleteOrderTool(orderStore))
 
 	tool, _ := registry.Get("delete_order")
-	ctx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 
 	result := tool.Fn(ctx, `{"order_id":"A-1001"}`)
 	if result.Error != "" {
@@ -154,7 +156,7 @@ func TestDeleteOrderTool_MissingOrderID(t *testing.T) {
 	registry.Register(NewDeleteOrderTool(orderStore))
 
 	tool, _ := registry.Get("delete_order")
-	ctx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 
 	result := tool.Fn(ctx, "{}")
 	if result.Error == "" {
@@ -168,7 +170,7 @@ func TestDeleteOrderTool_OtherUsersOrder(t *testing.T) {
 	registry.Register(NewDeleteOrderTool(orderStore))
 
 	tool, _ := registry.Get("delete_order")
-	ctx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 
 	result := tool.Fn(ctx, `{"order_id":"B-2001"}`)
 	if result.Error == "" {
@@ -181,7 +183,7 @@ func TestCalculatorTool(t *testing.T) {
 	registry.Register(NewCalculatorTool())
 
 	tool, _ := registry.Get("calculator")
-	ctx := map[string]any{"user_id": "u_admin", "roles": []string{"admin"}}
+	ctx := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}}
 
 	tests := []struct {
 		expr     string

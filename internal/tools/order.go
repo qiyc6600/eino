@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // OrderArgs represents arguments for order tools.
@@ -97,11 +99,11 @@ func NewQueryOrderTool(store *OrderStore) RegisteredTool {
 				}
 			}`,
 		},
-		Fn: func(ctx map[string]any, arguments string) ToolResult {
-			userID, _ := ctx["user_id"].(string)
-			if userID == "" {
-				return SystemErrorResult("query_order", "missing user_id in context", "")
+		Fn: func(identity *auth.ToolIdentity, arguments string) ToolResult {
+			if identity == nil || identity.UserID == "" {
+				return SystemErrorResult("query_order", "missing authenticated user identity", "")
 			}
+			userID := identity.UserID
 
 			var args OrderArgs
 			json.Unmarshal([]byte(arguments), &args)
@@ -148,11 +150,11 @@ func NewDeleteOrderTool(store *OrderStore) RegisteredTool {
 				"required": ["order_id"]
 			}`,
 		},
-		Fn: func(ctx map[string]any, arguments string) ToolResult {
-			userID, _ := ctx["user_id"].(string)
-			if userID == "" {
-				return SystemErrorResult("delete_order", "missing user_id in context", "")
+		Fn: func(identity *auth.ToolIdentity, arguments string) ToolResult {
+			if identity == nil || identity.UserID == "" {
+				return SystemErrorResult("delete_order", "missing authenticated user identity", "")
 			}
+			userID := identity.UserID
 
 			var args OrderArgs
 			if err := json.Unmarshal([]byte(arguments), &args); err != nil {

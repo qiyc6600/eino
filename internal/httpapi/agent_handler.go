@@ -53,7 +53,9 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	if req.ThreadID == "" {
 		req.ThreadID = "t_default"
 	}
-	ac.ThreadID = req.ThreadID
+	// Copy-on-write: never mutate the shared AuthContext in place —
+	// the pointer is captured by goroutines (preference extraction, SSE).
+	ac = ac.WithThread(req.ThreadID)
 
 	if req.Stream {
 		h.chatStream(w, r, ac, &req)
@@ -132,10 +134,16 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 
 // GetRunEvents handles GET /api/agent/runs/{runId}/events
 func (h *AgentHandler) GetRunEvents(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
 	runID := extractPathSuffix(r.URL.Path, "/api/agent/runs/")
 	runID = trimSuffix(runID, "/events")
 
-	result, ok := h.runner.GetRun(runID)
+	result, ok := h.runner.GetRun(runID, ac.UserID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
@@ -186,7 +194,14 @@ func (h *AgentHandler) Resume(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetThreadMessages handles GET /api/chat/{threadId}/messages
+// Threads are namespaced per user — only the owning user's thread is visible.
 func (h *AgentHandler) GetThreadMessages(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
 	threadID := extractPathSuffix(r.URL.Path, "/api/chat/")
 	threadID = trimSuffix(threadID, "/messages")
 
@@ -195,7 +210,7 @@ func (h *AgentHandler) GetThreadMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	messages := h.runner.ThreadMessagesJSON(threadID)
+	messages := h.runner.ThreadMessagesJSON(ac.UserID, threadID)
 	if messages == nil {
 		messages = []map[string]any{}
 	}
@@ -204,7 +219,13 @@ func (h *AgentHandler) GetThreadMessages(w http.ResponseWriter, r *http.Request)
 
 // ListThreads handles GET /api/chat/threads
 func (h *AgentHandler) ListThreads(w http.ResponseWriter, r *http.Request) {
-	threads := h.runner.ListThreads()
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	threads := h.runner.ListThreads(ac.UserID)
 	if threads == nil {
 		threads = []string{}
 	}
@@ -213,6 +234,12 @@ func (h *AgentHandler) ListThreads(w http.ResponseWriter, r *http.Request) {
 
 // CreateThread handles POST /api/chat/threads
 func (h *AgentHandler) CreateThread(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
 	var req struct {
 		ThreadID string `json:"threadId"`
 	}
@@ -220,12 +247,20 @@ func (h *AgentHandler) CreateThread(w http.ResponseWriter, r *http.Request) {
 	if req.ThreadID == "" {
 		req.ThreadID = "t_" + randomID()
 	}
-	h.runner.CreateThread(req.ThreadID)
+	h.runner.CreateThread(ac.UserID, req.ThreadID)
 	writeJSON(w, http.StatusCreated, map[string]string{"threadId": req.ThreadID})
 }
 
 // DeleteThread handles DELETE /api/chat/{threadId}
+// Only the owning user's thread can be deleted; other users' threads
+// (or unknown IDs) return 404.
 func (h *AgentHandler) DeleteThread(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
 	threadID := extractPathSuffix(r.URL.Path, "/api/chat/")
 	threadID = trimSuffix(threadID, "/delete")
 
@@ -234,7 +269,10 @@ func (h *AgentHandler) DeleteThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.runner.DeleteThread(threadID)
+	if !h.runner.DeleteThread(ac.UserID, threadID) {
+		writeError(w, http.StatusNotFound, "thread not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "threadId": threadID})
 }
 

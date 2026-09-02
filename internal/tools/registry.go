@@ -3,11 +3,15 @@ package tools
 import (
 	"fmt"
 	"sync"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // ToolFunc is the function signature for tool execution.
-// It receives a context-like map and JSON arguments, returning a ToolResult.
-type ToolFunc func(ctx map[string]any, arguments string) ToolResult
+// It receives the framework-minted tool identity (derived from the
+// authenticated AuthContext — never from LLM arguments) and JSON arguments,
+// returning a ToolResult.
+type ToolFunc func(identity *auth.ToolIdentity, arguments string) ToolResult
 
 // RegisteredTool pairs metadata with the actual tool function.
 type RegisteredTool struct {

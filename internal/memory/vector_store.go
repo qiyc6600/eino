@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // VectorResult holds a single result from a vector similarity query.
@@ -58,6 +61,10 @@ func NewInMemoryVectorStore() *InMemoryVectorStore {
 
 // Store saves a text entry with a hash-based pseudo-embedding.
 func (s *InMemoryVectorStore) Store(ctx context.Context, userID, content string, metadata map[string]any) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+
 	vector := hashEmbed(content, s.dim)
 
 	s.mu.Lock()
@@ -74,6 +81,10 @@ func (s *InMemoryVectorStore) Store(ctx context.Context, userID, content string,
 
 // Query returns the top-K most similar entries for a query string.
 func (s *InMemoryVectorStore) Query(ctx context.Context, userID, query string, topK int) ([]VectorResult, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	queryVec := hashEmbed(query, s.dim)
 
 	s.mu.RLock()
@@ -123,6 +134,10 @@ func (s *InMemoryVectorStore) Query(ctx context.Context, userID, query string, t
 
 // DeleteUser removes all vector entries for a user.
 func (s *InMemoryVectorStore) DeleteUser(ctx context.Context, userID string) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.entries, userID)
@@ -255,26 +270,5 @@ func FormatVectorResults(results []VectorResult) string {
 		return ""
 	}
 
-	return "用户历史相关记忆：\n" + stringsJoin(lines, "\n")
-}
-
-// stringsJoin avoids importing strings package for a single use.
-func stringsJoin(elems []string, sep string) string {
-	switch len(elems) {
-	case 0:
-		return ""
-	case 1:
-		return elems[0]
-	}
-	n := len(sep) * (len(elems) - 1)
-	for i := 0; i < len(elems); i++ {
-		n += len(elems[i])
-	}
-	var b []byte
-	b = append(b, elems[0]...)
-	for _, s := range elems[1:] {
-		b = append(b, sep...)
-		b = append(b, s...)
-	}
-	return string(b)
+	return "用户历史相关记忆：\n" + strings.Join(lines, "\n")
 }

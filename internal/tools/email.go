@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // EmailArgs represents arguments for the send_email tool.
@@ -18,12 +20,12 @@ type EmailArgs struct {
 // In production this would integrate with a real email provider; here we record
 // to an in-memory store so the action is observable and verifiable.
 type SentEmailRecord struct {
-	To     string    `json:"to"`
-	Subject string   `json:"subject"`
-	Body    string   `json:"body"`
-	UserID  string   `json:"user_id"`
+	To      string    `json:"to"`
+	Subject string    `json:"subject"`
+	Body    string    `json:"body"`
+	UserID  string    `json:"user_id"`
 	SentAt  time.Time `json:"sent_at"`
-	RunID   string   `json:"run_id,omitempty"`
+	RunID   string    `json:"run_id,omitempty"`
 }
 
 // EmailStore keeps an in-memory log of all "sent" emails, isolated by userID.
@@ -57,15 +59,6 @@ func (s *EmailStore) ListByUser(userID string) []SentEmailRecord {
 	return result
 }
 
-// ListAll returns all email records.
-func (s *EmailStore) ListAll() []SentEmailRecord {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]SentEmailRecord, len(s.records))
-	copy(result, s.records)
-	return result
-}
-
 // NewSendEmailTool creates the send_email tool (admin, requires approval).
 // emailStore is used to record "sent" emails so the action is observable.
 func NewSendEmailTool(emailStore *EmailStore) RegisteredTool {
@@ -86,13 +79,13 @@ func NewSendEmailTool(emailStore *EmailStore) RegisteredTool {
 					"required": ["to", "subject", "body"]
 				}`,
 		},
-		Fn: func(ctx map[string]any, arguments string) ToolResult {
-			return executeSendEmail(ctx, arguments, emailStore)
+		Fn: func(identity *auth.ToolIdentity, arguments string) ToolResult {
+			return executeSendEmail(identity, arguments, emailStore)
 		},
 	}
 }
 
-func executeSendEmail(ctx map[string]any, arguments string, emailStore *EmailStore) ToolResult {
+func executeSendEmail(identity *auth.ToolIdentity, arguments string, emailStore *EmailStore) ToolResult {
 	var args EmailArgs
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return BusinessErrorResult("send_email", "invalid arguments: "+err.Error())
@@ -103,8 +96,11 @@ func executeSendEmail(ctx map[string]any, arguments string, emailStore *EmailSto
 	}
 
 	// Record the email in the store for verification and demonstration.
-	userID, _ := ctx["user_id"].(string)
-	runID, _ := ctx["run_id"].(string)
+	var userID, runID string
+	if identity != nil {
+		userID = identity.UserID
+		runID = identity.RunID
+	}
 	if emailStore != nil {
 		emailStore.Record(SentEmailRecord{
 			To:      args.To,

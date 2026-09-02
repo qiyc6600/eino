@@ -34,11 +34,13 @@ func (t *EinoTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 
 // InvokableRun implements tool.InvokableTool.InvokableRun.
 func (t *EinoTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	// Build tool context from Go context
-	toolCtx := buildToolContext(ctx)
+	// Derive the typed tool identity from the Go context. A nil identity
+	// means the request chain carried no authenticated user — the tool
+	// implementations reject such invocations.
+	identity := auth.ToolIdentityFromContext(ctx)
 
 	// Execute the tool function
-	result := t.fn(toolCtx, argumentsInJSON)
+	result := t.fn(identity, argumentsInJSON)
 
 	// If the tool returned an error (e.g. ACL denied), return it as a clear error
 	// so the LLM cannot ignore it and must report the denial to the user.
@@ -78,31 +80,6 @@ func buildParamsFromSchema(schemaStr string) map[string]*schema.ParameterInfo {
 		}
 	}
 	return params
-}
-
-// buildToolContext extracts values from Go context for tool execution.
-// Uses the exported auth keys so it reads values injected by the runner.
-func buildToolContext(ctx context.Context) map[string]any {
-	toolCtx := make(map[string]any)
-	// Read from auth.WithToolContext (injected by runner.injectAuthContext)
-	if m := auth.FromToolContext(ctx); m != nil {
-		for k, v := range m {
-			toolCtx[k] = v
-		}
-	}
-	// Also extract from AuthContext itself as fallback
-	if ac := auth.FromContext(ctx); ac != nil {
-		if _, ok := toolCtx["user_id"]; !ok {
-			toolCtx["user_id"] = ac.UserID
-		}
-		if _, ok := toolCtx["roles"]; !ok {
-			toolCtx["roles"] = ac.Roles
-		}
-		if _, ok := toolCtx["thread_id"]; !ok {
-			toolCtx["thread_id"] = ac.ThreadID
-		}
-	}
-	return toolCtx
 }
 
 // ConvertToEinoTools converts RegisteredTools from the registry to Eino InvokableTools.

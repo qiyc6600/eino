@@ -38,31 +38,23 @@ func (m *ACLMiddleware) CheckPermission(roles []string, toolName string) (bool, 
 // is returned as a ToolResult observation for the LLM.
 func (m *ACLMiddleware) WrapTool(reg RegisteredTool) RegisteredTool {
 	origFn := reg.Fn
-	reg.Fn = func(ctx map[string]any, arguments string) ToolResult {
-		// Extract roles from context
-		rolesVal, _ := ctx["roles"]
+	reg.Fn = func(identity *auth.ToolIdentity, arguments string) ToolResult {
+		// A nil identity means the framework did not authenticate the caller — deny.
 		var roles []string
-		switch v := rolesVal.(type) {
-		case []string:
-			roles = v
-		case []interface{}:
-			for _, r := range v {
-				if s, ok := r.(string); ok {
-					roles = append(roles, s)
-				}
-			}
+		if identity != nil {
+			roles = identity.Roles
 		}
 
 		allowed, denyResult := m.CheckPermission(roles, reg.Meta.Name)
 		if !allowed {
-			// Fill in user_id from context
-			if userID, ok := ctx["user_id"].(string); ok {
-				denyResult.Metadata["user_id"] = userID
+			// Fill in user_id from the typed identity
+			if identity != nil {
+				denyResult.Metadata["user_id"] = identity.UserID
 			}
 			return denyResult
 		}
 
-		return origFn(ctx, arguments)
+		return origFn(identity, arguments)
 	}
 	return reg
 }

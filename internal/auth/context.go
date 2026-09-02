@@ -1,6 +1,9 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // AuthContext carries identity information through the call chain.
 // It must be propagated along the call chain but NOT exposed to the LLM.
@@ -10,6 +13,7 @@ type AuthContext struct {
 	Username  string
 	Roles     []string
 	ThreadID  string
+	RunID     string
 }
 
 // contextKey is the exported key type for AuthContext in context.Context.
@@ -39,17 +43,59 @@ func MustFromContext(ctx context.Context) *AuthContext {
 	return ac
 }
 
-// WithToolContext injects a tool context map (user_id, roles, etc.) into context.
-// This is used by the runner to pass auth info through Eino's tool execution chain.
-func WithToolContext(ctx context.Context, m map[string]any) context.Context {
-	return context.WithValue(ctx, toolContextKey{}, m)
+// WithThread returns a copy of AuthContext with the given thread ID.
+// Callers must not mutate a shared AuthContext in place — the same pointer
+// may be captured by goroutines (e.g. preference extraction, snapshots).
+func (ac *AuthContext) WithThread(threadID string) *AuthContext {
+	copied := *ac
+	copied.ThreadID = threadID
+	return &copied
 }
 
-// FromToolContext extracts the tool context map from context.
-func FromToolContext(ctx context.Context) map[string]any {
-	m, _ := ctx.Value(toolContextKey{}).(map[string]any)
-	return m
+// WithRun returns a copy of AuthContext with the given run ID.
+func (ac *AuthContext) WithRun(runID string) *AuthContext {
+	copied := *ac
+	copied.RunID = runID
+	return &copied
 }
 
-type toolContextKey struct{}
+// ToolIdentity is the typed, framework-minted identity handed to tools.
+// It can only be derived from an AuthContext that the auth middleware
+// injected into the Go context — tools never parse identity out of
+// LLM arguments or request bodies, and there is no untyped map channel
+// that could be constructed with a forged user ID.
+type ToolIdentity struct {
+	UserID   string
+	Roles    []string
+	ThreadID string
+	RunID    string
+}
 
+// ToolIdentityFromContext derives the tool identity from the AuthContext
+// carried by ctx. Returns nil when the context carries no identity, in
+// which case callers must reject the invocation.
+func ToolIdentityFromContext(ctx context.Context) *ToolIdentity {
+	ac := FromContext(ctx)
+	if ac == nil {
+		return nil
+	}
+	return &ToolIdentity{
+		UserID:   ac.UserID,
+		Roles:    ac.Roles,
+		ThreadID: ac.ThreadID,
+		RunID:    ac.RunID,
+	}
+}
+
+// CheckUserScope is the store-level isolation guard. When the context carries
+// an authenticated identity, the requested userID must match it — otherwise
+// the call is a cross-user access and is rejected. Contexts without identity
+// (internal background jobs) pass through, keeping the check free of false
+// positives while still blocking any framework-callable path from crossing
+// user boundaries.
+func CheckUserScope(ctx context.Context, userID string) error {
+	if ac := FromContext(ctx); ac != nil && ac.UserID != userID {
+		return fmt.Errorf("cross-user access denied: context user %q cannot access data of user %q", ac.UserID, userID)
+	}
+	return nil
+}

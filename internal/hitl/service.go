@@ -103,12 +103,9 @@ func (s *Service) ExecuteApprovedTool(ctx context.Context, authCtx *auth.AuthCon
 		return *result
 	}
 
-	// Execute the real tool
-	toolCtx := map[string]any{
-		"user_id": authCtx.UserID,
-		"roles":   authCtx.Roles,
-	}
-	result := tool.Fn(toolCtx, arguments)
+	// Execute the real tool with the framework-minted identity from ctx.
+	// The resume caller chain must carry the authenticated AuthContext.
+	result := tool.Fn(auth.ToolIdentityFromContext(ctx), arguments)
 
 	// Cache for idempotency
 	s.idempotency[idempotencyKey] = &result

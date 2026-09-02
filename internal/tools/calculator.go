@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/example/agent-eino-demo/internal/auth"
 	"strconv"
 	"strings"
 )
@@ -33,7 +34,7 @@ func NewCalculatorTool() RegisteredTool {
 	}
 }
 
-func executeCalculator(ctx map[string]any, arguments string) ToolResult {
+func executeCalculator(_ *auth.ToolIdentity, arguments string) ToolResult {
 	var args CalculatorArgs
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return BusinessErrorResult("calculator", "invalid arguments: "+err.Error())

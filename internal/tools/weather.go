@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/example/agent-eino-demo/internal/auth"
 	"io"
 	"net/http"
 	"net/url"
@@ -18,14 +19,14 @@ type WeatherArgs struct {
 // wttrInResponse is the response from wttr.in API.
 type wttrInResponse struct {
 	CurrentCondition []struct {
-		TempC        string `json:"temp_C"`
-		FeelsLikeC   string `json:"FeelsLikeC"`
-		Humidity     string `json:"humidity"`
-		WeatherDesc  []struct {
+		TempC       string `json:"temp_C"`
+		FeelsLikeC  string `json:"FeelsLikeC"`
+		Humidity    string `json:"humidity"`
+		WeatherDesc []struct {
 			Value string `json:"value"`
 		} `json:"weatherDesc"`
-		Winddir16Point string `json:"winddir16Point"`
-		WindspeedKmph  string `json:"windspeedKmph"`
+		Winddir16Point  string `json:"winddir16Point"`
+		WindspeedKmph   string `json:"windspeedKmph"`
 		ObservationTime string `json:"observation_time"`
 	} `json:"current_condition"`
 	NearestArea []struct {
@@ -62,7 +63,7 @@ func NewWeatherTool() RegisteredTool {
 // httpClient with timeout
 var weatherHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
-func executeWeather(ctx map[string]any, argumentsInJSON string) ToolResult {
+func executeWeather(_ *auth.ToolIdentity, argumentsInJSON string) ToolResult {
 	var args WeatherArgs
 	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
 		return BusinessErrorResult("weather", "invalid arguments: "+err.Error())
@@ -159,15 +160,15 @@ func formatWeatherResult(city string, resp *wttrInResponse) ToolResult {
 	content.WriteString(fmt.Sprintf("🕐 观测时间：%s", cond.ObservationTime))
 
 	return SuccessResult("weather", content.String(), map[string]any{
-		"city":        areaName,
-		"country":     countryName,
-		"temp_c":      cond.TempC,
-		"feels_like":  cond.FeelsLikeC,
-		"humidity":    cond.Humidity,
-		"weather":     desc,
-		"wind_dir":    cond.Winddir16Point,
-		"wind_speed":  cond.WindspeedKmph,
-		"source":      "wttr.in",
+		"city":       areaName,
+		"country":    countryName,
+		"temp_c":     cond.TempC,
+		"feels_like": cond.FeelsLikeC,
+		"humidity":   cond.Humidity,
+		"weather":    desc,
+		"wind_dir":   cond.Winddir16Point,
+		"wind_speed": cond.WindspeedKmph,
+		"source":     "wttr.in",
 	})
 }
 

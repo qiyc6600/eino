@@ -3,9 +3,14 @@ package memory
 import (
 	"context"
 	"sync"
+
+	"github.com/example/agent-eino-demo/internal/auth"
 )
 
 // InMemoryMemoryStore is the default in-memory implementation of MemoryStore.
+// Every method rejects calls whose userID does not match the authenticated
+// identity in ctx (auth.CheckUserScope) — cross-user access is blocked at the
+// store layer, not left to caller discipline.
 type InMemoryMemoryStore struct {
 	mu      sync.RWMutex
 	entries map[string]map[string]MemoryEntry // userID -> key -> entry
@@ -19,6 +24,10 @@ func NewInMemoryMemoryStore() *InMemoryMemoryStore {
 }
 
 func (s *InMemoryMemoryStore) Put(ctx context.Context, entry MemoryEntry) error {
+	if err := auth.CheckUserScope(ctx, entry.UserID); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -30,6 +39,10 @@ func (s *InMemoryMemoryStore) Put(ctx context.Context, entry MemoryEntry) error 
 }
 
 func (s *InMemoryMemoryStore) Get(ctx context.Context, userID, key string) (MemoryEntry, bool, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return MemoryEntry{}, false, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -42,6 +55,10 @@ func (s *InMemoryMemoryStore) Get(ctx context.Context, userID, key string) (Memo
 }
 
 func (s *InMemoryMemoryStore) List(ctx context.Context, userID string) ([]MemoryEntry, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -58,6 +75,10 @@ func (s *InMemoryMemoryStore) List(ctx context.Context, userID string) ([]Memory
 }
 
 func (s *InMemoryMemoryStore) Delete(ctx context.Context, userID, key string) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

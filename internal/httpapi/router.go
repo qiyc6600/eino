@@ -85,7 +85,7 @@ func (r *Router) Handler() http.Handler {
 
 	// Thread & messages
 	mux.Handle("/api/chat/threads", authMw(http.HandlerFunc(r.handleChatThreads)))
-	mux.Handle("/api/chat/", authMw(http.HandlerFunc(r.agentHandler.GetThreadMessages)))
+	mux.Handle("/api/chat/", authMw(http.HandlerFunc(r.handleChatThreadSub)))
 
 	// Approvals
 	mux.Handle("/api/approvals", authMw(http.HandlerFunc(r.approvalHandler.ListApprovals)))
@@ -135,6 +135,20 @@ func (r *Router) handleChatThreads(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (r *Router) handleChatThreadSub(w http.ResponseWriter, req *http.Request) {
+	// DELETE /api/chat/{threadId}/delete
+	if strings.HasSuffix(req.URL.Path, "/delete") && req.Method == http.MethodDelete {
+		r.agentHandler.DeleteThread(w, req)
+		return
+	}
+	if req.Method == http.MethodGet {
+		// GET /api/chat/{threadId}/messages
+		r.agentHandler.GetThreadMessages(w, req)
+		return
+	}
+	writeError(w, http.StatusNotFound, "not found")
 }
 
 func (r *Router) handleApprovalsSub(w http.ResponseWriter, req *http.Request) {

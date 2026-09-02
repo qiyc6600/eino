@@ -12,7 +12,7 @@
 | 1.2 | 每次调用均校验 sessionId | ✅ | `auth.AuthMiddleware()` 对所有非登录路由校验 |
 | 1.3 | RBAC 角色与权限模型（至少两种角色） | ✅ | `admin`(6工具) + `visitor`(3工具) |
 | 1.4 | 工具级 ACL 框架统一拦截（越权回灌 LLM） | ✅ | `ACLMiddleware.WrapTool()` 拦截，拒绝结果回灌给 LLM |
-| 1.5 | 多用户隔离（不串） | ⚠️ | userID 从 AuthContext 透传，不从参数读取；但隔离依赖下游 handler 主动使用 AuthContext.UserID，auth 层本身不自动强制 |
+| 1.5 | 多用户隔离（不串） | ✅ | 框架强制：工具身份为类型化 `ToolIdentity`（不可伪造）；线程/run 事件/审批带属主校验；存储层 `auth.CheckUserScope` 拒绝 ctx 身份与目标 userID 不一致的一切访问 |
 | 1.6 | 身份上下文传递 | ✅ | `AuthContext` 通过 HTTP context + Eino tool context 双链路传播 |
 
 ### 模块 01 技术约束
@@ -21,7 +21,7 @@
 |---|------|------|------|
 | T1 | 语言选择 | ✅ | Go 唯一语言 |
 | T2 | 工具校验不得分散在各工具内部 | ✅ | 所有工具内部无权限代码，ACL 在 middleware 层 |
-| T3 | 多用户隔离 | ✅ | OrderStore / MemoryStore / CheckpointStore 均按 userID 隔离 |
+| T3 | 多用户隔离 | ✅ | OrderStore / MemoryStore / CheckpointStore 均按 userID 隔离，且存储层通过 `CheckUserScope` 强制校验 |
 
 ---
 
@@ -119,8 +119,8 @@
 
 ## 统计
 
-- **硬性要求**：30 项 ✅ 通过，3 项 ⚠️ 部分达标（1.5 多用户隔离非自动强制、2.1 节点级中断需意图触发、2.3 Checkpoint 恢复有降级路径）
+- **硬性要求**：31 项 ✅ 通过，2 项 ⚠️ 部分达标（2.1 节点级中断需意图触发、2.3 Checkpoint 恢复有降级路径）
 - **技术约束**：12 项 ✅ 全部满足
 - **文档交付物**：7 项 ✅ 全部完成
 
-**结论：项目核心功能完整，3 项要求部分达标但有合理理由（1.5 隔离依赖下游自觉使用、2.1 节点中断通过意图检测按需激活、2.3 Checkpoint 恢复优先走完整状态路径并有线程重建降级）。**
+**结论：项目核心功能完整。多用户隔离已由"调用方自觉"升级为"框架强制"（类型化 ToolIdentity + 属主校验 + 存储层 CheckUserScope，见 design.md 5.3 节）；剩余 2 项部分达标项均有合理理由（节点中断通过意图检测按需激活、Checkpoint 恢复优先走完整状态路径并有线程重建降级）。**
