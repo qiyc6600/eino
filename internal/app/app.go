@@ -38,8 +38,12 @@ type App struct {
 func NewApp(cfg *Config) *App {
 	ctx := context.Background()
 
-	// 1. Auth
-	sessionStore := auth.NewInMemorySessionStore()
+	// 1. Auth — SessionStore backend is switchable via SESSION_STORE
+	sessionStore, err := newSessionStore(cfg)
+	if err != nil {
+		log.Printf("Warning: %v, falling back to in-memory session store", err)
+		sessionStore = auth.NewInMemorySessionStore()
+	}
 	rbac := auth.NewRBACManager()
 	authSvc := auth.NewService(sessionStore, rbac, cfg.SessionTTL)
 
@@ -58,8 +62,12 @@ func NewApp(cfg *Config) *App {
 	aclMiddleware := tools.NewACLMiddleware(rbac)
 	aclMiddleware.WrapAllTools(toolRegistry)
 
-	// 4. HITL
-	checkpointStore := memory.NewInMemoryCheckpointStore()
+	// 4. HITL — CheckpointStore backend is switchable via CHECKPOINT_STORE
+	checkpointStore, err := newCheckpointStore(cfg)
+	if err != nil {
+		log.Printf("Warning: %v, falling back to in-memory checkpoint store", err)
+		checkpointStore = memory.NewInMemoryCheckpointStore()
+	}
 	interruptMgr := hitl.NewInterruptManager(checkpointStore)
 	hitlSvc := hitl.NewService(interruptMgr, checkpointStore, rbac)
 
@@ -80,7 +88,12 @@ func NewApp(cfg *Config) *App {
 	}
 
 	// Memory (long-term KV + short-term checkpoint + vector retrieval)
-	memoryStore := memory.NewInMemoryMemoryStore()
+	// MemoryStore backend is switchable via MEMORY_STORE
+	memoryStore, err := newMemoryStore(cfg)
+	if err != nil {
+		log.Printf("Warning: %v, falling back to in-memory memory store", err)
+		memoryStore = memory.NewInMemoryMemoryStore()
+	}
 	var vectorStore memory.VectorStore
 	switch cfg.EmbeddingProvider {
 	case "openai":
@@ -345,4 +358,40 @@ func buildDispatchEntries(
 		})
 	}
 	return entries
+}
+
+// newSessionStore builds the SessionStore backend selected by SESSION_STORE.
+func newSessionStore(cfg *Config) (auth.SessionStore, error) {
+	switch cfg.SessionStoreKind {
+	case "file":
+		return auth.NewFileSessionStore(cfg.SessionStorePath)
+	case "memory":
+		return auth.NewInMemorySessionStore(), nil
+	default:
+		return nil, fmt.Errorf("invalid SESSION_STORE %q: must be memory or file", cfg.SessionStoreKind)
+	}
+}
+
+// newCheckpointStore builds the CheckpointStore backend selected by CHECKPOINT_STORE.
+func newCheckpointStore(cfg *Config) (memory.CheckpointStore, error) {
+	switch cfg.CheckpointStoreKind {
+	case "file":
+		return memory.NewFileCheckpointStore(cfg.CheckpointStorePath)
+	case "memory":
+		return memory.NewInMemoryCheckpointStore(), nil
+	default:
+		return nil, fmt.Errorf("invalid CHECKPOINT_STORE %q: must be memory or file", cfg.CheckpointStoreKind)
+	}
+}
+
+// newMemoryStore builds the MemoryStore backend selected by MEMORY_STORE.
+func newMemoryStore(cfg *Config) (memory.MemoryStore, error) {
+	switch cfg.MemoryStoreKind {
+	case "file":
+		return memory.NewFileMemoryStore(cfg.MemoryStorePath)
+	case "memory":
+		return memory.NewInMemoryMemoryStore(), nil
+	default:
+		return nil, fmt.Errorf("invalid MEMORY_STORE %q: must be memory or file", cfg.MemoryStoreKind)
+	}
 }

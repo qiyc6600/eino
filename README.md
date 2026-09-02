@@ -174,6 +174,8 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 **跨会话偏好**：用户在会话 A 表达"我喜欢用 Python"→ 自动提取写入长期记忆 → 会话 B 中 LLM 自动读取偏好。
 
+**持久化存储后端（进阶档）**：`SessionStore` / `CheckpointStore` / `MemoryStore` 三个接口均有 `memory`（默认，零依赖）与 `file`（JSON 持久化）两种实现，通过环境变量切换，业务代码零改动。file 版为装饰器实现，完整继承内存版的多用户隔离校验；启用后中断状态与跨会话记忆在进程重启后依然有效。
+
 **向量检索**：三种 embedding 后端可选：
 
 | 后端 | `EMBEDDING_PROVIDER` | 说明 |
@@ -199,6 +201,10 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | `EMBEDDING_PROVIDER` | `hash` | Embedding 后端：hash / ollama / openai |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
+| `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file`（JSON 持久化，重启不丢） |
+| `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` |
+| `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` |
+| `*_STORE_PATH` | `data/*.json` | file 后端的数据文件路径（默认 `data/sessions.json` 等） |
 
 ### 一键接入 OpenAI 兼容 API
 

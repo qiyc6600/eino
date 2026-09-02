@@ -103,3 +103,33 @@ func (s *InMemoryCheckpointStore) ListByThread(ctx context.Context, userID, thre
 
 	return result, nil
 }
+
+// Snapshot returns all stored checkpoints (for persistence decorators).
+func (s *InMemoryCheckpointStore) Snapshot() []Checkpoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]Checkpoint, 0, len(s.checkpoints))
+	for _, cp := range s.checkpoints {
+		result = append(result, cp)
+	}
+	return result
+}
+
+// Restore replaces all stored checkpoints (used by persistence decorators
+// to reload state from disk at startup).
+func (s *InMemoryCheckpointStore) Restore(checkpoints []Checkpoint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.checkpoints = make(map[string]Checkpoint, len(checkpoints))
+	for _, cp := range checkpoints {
+		key := checkpointKey(CheckpointKey{
+			UserID:   cp.UserID,
+			ThreadID: cp.ThreadID,
+			RunID:    cp.RunID,
+			Step:     cp.Step,
+		})
+		s.checkpoints[key] = cp
+	}
+}

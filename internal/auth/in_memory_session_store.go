@@ -87,3 +87,29 @@ func (s *InMemorySessionStore) ListByUser(ctx context.Context, userID string) ([
 	copy(result, sessions)
 	return result, nil
 }
+
+// Snapshot returns all stored sessions (for persistence decorators).
+func (s *InMemorySessionStore) Snapshot() []Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]Session, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		result = append(result, session)
+	}
+	return result
+}
+
+// Restore replaces all stored sessions (used by persistence decorators
+// to reload state from disk at startup).
+func (s *InMemorySessionStore) Restore(sessions []Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sessions = make(map[string]Session, len(sessions))
+	s.byUser = make(map[string][]Session)
+	for _, session := range sessions {
+		s.sessions[session.ID] = session
+		s.byUser[session.UserID] = append(s.byUser[session.UserID], session)
+	}
+}

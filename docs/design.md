@@ -405,6 +405,12 @@ orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的�
 
 > 存储层校验对"无身份 ctx"（内部后台任务，如快照落盘 goroutine）放行，避免误伤合法的框架内部调用。
 
+### 5.4 存储后端可替换（持久化实现）
+
+三个存储接口均有 `memory`（默认，零依赖）与 `file`（JSON 持久化）两种实现，通过环境变量（`SESSION_STORE` / `CHECKPOINT_STORE` / `MEMORY_STORE`）切换，业务代码零改动。
+
+file 版采用**装饰器模式**：内嵌对应的 InMemory 实现并拦截全部写操作（Create/Update/Delete/Save），每次写盘后原子落盘（临时文件 + rename，崩溃不损坏文件），启动时从文件恢复状态。由于隔离校验在内存实现内部，file 版自动继承 `CheckUserScope` 强制，隔离语义不因后端切换而减弱。
+
 ---
 
 ## 6. 恢复语义
@@ -460,6 +466,12 @@ orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的�
 | `OPENAI_MODEL` | - | 模型名称 |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
+| `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file` |
+| `SESSION_STORE_PATH` | `data/sessions.json` | file 后端数据文件路径 |
+| `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` |
+| `CHECKPOINT_STORE_PATH` | `data/checkpoints.json` | file 后端数据文件路径 |
+| `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` |
+| `MEMORY_STORE_PATH` | `data/memory.json` | file 后端数据文件路径 |
 | `MAX_TOKENS` | `8000` | 上下文 token 上限 |
 | `MAX_MESSAGES` | `30` | 最大消息数 |
 | `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例 |

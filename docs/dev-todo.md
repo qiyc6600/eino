@@ -22,6 +22,7 @@
 | 12 | 会话过期/续期 TTL（进阶档） | 模块 01 | ✅ | `Session.ExpiresAt` + `ValidateSession` 滑动续期，`SESSION_TTL` 可配置 |
 | 13 | users map 并发保护 | 模块 01 | ✅ | `auth.Service` 增加 `usersMu sync.RWMutex`，并发登录/用户管理/角色更新经 `-race` 验证 |
 | 14 | 节点级中断显式触发 | 模块 02 | ✅ | Chat 请求 `confirmBeforeExecute` 标志（前端开关）替代关键词检测，RunStep 按参数传递无共享状态污染 |
+| 15 | 持久化存储后端（进阶档） | 全局 | ✅ | 三个存储接口的 file（JSON 装饰器）实现 + 环境变量切换，隔离校验自动继承，重启后状态不丢 |
 
 ---
 

@@ -15,6 +15,7 @@
 | 1.5 | 多用户隔离（不串） | ✅ | 框架强制：工具身份为类型化 `ToolIdentity`（不可伪造）；线程/run 事件/审批带属主校验；存储层 `auth.CheckUserScope` 拒绝 ctx 身份与目标 userID 不一致的一切访问 |
 | 1.6 | 身份上下文传递 | ✅ | `AuthContext` 通过 HTTP context + 类型化 `ToolIdentity` 双链路传播 |
 | 1.7 | 会话过期/续期 TTL（任务注明的进阶档） | ✅ | Session 带 `ExpiresAt`，`ValidateSession` 过期拒绝并删除会话；每次校验成功滑动续期；`SESSION_TTL` 可配置（默认 30m），login/me 返回 `expiresAt` |
+| 1.8 | 持久化 SessionStore 后端（任务注明的进阶档） | ✅ | `FileSessionStore` 装饰器实现，`SESSION_STORE=file` 切换，重启后会话不丢（集成测试验证） |
 
 ### 模块 01 技术约束
 
@@ -99,7 +100,7 @@
 |---|------|------|------|
 | T1 | 语言选择 | ✅ | Go |
 | T2 | 短期与长期分层（两套独立抽象） | ✅ | `CheckpointStore` ≠ `MemoryStore`，不同数据模型和生命周期 |
-| T3 | 存储后端可替换（接口抽象） | ✅ | 三个接口均可替换，业务代码无需改动 |
+| T3 | 存储后端可替换（接口抽象） | ✅ | 三个接口均有 memory / file 两种实现，环境变量切换，业务代码零改动 |
 | T4 | userId 作为长期记忆命名空间 | ✅ | `MemoryStore` 按 `userID` 隔离，取自 `AuthContext` |
 
 ---

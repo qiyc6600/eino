@@ -16,6 +16,15 @@ type Config struct {
 	// Session configuration
 	SessionTTL time.Duration // sliding session lifetime, default 30m
 
+	// Storage backends: "memory" (default, zero dependency) or "file" (JSON
+	// persistence, survives process restarts). Paths default under data/.
+	SessionStoreKind    string
+	SessionStorePath    string
+	CheckpointStoreKind string
+	CheckpointStorePath string
+	MemoryStoreKind     string
+	MemoryStorePath     string
+
 	// Model configuration
 	ModelProvider string // mock | openai | ark
 	// OpenAI / OpenAI-compatible API
@@ -115,6 +124,12 @@ func LoadConfig() *Config {
 	return &Config{
 		Addr:                   getEnv("ADDR", ":8080"),
 		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
+		SessionStoreKind:       getEnv("SESSION_STORE", "memory"),
+		SessionStorePath:       getEnv("SESSION_STORE_PATH", "data/sessions.json"),
+		CheckpointStoreKind:    getEnv("CHECKPOINT_STORE", "memory"),
+		CheckpointStorePath:    getEnv("CHECKPOINT_STORE_PATH", "data/checkpoints.json"),
+		MemoryStoreKind:        getEnv("MEMORY_STORE", "memory"),
+		MemoryStorePath:        getEnv("MEMORY_STORE_PATH", "data/memory.json"),
 		ModelProvider:          getEnv("MODEL_PROVIDER", "mock"),
 		OpenAIBaseURL:          getEnv("OPENAI_BASE_URL", ""),
 		OpenAIAPIKey:           getEnv("OPENAI_API_KEY", ""),

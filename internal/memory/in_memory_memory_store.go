@@ -87,3 +87,32 @@ func (s *InMemoryMemoryStore) Delete(ctx context.Context, userID, key string) er
 	}
 	return nil
 }
+
+// Snapshot returns all stored entries (for persistence decorators).
+func (s *InMemoryMemoryStore) Snapshot() []MemoryEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]MemoryEntry, 0)
+	for _, userEntries := range s.entries {
+		for _, entry := range userEntries {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+// Restore replaces all stored entries (used by persistence decorators
+// to reload state from disk at startup).
+func (s *InMemoryMemoryStore) Restore(entries []MemoryEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.entries = make(map[string]map[string]MemoryEntry)
+	for _, entry := range entries {
+		if _, ok := s.entries[entry.UserID]; !ok {
+			s.entries[entry.UserID] = make(map[string]MemoryEntry)
+		}
+		s.entries[entry.UserID][entry.Key] = entry
+	}
+}
