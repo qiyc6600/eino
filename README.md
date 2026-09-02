@@ -8,7 +8,7 @@
 
 | 模块 | 能力 |
 |------|------|
-| 🔐 登录与权限 | Session 认证、RBAC 多角色、工具级 ACL 统一拦截、多用户数据隔离 |
+| 🔐 登录与权限 | Session 认证、TTL 滑动续期、RBAC 多角色、工具级 ACL 统一拦截、多用户数据隔离 |
 | 🤝 人机协同 | 工具级中断（高危操作审批）、节点级中断（执行计划审批）、Checkpoint 状态恢复 |
 | 🧠 多 Agent | Supervisor 三子 Agent 路由、ReAct 循环（MaxStep=20）、6 个示例工具 |
 | 📐 上下文管理 | 按消息数/Token 数裁剪、LLM 摘要压缩、Tool 配对保护 |
@@ -198,6 +198,7 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | `ARK_MODEL` | | Ark 模型 endpoint ID |
 | `EMBEDDING_PROVIDER` | `hash` | Embedding 后端：hash / ollama / openai |
 | `ADDR` | `:8080` | HTTP 监听地址 |
+| `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
 
 ### 一键接入 OpenAI 兼容 API
 

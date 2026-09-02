@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -11,6 +12,9 @@ import (
 type Config struct {
 	// Server configuration
 	Addr string // HTTP listen address, default ":8080"
+
+	// Session configuration
+	SessionTTL time.Duration // sliding session lifetime, default 30m
 
 	// Model configuration
 	ModelProvider string // mock | openai | ark
@@ -110,6 +114,7 @@ func LoadConfig() *Config {
 
 	return &Config{
 		Addr:                   getEnv("ADDR", ":8080"),
+		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
 		ModelProvider:          getEnv("MODEL_PROVIDER", "mock"),
 		OpenAIBaseURL:          getEnv("OPENAI_BASE_URL", ""),
 		OpenAIAPIKey:           getEnv("OPENAI_API_KEY", ""),
@@ -138,6 +143,20 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvDuration parses a Go duration string (e.g. "30m", "2h", "90s").
+// Invalid or missing values fall back to the default.
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func getEnvInt(key string, fallback int) int {

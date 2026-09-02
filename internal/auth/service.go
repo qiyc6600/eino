@@ -10,19 +10,29 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultSessionTTL is the sliding session lifetime when not configured.
+const DefaultSessionTTL = 30 * time.Minute
+
 // Service provides authentication operations.
 type Service struct {
-	store   SessionStore
-	rbac    *RBACManager
-	users   map[string]*User // username -> User
+	store      SessionStore
+	rbac       *RBACManager
+	users      map[string]*User // username -> User
+	sessionTTL time.Duration    // sliding session lifetime
 }
 
 // NewService creates a new auth service with default seed users.
-func NewService(store SessionStore, rbac *RBACManager) *Service {
+// An optional sessionTTL overrides DefaultSessionTTL.
+func NewService(store SessionStore, rbac *RBACManager, sessionTTL ...time.Duration) *Service {
+	ttl := DefaultSessionTTL
+	if len(sessionTTL) > 0 && sessionTTL[0] > 0 {
+		ttl = sessionTTL[0]
+	}
 	s := &Service{
-		store: store,
-		rbac:  rbac,
-		users: make(map[string]*User),
+		store:      store,
+		rbac:       rbac,
+		users:      make(map[string]*User),
+		sessionTTL: ttl,
 	}
 
 	// Seed users
@@ -63,6 +73,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (*LoginR
 		Username:  user.Username,
 		Roles:     user.Roles,
 		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(s.sessionTTL),
 	}
 
 	if err := s.store.Create(ctx, session); err != nil {
@@ -71,6 +82,7 @@ func (s *Service) Login(ctx context.Context, username, password string) (*LoginR
 
 	return &LoginResponse{
 		SessionID: sessionID,
+		ExpiresAt: session.ExpiresAt,
 		User: UserPublic{
 			ID:       user.ID,
 			Username: user.Username,
@@ -80,6 +92,9 @@ func (s *Service) Login(ctx context.Context, username, password string) (*LoginR
 }
 
 // ValidateSession checks if a session ID is valid and returns the session.
+// Expired sessions are rejected and removed. A valid session is renewed
+// (sliding TTL): the expiration deadline is extended by the session TTL,
+// so active users are never logged out while idle users eventually expire.
 func (s *Service) ValidateSession(ctx context.Context, sessionID string) (*Session, error) {
 	session, ok, err := s.store.Get(ctx, sessionID)
 	if err != nil {
@@ -88,6 +103,22 @@ func (s *Service) ValidateSession(ctx context.Context, sessionID string) (*Sessi
 	if !ok {
 		return nil, fmt.Errorf("unauthorized: invalid session")
 	}
+
+	// Expiry check. Zero ExpiresAt means a session created before TTL was
+	// introduced — treat it as non-expiring for backward compatibility.
+	if !session.ExpiresAt.IsZero() && time.Now().After(session.ExpiresAt) {
+		_ = s.store.Delete(ctx, sessionID)
+		return nil, fmt.Errorf("unauthorized: session expired")
+	}
+
+	// Sliding renewal: every successful validation extends the deadline.
+	if !session.ExpiresAt.IsZero() {
+		session.ExpiresAt = time.Now().Add(s.sessionTTL)
+		if err := s.store.Update(ctx, session); err != nil {
+			return nil, fmt.Errorf("session renewal error: %w", err)
+		}
+	}
+
 	return &session, nil
 }
 
@@ -159,6 +190,20 @@ func (s *Service) RBAC() *RBACManager {
 // Store returns the session store.
 func (s *Service) Store() SessionStore {
 	return s.store
+}
+
+// SessionTTL returns the configured sliding session lifetime.
+func (s *Service) SessionTTL() time.Duration {
+	return s.sessionTTL
+}
+
+// SessionExpiry returns the current expiration deadline of a session.
+func (s *Service) SessionExpiry(ctx context.Context, sessionID string) (time.Time, bool) {
+	session, ok, err := s.store.Get(ctx, sessionID)
+	if err != nil || !ok {
+		return time.Time{}, false
+	}
+	return session.ExpiresAt, true
 }
 
 func hashPassword(password string) string {

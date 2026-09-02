@@ -41,7 +41,7 @@ func NewApp(cfg *Config) *App {
 	// 1. Auth
 	sessionStore := auth.NewInMemorySessionStore()
 	rbac := auth.NewRBACManager()
-	authSvc := auth.NewService(sessionStore, rbac)
+	authSvc := auth.NewService(sessionStore, rbac, cfg.SessionTTL)
 
 	// 2. Tools
 	toolRegistry := tools.NewToolRegistry()

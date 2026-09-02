@@ -459,6 +459,7 @@ orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的�
 | `OPENAI_API_KEY` | - | API Key |
 | `OPENAI_MODEL` | - | 模型名称 |
 | `ADDR` | `:8080` | HTTP 监听地址 |
+| `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
 | `MAX_TOKENS` | `8000` | 上下文 token 上限 |
 | `MAX_MESSAGES` | `30` | 最大消息数 |
 | `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例 |

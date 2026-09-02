@@ -13,7 +13,8 @@
 | 1.3 | RBAC 角色与权限模型（至少两种角色） | ✅ | `admin`(6工具) + `visitor`(3工具) |
 | 1.4 | 工具级 ACL 框架统一拦截（越权回灌 LLM） | ✅ | `ACLMiddleware.WrapTool()` 拦截，拒绝结果回灌给 LLM |
 | 1.5 | 多用户隔离（不串） | ✅ | 框架强制：工具身份为类型化 `ToolIdentity`（不可伪造）；线程/run 事件/审批带属主校验；存储层 `auth.CheckUserScope` 拒绝 ctx 身份与目标 userID 不一致的一切访问 |
-| 1.6 | 身份上下文传递 | ✅ | `AuthContext` 通过 HTTP context + Eino tool context 双链路传播 |
+| 1.6 | 身份上下文传递 | ✅ | `AuthContext` 通过 HTTP context + 类型化 `ToolIdentity` 双链路传播 |
+| 1.7 | 会话过期/续期 TTL（任务注明的进阶档） | ✅ | Session 带 `ExpiresAt`，`ValidateSession` 过期拒绝并删除会话；每次校验成功滑动续期；`SESSION_TTL` 可配置（默认 30m），login/me 返回 `expiresAt` |
 
 ### 模块 01 技术约束
 

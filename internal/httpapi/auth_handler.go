@@ -43,7 +43,10 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Current sliding expiration deadline (empty for pre-TTL sessions).
+	expiresAt, _ := h.authSvc.SessionExpiry(r.Context(), ac.SessionID)
+
+	resp := map[string]any{
 		"sessionId": ac.SessionID,
 		"user": auth.UserPublic{
 			ID:       ac.UserID,
@@ -51,7 +54,12 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 			Roles:    ac.Roles,
 		},
 		"tools": h.authSvc.RBAC().GetToolsForRoles(ac.Roles),
-	})
+	}
+	if !expiresAt.IsZero() {
+		resp["expiresAt"] = expiresAt
+		resp["sessionTTL"] = h.authSvc.SessionTTL().String()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Logout handles POST /api/auth/logout

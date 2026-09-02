@@ -17,6 +17,9 @@ type Session struct {
 	Username  string
 	Roles     []string
 	CreatedAt time.Time
+	// ExpiresAt is the sliding expiration deadline. Each successful
+	// ValidateSession call extends it by the session TTL.
+	ExpiresAt time.Time
 }
 
 // Role represents a named role with tool-level permissions.
@@ -41,6 +44,7 @@ type LoginRequest struct {
 // LoginResponse is the login API response body.
 type LoginResponse struct {
 	SessionID string     `json:"sessionId"`
+	ExpiresAt time.Time  `json:"expiresAt"` // current sliding expiration deadline
 	User      UserPublic `json:"user"`
 }
 

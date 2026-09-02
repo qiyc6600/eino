@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -35,6 +36,26 @@ func (s *InMemorySessionStore) Get(ctx context.Context, sessionID string) (Sessi
 
 	session, ok := s.sessions[sessionID]
 	return session, ok, nil
+}
+
+// Update replaces a stored session in place (sliding TTL renewal).
+// Returns an error when the session does not exist.
+func (s *InMemorySessionStore) Update(ctx context.Context, session Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions[session.ID]; !ok {
+		return fmt.Errorf("session not found: %s", session.ID)
+	}
+	s.sessions[session.ID] = session
+	sessions := s.byUser[session.UserID]
+	for i := range sessions {
+		if sessions[i].ID == session.ID {
+			sessions[i] = session
+			break
+		}
+	}
+	return nil
 }
 
 func (s *InMemorySessionStore) Delete(ctx context.Context, sessionID string) error {
