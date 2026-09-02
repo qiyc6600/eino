@@ -174,8 +174,28 @@ func (r *Runner) ExtractAndSavePreferences(authCtx *auth.AuthContext, userMessag
 	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, userMessage)
 }
 
+// ChatOption customizes a single chat run.
+type ChatOption func(*chatOptions)
+
+type chatOptions struct {
+	confirmBeforeExecute bool
+}
+
+// WithConfirmBeforeExecute enables the node-level plan review interrupt for
+// this run: execution pauses after the LLM decides on tool calls but before
+// executing them, presenting the plan for human approval. The flag is
+// explicit per request (frontend toggle / API field) — no keyword guessing.
+func WithConfirmBeforeExecute() ChatOption {
+	return func(o *chatOptions) { o.confirmBeforeExecute = true }
+}
+
 // Chat executes a chat request through the Eino agent pipeline.
-func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) ChatRunResult {
+func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string, opts ...ChatOption) ChatRunResult {
+	co := &chatOptions{}
+	for _, o := range opts {
+		o(co)
+	}
+
 	runID := "r_" + uuid.New().String()[:8]
 	recorder := NewEventRecorder(runID)
 
@@ -238,20 +258,6 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 	var steppedState *SteppedRunState
 
 	if r.steppedRunner != nil {
-		// Check if user's message signals a "review before execute" intent.
-		// If so, enable node-level interrupts for this run so the LLM's plan
-		// is presented for human approval before any tools are executed.
-		if wantsNodeInterrupt(userMessage) {
-			r.steppedRunner.SetNodeInterruptConfig(&NodeInterruptConfig{
-				Enabled:  true,
-				NodeName: "plan_review",
-				Message:  "Agent 已生成执行计划，需要人工审批后方可继续",
-			})
-		} else {
-			// Disable node-level interrupt for normal runs
-			r.steppedRunner.SetNodeInterruptConfig(nil)
-		}
-
 		// Stepped execution: run step-by-step with interrupt gates
 		steppedState = &SteppedRunState{
 			Step:     0,
@@ -265,7 +271,7 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string) C
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			for !steppedState.Done {
 				var stepErr error
-				steppedState, interruptReq, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder)
+				steppedState, interruptReq, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder, co.confirmBeforeExecute)
 				if stepErr != nil {
 					if isRateLimitError(stepErr.Error()) && attempt < maxRetries {
 						waitSec := (attempt + 1) * 5
@@ -561,7 +567,7 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 				for !steppedState.Done {
 					var stepErr error
 					var interruptReq2 *InterruptRequest
-					steppedState, interruptReq2, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder)
+					steppedState, interruptReq2, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder, false)
 					if stepErr != nil {
 						if isRateLimitError(stepErr.Error()) {
 							continue
@@ -677,7 +683,7 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 			for !steppedState.Done {
 				var stepErr error
 				var interruptReq2 *InterruptRequest
-				steppedState, interruptReq2, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder)
+				steppedState, interruptReq2, stepErr = r.steppedRunner.RunStep(ctx, steppedState, recorder, false)
 				if stepErr != nil {
 					if isRateLimitError(stepErr.Error()) {
 						continue
@@ -933,33 +939,6 @@ func injectAuthContext(ctx context.Context, authCtx *auth.AuthContext, threadID,
 }
 
 // isRateLimitError checks if the error message indicates a 429 rate limit.
-// wantsNodeInterrupt checks if the user's message signals a "review before execute" intent.
-// When true, the SteppedRunner will pause after the LLM decides tool calls (but before
-// executing them) so a human can review and approve/reject the plan.
-func wantsNodeInterrupt(msg string) bool {
-	lower := strings.ToLower(msg)
-	keywords := []string{
-		"确认后再执行",
-		"确认后执行",
-		"先确认再",
-		"先审批再",
-		"审批后再执行",
-		"审核后",
-		"确认一下再",
-		"请确认",
-		"计划审批",
-		"生成计划",
-		"执行计划",
-		"先制定计划",
-	}
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
-}
-
 func isRateLimitError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "429") ||

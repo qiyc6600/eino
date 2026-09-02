@@ -286,7 +286,11 @@ async function sendMessage() {
     } catch (e) {
         // Fallback: if streaming fails, try non-streaming
         try {
-            const data = await api('POST', '/api/agent/chat', { threadId: currentThread, message });
+            const data = await api('POST', '/api/agent/chat', {
+                threadId: currentThread,
+                message,
+                confirmBeforeExecute: document.getElementById('confirmBeforeExecute')?.checked || false,
+            });
             if (data.status === 'interrupted') {
                 pushMessage(currentThread, 'interrupt',
                     `⏸️ 运行已中断，等待审批\n工具：${data.interrupt.tool_name}\n原因：${data.interrupt.message}`);
@@ -317,13 +321,14 @@ async function sendMessage() {
 
 // chatStream sends a message and reads the SSE stream
 async function chatStream(threadId, message) {
+    const confirmBeforeExecute = document.getElementById('confirmBeforeExecute')?.checked || false;
     const resp = await fetch('/api/agent/chat', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${sessionId}`,
         },
-        body: JSON.stringify({ threadId, message, stream: true }),
+        body: JSON.stringify({ threadId, message, stream: true, confirmBeforeExecute }),
     });
 
     if (!resp.ok) {

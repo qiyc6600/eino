@@ -30,7 +30,7 @@
 
 | # | 任务要求 | 状态 | 说明 |
 |---|----------|------|------|
-| 2.1 | 任意节点能中断存状态 | ⚠️ | `NodeInterruptConfig` + `SteppedRunner` 集成，通过意图检测（"确认后再执行"）触发节点级中断。中断后暂停图执行，PendingToolCalls 保留在状态中等待审批 |
+| 2.1 | 任意节点能中断存状态 | ✅ | SteppedRunner 节点级中断门：请求显式 `confirmBeforeExecute` 标志（前端开关/API 字段）触发，中断后暂停执行，PendingToolCalls 保留在状态中等待审批；标志按请求传递，不依赖消息关键词，也无共享状态污染 |
 | 2.2 | 危险操作 yes/no | ✅ | `delete_order` / `send_email` 触发审批，`ApprovalDecision{Approved, Reason}` |
 | 2.3 | 同 run ID 恢复续跑 | ⚠️ | `Runner.Resume()` 优先从 Checkpoint 加载完整 `SteppedRunState`（含对话历史+中间步骤），Resume 时从中断点继续执行 ReAct 循环。若 Checkpoint 不可用则降级为线程重建模式 |
 | 2.4 | Web 承载中断-审批-恢复 | ✅ | 前端审批卡片 + approve/reject 按钮 + API 调用 |
@@ -120,8 +120,8 @@
 
 ## 统计
 
-- **硬性要求**：31 项 ✅ 通过，2 项 ⚠️ 部分达标（2.1 节点级中断需意图触发、2.3 Checkpoint 恢复有降级路径）
+- **硬性要求**：32 项 ✅ 通过，1 项 ⚠️ 部分达标（2.3 Checkpoint 恢复有降级路径）
 - **技术约束**：12 项 ✅ 全部满足
 - **文档交付物**：7 项 ✅ 全部完成
 
-**结论：项目核心功能完整。多用户隔离已由"调用方自觉"升级为"框架强制"（类型化 ToolIdentity + 属主校验 + 存储层 CheckUserScope，见 design.md 5.3 节）；剩余 2 项部分达标项均有合理理由（节点中断通过意图检测按需激活、Checkpoint 恢复优先走完整状态路径并有线程重建降级）。**
+**结论：项目核心功能完整。多用户隔离为框架强制（design.md 5.3 节）；节点级中断由请求显式标志触发（不依赖关键词）；剩余 1 项部分达标项有合理理由（Checkpoint 恢复优先走完整状态路径并有线程重建降级）。**

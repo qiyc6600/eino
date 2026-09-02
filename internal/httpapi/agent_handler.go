@@ -28,6 +28,10 @@ type ChatRequest struct {
 	ThreadID string `json:"threadId"`
 	Message  string `json:"message"`
 	Stream   bool   `json:"stream"` // if true, use SSE streaming
+	// ConfirmBeforeExecute enables the node-level plan review interrupt for
+	// this request: the run pauses after the LLM decides on tool calls and
+	// waits for human approval before executing them.
+	ConfirmBeforeExecute bool `json:"confirmBeforeExecute"`
 }
 
 // Chat handles POST /api/agent/chat
@@ -63,8 +67,17 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-streaming: original behavior
-	result := h.runner.Chat(ac, req.ThreadID, req.Message)
+	result := h.runner.Chat(ac, req.ThreadID, req.Message, chatOptionsFromRequest(&req)...)
 	writeJSON(w, http.StatusOK, result)
+}
+
+// chatOptionsFromRequest maps the API request flags to runner chat options.
+func chatOptionsFromRequest(req *ChatRequest) []agent.ChatOption {
+	var opts []agent.ChatOption
+	if req.ConfirmBeforeExecute {
+		opts = append(opts, agent.WithConfirmBeforeExecute())
+	}
+	return opts
 }
 
 // chatStream handles SSE streaming for chat responses.
@@ -87,7 +100,7 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 
 	// Always use Chat() — it goes through SteppedRunner which records events,
 	// handles interrupts, and provides complete results.
-	result := h.runner.Chat(ac, req.ThreadID, req.Message)
+	result := h.runner.Chat(ac, req.ThreadID, req.Message, chatOptionsFromRequest(req)...)
 
 	// Extract preferences asynchronously
 	go h.runner.ExtractAndSavePreferences(ac, req.Message)

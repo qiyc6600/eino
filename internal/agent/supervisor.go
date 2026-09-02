@@ -240,7 +240,7 @@ func (t *agentToolWrapper) InvokableRun(ctx context.Context, argumentsInJSON str
 		for !state.Done {
 			var interruptReq *InterruptRequest
 			var stepErr error
-			state, interruptReq, stepErr = t.steppedRunner.RunStep(ctx, state, recorder)
+			state, interruptReq, stepErr = t.steppedRunner.RunStep(ctx, state, recorder, false)
 			if stepErr != nil {
 				return "", stepErr
 			}

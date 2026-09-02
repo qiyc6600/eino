@@ -82,6 +82,10 @@
                     </div>
                 </div>
                 <div class="chat-input">
+                    <label class="confirm-toggle" title="开启后，Agent 生成执行计划会先暂停，等待人工审批后才执行工具">
+                        <input type="checkbox" id="confirmBeforeExecute">
+                        <span>⚠️ 执行前确认</span>
+                    </label>
                     <input type="text" id="chatInput" placeholder="输入消息..." onkeypress="if(event.key==='Enter')sendMessage()">
                     <button onclick="sendMessage()" class="btn btn-primary">发送</button>
                 </div>

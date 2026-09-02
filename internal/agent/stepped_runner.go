@@ -87,26 +87,16 @@ type InterruptRequest struct {
 	ThreadID    string
 }
 
-// NodeInterruptConfig controls node-level interrupt behavior in the SteppedRunner.
-// When enabled, the SteppedRunner will pause after the LLM decides on tool calls
-// (but before executing them), presenting the plan for human review.
-type NodeInterruptConfig struct {
-	Enabled     bool   // whether node-level interrupts are active
-	NodeName    string // name of the interrupt node (e.g., "plan_review")
-	Message     string // human-readable message for the approval card
-}
-
 // SteppedRunner executes a ReAct loop step-by-step with interrupt support.
 type SteppedRunner struct {
-	chatModel        model.ToolCallingChatModel    // base model (no tools bound)
-	toolModel        model.ToolCallingChatModel    // model with tools bound via WithTools
-	registry         *tools.ToolRegistry
-	hitlSvc          *hitl.Service
-	rbac             *auth.RBACManager             // RBAC checker for tool-level ACL
-	maxSteps         int
-	dispatchMap      map[string]*DispatchEntry // name -> entry for O(1) dispatch
-	toolInfos        []*schema.ToolInfo        // ordered list for LLM binding
-	nodeInterruptCfg *NodeInterruptConfig      // optional: node-level interrupt before tool execution
+	chatModel   model.ToolCallingChatModel // base model (no tools bound)
+	toolModel   model.ToolCallingChatModel // model with tools bound via WithTools
+	registry    *tools.ToolRegistry
+	hitlSvc     *hitl.Service
+	rbac        *auth.RBACManager          // RBAC checker for tool-level ACL
+	maxSteps    int
+	dispatchMap map[string]*DispatchEntry // name -> entry for O(1) dispatch
+	toolInfos   []*schema.ToolInfo        // ordered list for LLM binding
 }
 
 // NewSteppedRunner creates a new stepped ReAct runner.
@@ -156,14 +146,6 @@ func (r *SteppedRunner) HasSubAgents() bool {
 	return false
 }
 
-// SetNodeInterruptConfig configures node-level interrupt behavior.
-// When enabled, the SteppedRunner will pause after the LLM decides on tool calls
-// but before executing them, presenting the plan for human review.
-// This implements the "plan_review_node" pattern required by the task spec.
-func (r *SteppedRunner) SetNodeInterruptConfig(cfg *NodeInterruptConfig) {
-	r.nodeInterruptCfg = cfg
-}
-
 // RunAll runs the full ReAct loop to completion (no interrupts).
 // Equivalent to the old supervisor.Run() but using stepped execution internally.
 func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) SupervisorRunResult {
@@ -178,7 +160,7 @@ func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, 
 	var err error
 
 	for !state.Done {
-		state, interruptReq, err = r.RunStep(ctx, state, recorder)
+		state, interruptReq, err = r.RunStep(ctx, state, recorder, false)
 		if err != nil {
 			return SupervisorRunResult{Answer: fmt.Sprintf("Error at step %d: %v", state.Step, err)}
 		}
@@ -200,7 +182,10 @@ func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, 
 // RunStep- executes one iteration of the ReAct loop.
 // Returns updated state, optional interrupt request, and error.
 // If interruptReq is non-nil, the caller should save state and wait for approval.
-func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, recorder *EventRecorder) (*SteppedRunState, *InterruptRequest, error) {
+// RunStep executes one step of the ReAct loop. When confirmBeforeExecute is
+// true, the run pauses after the LLM decides on tool calls (before executing
+// them) so the plan can be approved or rejected by a human.
+func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, recorder *EventRecorder, confirmBeforeExecute bool) (*SteppedRunState, *InterruptRequest, error) {
 	if state.Done {
 		return state, nil, nil
 	}
@@ -252,7 +237,9 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 	// before executing them. This lets humans review the LLM's plan.
 	// Implements the "plan_review_node" pattern: LLM generates a plan (tool calls),
 	// then the run pauses so a human can approve or reject the entire plan.
-	if r.nodeInterruptCfg != nil && r.nodeInterruptCfg.Enabled {
+	// confirmBeforeExecute is a per-run parameter supplied by the caller
+	// (explicit request flag), not shared runner state.
+	if confirmBeforeExecute {
 		// Build a human-readable summary of the planned tool calls
 		var planLines []string
 		for _, tc := range resp.ToolCalls {
@@ -260,18 +247,14 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 		}
 		planSummary := fmt.Sprintf("Agent 计划执行以下操作：\n%s", strings.Join(planLines, "\n"))
 
-		interruptMsg := r.nodeInterruptCfg.Message
-		if interruptMsg == "" {
-			interruptMsg = planSummary
-		} else {
-			interruptMsg += "\n\n" + planSummary
-		}
+		interruptMsg := "Agent 已生成执行计划，需要人工审批后方可继续"
+		interruptMsg += "\n\n" + planSummary
 
 		// Create node-level interrupt request
 		interruptReq := &InterruptRequest{
 			InterruptID: "i_" + uuid.New().String()[:8],
 			Type:        hitl.InterruptTypeNode,
-			NodeName:    r.nodeInterruptCfg.NodeName,
+			NodeName:    "plan_review",
 			Arguments:   "", // node-level: no single tool arguments
 			Message:     interruptMsg,
 			RunID:       state.RunID,
@@ -280,8 +263,8 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 
 		// Save state to checkpoint so Resume can restore it
 		if recorder != nil {
-			recorder.Record(EventAgentEnd, fmt.Sprintf("Node interrupt at %s — awaiting approval", r.nodeInterruptCfg.NodeName), map[string]any{
-				"node":          r.nodeInterruptCfg.NodeName,
+			recorder.Record(EventAgentEnd, fmt.Sprintf("Node interrupt at %s — awaiting approval", "plan_review"), map[string]any{
+				"node":          "plan_review",
 				"tool_calls":    len(resp.ToolCalls),
 				"interrupt_id":  interruptReq.InterruptID,
 			})

@@ -532,3 +532,22 @@ body {
     font-size: 14px;
 }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Confirm-before-execute toggle (node-level plan review) */
+.confirm-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    font-size: 13px;
+    color: #92400e;
+    cursor: pointer;
+    user-select: none;
+}
+
+.confirm-toggle input {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 0;
+    cursor: pointer;
+}
