@@ -14,9 +14,12 @@ import (
 // Service provides long-term memory, short-term checkpoint, and vector retrieval operations.
 type Service struct {
 	store           MemoryStore
-	checkpointStore CheckpointStore      // for conversation state snapshots
-	vectorStore     VectorStore          // for semantic memory retrieval
-	chatModel       model.BaseChatModel  // 用于 LLM 提取偏好（可为 nil，走规则降级）
+	checkpointStore CheckpointStore     // for conversation state snapshots
+	vectorStore     VectorStore         // for semantic memory retrieval
+	chatModel       model.BaseChatModel // 用于 LLM 提取偏好（可为 nil，走规则降级）
+
+	budgetTokens         int // token budget for RetrieveRelevant injection
+	consolidateThreshold int // active entries before consolidation pays off
 }
 
 // NewService creates a new memory service.
@@ -24,7 +27,14 @@ type Service struct {
 // checkpointStore can be nil, in which case snapshot operations are no-ops.
 // vectorStore can be nil, in which case vector retrieval is disabled (KV-only mode).
 func NewService(store MemoryStore, checkpointStore CheckpointStore, vectorStore VectorStore, chatModel model.BaseChatModel) *Service {
-	return &Service{store: store, checkpointStore: checkpointStore, vectorStore: vectorStore, chatModel: chatModel}
+	return &Service{
+		store:                store,
+		checkpointStore:      checkpointStore,
+		vectorStore:          vectorStore,
+		chatModel:            chatModel,
+		budgetTokens:         DefaultBudgetTokens,
+		consolidateThreshold: DefaultConsolidateThresh,
+	}
 }
 
 // SetChatModel replaces the chat model (used for runtime model switching).
@@ -37,18 +47,75 @@ func (s *Service) GetCheckpointStore() CheckpointStore {
 	return s.checkpointStore
 }
 
-// PutPreference writes a user preference to long-term memory.
-func (s *Service) PutPreference(ctx context.Context, userID, key, value string) error {
+// EntryMeta carries optional metadata for memory upserts.
+type EntryMeta struct {
+	Type       string // MemoryType* constant; empty = preference
+	Importance int    // 1-5; 0 = DefaultImportance
+	Source     string // user_stated | llm_extracted | consolidated; empty = user_stated
+	ThreadID   string // conversation provenance
+	Excerpt    string // truncated original message
+}
+
+// UpsertPreference writes a preference with conflict resolution: when the key
+// already exists with a different value, the old value is archived into the
+// entry's history (capped) instead of being silently dropped. Identical
+// values are a no-op.
+func (s *Service) UpsertPreference(ctx context.Context, userID, key, value string, meta EntryMeta) error {
 	now := time.Now().Format(time.RFC3339)
+
+	existing, ok, err := s.store.Get(ctx, userID, key)
+	if err != nil {
+		return err
+	}
+
+	if ok {
+		if existing.Value == value {
+			return nil // unchanged — nothing to record
+		}
+		// Archive the superseded value (newest first, capped).
+		rev := ValueRevision{Value: existing.Value, Source: existing.Source, SupersededAt: now}
+		existing.History = append([]ValueRevision{rev}, existing.History...)
+		if len(existing.History) > MaxValueHistory {
+			existing.History = existing.History[:MaxValueHistory]
+		}
+		existing.Value = value
+		existing.UpdatedAt = now
+		if meta.Type != "" {
+			existing.Type = meta.Type
+		}
+		if meta.Importance > 0 {
+			existing.Importance = meta.Importance
+		}
+		if meta.Source != "" {
+			existing.Source = meta.Source
+		}
+		if meta.ThreadID != "" {
+			existing.SourceThreadID = meta.ThreadID
+		}
+		if meta.Excerpt != "" {
+			existing.SourceExcerpt = meta.Excerpt
+		}
+		return s.store.Put(ctx, existing)
+	}
+
 	entry := MemoryEntry{
-		UserID:    userID,
-		Key:       key,
-		Value:     value,
-		Source:    "user_stated",
-		CreatedAt: now,
-		UpdatedAt: now,
+		UserID:         userID,
+		Key:            key,
+		Value:          value,
+		Source:         meta.Source,
+		Type:           meta.Type,
+		Importance:     meta.Importance,
+		SourceThreadID: meta.ThreadID,
+		SourceExcerpt:  meta.Excerpt,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	return s.store.Put(ctx, entry)
+}
+
+// PutPreference writes a user preference (simple form, upsert semantics).
+func (s *Service) PutPreference(ctx context.Context, userID, key, value string) error {
+	return s.UpsertPreference(ctx, userID, key, value, EntryMeta{Source: "user_stated"})
 }
 
 // GetPreference reads a single preference from long-term memory.
@@ -73,50 +140,138 @@ func (s *Service) DeletePreference(ctx context.Context, userID, key string) erro
 	return s.store.Delete(ctx, userID, key)
 }
 
-// ExtractAndSave extracts user preferences from a message and saves them to long-term memory.
-// ExtractAndSave extracts user preferences from a message and saves them to long-term memory.
-// Strategy: rule-based extraction runs first (precise, deterministic), then LLM extraction
-// supplements any preferences the rules missed (broader coverage, but less reliable).
-func (s *Service) ExtractAndSave(ctx context.Context, userID, message string) error {
-	// 1. Always run rule-based extraction first (precise)
-	_ = s.extractWithRules(ctx, userID, message)
+// ExtractAndSave extracts memory from a message and saves it to long-term memory.
+// Strategy (LLM-led with rule fallback):
+//  1. When a chat model is configured it owns the turn: entries are upserted
+//     with conflict resolution, after a light anti-hallucination check for
+//     enumerable keys (the value must appear in the message text).
+//  2. Rule-based extraction runs only as fallback — no model configured, or
+//     the model call/parse failed (e.g. the mock model) — keeping extraction
+//     deterministic and demoable without a real LLM.
+//  3. Messages that actually carry memory value are additionally stored as
+//     episodes (KV + vector index); plain chit-chat is never indexed.
+func (s *Service) ExtractAndSave(ctx context.Context, userID, threadID, message string) error {
+	excerpt := truncateExcerpt(message, 100)
 
-	// 2. If chatModel is available, run LLM extraction as supplement
+	// 1. LLM extraction owns the turn when the model is usable.
+	var llmEntries []MemoryEntry
+	llmOwned := false
 	if s.chatModel != nil {
 		extracted, err := s.extractWithLLM(ctx, message)
-		if err == nil && len(extracted) > 0 {
+		if err == nil {
+			llmOwned = true
 			for _, e := range extracted {
-				// Only save LLM-extracted entries that don't already exist
-				// (rules take priority — don't overwrite rule-extracted values)
-				_, exists, _ := s.store.Get(ctx, userID, e.Key)
-				if !exists {
-					s.PutPreference(ctx, userID, e.Key, e.Value)
+				if !valueSupportedByMessage(e.Key, e.Value, message) {
+					continue // hallucinated value for a closed-list key
+				}
+				if err := s.UpsertPreference(ctx, userID, e.Key, e.Value, EntryMeta{
+					Type: e.Type, Importance: e.Importance,
+					Source: "llm_extracted", ThreadID: threadID, Excerpt: excerpt,
+				}); err == nil {
+					llmEntries = append(llmEntries, e)
 				}
 			}
 		}
 	}
 
-	// 3. Store original message to vector store for semantic retrieval
-	if s.vectorStore != nil {
-		_ = s.vectorStore.Store(ctx, userID, message, map[string]any{
-			"timestamp": time.Now().Format(time.RFC3339),
-			"type":      "user_message",
-		})
+	// 2. Rule fallback: no model, or the model path failed (mock model etc.).
+	var written []string
+	if !llmOwned {
+		written, _ = s.extractWithRules(ctx, userID, threadID, excerpt, message)
+	}
+
+	// 3. Episode indexing: only messages with real memory value reach the
+	//    stores (a turn the LLM owned but found nothing in is not indexed).
+	if len(llmEntries) > 0 || len(written) > 0 || hasPreferenceSignal(message) {
+		s.storeEpisode(ctx, userID, threadID, message)
 	}
 
 	return nil
 }
 
+// enumerableMemoryKeys are keys whose values come from a closed list
+// (language/framework/editor/city names). The LLM may only assert them when
+// the value verbatim appears in the message — a cheap anti-hallucination
+// guard for exactly the keys where fabrication is most likely.
+var enumerableMemoryKeys = map[string]bool{
+	"preferred_language":  true,
+	"preferred_framework": true,
+	"preferred_editor":    true,
+	"preferred_city":      true,
+}
+
+// valueSupportedByMessage reports whether an extracted entry is supported by
+// the message text. Non-enumerable keys (answer_style, communication_style…)
+// pass unconditionally — their values are paraphrases, not verbatim quotes.
+func valueSupportedByMessage(key, value, message string) bool {
+	if !enumerableMemoryKeys[key] {
+		return true
+	}
+	return strings.Contains(strings.ToLower(message), strings.ToLower(value))
+}
+
+// storeEpisode records a valuable message as an episode entry (source of
+// truth, listable for consolidation) and indexes it in the vector store
+// (semantic retrieval).
+func (s *Service) storeEpisode(ctx context.Context, userID, threadID, message string) {
+	now := time.Now()
+	excerpt := truncateExcerpt(message, 200)
+	key := "ep_" + now.UTC().Format("20060102150405")
+
+	// Episode entry in the KV store (listable, consolidatable).
+	_ = s.UpsertPreference(ctx, userID, key, excerpt, EntryMeta{
+		Type: MemoryTypeEpisode, Importance: 2,
+		Source: "episode", ThreadID: threadID, Excerpt: excerpt,
+	})
+
+	// Vector index for semantic retrieval.
+	if s.vectorStore != nil {
+		_ = s.vectorStore.Store(ctx, userID, excerpt, map[string]any{
+			"timestamp": now.Format(time.RFC3339),
+			"type":      "episode",
+			"thread_id": threadID,
+			"key":       key,
+		})
+	}
+}
+
+// hasPreferenceSignal reports whether a message plausibly carries memory
+// value (preference/identity statements). Used to filter episode indexing.
+func hasPreferenceSignal(message string) bool {
+	lower := strings.ToLower(message)
+	signals := []string{
+		"我喜欢", "我偏好", "我喜欢用", "以后请", "默认用", "请用", "请直接",
+		"我是", "我在", "我的", "记住", "prefer", "always", "default",
+	}
+	for _, s := range signals {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// truncateExcerpt cuts a string to at most max runes with an ellipsis.
+func truncateExcerpt(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
+}
+
 // extractWithLLM calls the ChatModel to extract structured preferences from a user message.
-// The LLM returns a JSON array of {key, value} pairs.
+// The LLM returns a JSON array of {key, value, type, importance} objects.
 func (s *Service) extractWithLLM(ctx context.Context, message string) ([]MemoryEntry, error) {
-	prompt := `你是一个用户偏好提取助手。从用户消息中提取偏好信息，以 JSON 数组格式返回。
+	prompt := `你是一个用户记忆提取助手。从用户消息中提取值得长期记住的信息，以 JSON 数组格式返回。
 
 提取规则：
-1. 只提取明确的偏好表达（如"我喜欢X""请用Y""我偏好Z""以后请X"），不提取模糊或无关信息。
-2. 如果没有可提取的偏好，返回空数组 []。
+1. 只提取明确的偏好、身份或事实表达（如"我喜欢X""请用Y""我在Z""记住W"），不提取模糊或无关信息。
+2. 如果没有可提取的信息，返回空数组 []。
 3. key 使用英文蛇形命名（如 preferred_language, answer_style, preferred_framework）。
 4. value 使用简短明确的值（如 Python, concise, Go）。
+5. type 从以下选一：preference（偏好）/ identity（身份）/ fact（事实）/ rule（用户给的长期规则）。
+6. importance 为 1-5 整数：5=核心身份或强烈偏好，3=一般偏好，1=边缘信息。
 
 常见 key 参考：
 - preferred_language: 用户偏好的编程语言
@@ -132,19 +287,19 @@ func (s *Service) extractWithLLM(ctx context.Context, message string) ([]MemoryE
 
 示例：
 用户消息："我喜欢用Python写代码，回答请简洁"
-返回：[{"key":"preferred_language","value":"Python"},{"key":"answer_style","value":"concise"}]
+返回：[{"key":"preferred_language","value":"Python","type":"preference","importance":4},{"key":"answer_style","value":"concise","type":"preference","importance":3}]
 
-用户消息："我在北京，用React开发，VSCode写代码"
-返回：[{"key":"preferred_city","value":"北京"},{"key":"preferred_framework","value":"React"},{"key":"preferred_editor","value":"VSCode"}]
+用户消息："以后请都用Go，这是团队规范"
+返回：[{"key":"preferred_language","value":"Go","type":"rule","importance":5}]
 
 用户消息：` + message
 
 	resp, err := s.chatModel.Generate(ctx, []*schema.Message{
-		schema.SystemMessage("你是一个用户偏好提取助手，只返回 JSON 数组，不返回其他内容。"),
+		schema.SystemMessage("你是一个用户记忆提取助手，只返回 JSON 数组，不返回其他内容。"),
 		schema.UserMessage(prompt),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("LLM preference extraction failed: %w", err)
+		return nil, fmt.Errorf("LLM memory extraction failed: %w", err)
 	}
 
 	// 解析 LLM 返回的 JSON
@@ -157,8 +312,10 @@ func (s *Service) extractWithLLM(ctx context.Context, message string) ([]MemoryE
 	}
 
 	var pairs []struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
+		Key        string `json:"key"`
+		Value      string `json:"value"`
+		Type       string `json:"type"`
+		Importance int    `json:"importance"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &pairs); err != nil {
 		return nil, fmt.Errorf("LLM JSON parse failed: %w", err)
@@ -171,11 +328,13 @@ func (s *Service) extractWithLLM(ctx context.Context, message string) ([]MemoryE
 			continue
 		}
 		entries = append(entries, MemoryEntry{
-			Key:       p.Key,
-			Value:     p.Value,
-			Source:    "llm_extracted",
-			CreatedAt: now,
-			UpdatedAt: now,
+			Key:        p.Key,
+			Value:      p.Value,
+			Type:       p.Type,
+			Importance: p.Importance,
+			Source:     "llm_extracted",
+			CreatedAt:  now,
+			UpdatedAt:  now,
 		})
 	}
 	return entries, nil
@@ -203,7 +362,8 @@ func extractJSONArray(s string) string {
 }
 
 // extractWithRules is the fallback rule-based preference extraction.
-func (s *Service) extractWithRules(ctx context.Context, userID, message string) error {
+// Returns the keys written during this call so the LLM pass can skip them.
+func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerpt, message string) ([]string, error) {
 	lower := strings.ToLower(message)
 
 	// Trigger: only extract when user expresses a preference
@@ -221,83 +381,97 @@ func (s *Service) extractWithRules(ctx context.Context, userID, message string) 
 		strings.Contains(lower, "详尽")
 
 	if !hasPreferenceTrigger {
-		return nil
+		return nil, nil
+	}
+
+	// write records one rule-extracted preference with provenance metadata.
+	var written []string
+	write := func(key, value string, importance int) {
+		if err := s.UpsertPreference(ctx, userID, key, value, EntryMeta{
+			Type:       MemoryTypePreference,
+			Importance: importance,
+			Source:     "user_stated",
+			ThreadID:   threadID,
+			Excerpt:    excerpt,
+		}); err == nil {
+			written = append(written, key)
+		}
 	}
 
 	// --- Programming language preference ---
 	switch {
 	case strings.Contains(lower, "python"):
-		s.PutPreference(ctx, userID, "preferred_language", "Python")
+		write("preferred_language", "Python", 4)
 	case strings.Contains(lower, "java") && !strings.Contains(lower, "javascript"):
-		s.PutPreference(ctx, userID, "preferred_language", "Java")
+		write("preferred_language", "Java", 4)
 	case strings.Contains(lower, "go") || strings.Contains(lower, "golang"):
-		s.PutPreference(ctx, userID, "preferred_language", "Go")
+		write("preferred_language", "Go", 4)
 	case strings.Contains(lower, "javascript") || strings.Contains(lower, "js"):
-		s.PutPreference(ctx, userID, "preferred_language", "JavaScript")
+		write("preferred_language", "JavaScript", 4)
 	case strings.Contains(lower, "typescript") || strings.Contains(lower, "ts"):
-		s.PutPreference(ctx, userID, "preferred_language", "TypeScript")
+		write("preferred_language", "TypeScript", 4)
 	case strings.Contains(lower, "rust"):
-		s.PutPreference(ctx, userID, "preferred_language", "Rust")
+		write("preferred_language", "Rust", 4)
 	case strings.Contains(lower, "c++") || strings.Contains(lower, "cpp"):
-		s.PutPreference(ctx, userID, "preferred_language", "C++")
+		write("preferred_language", "C++", 4)
 	case strings.Contains(lower, "c#") || strings.Contains(lower, "csharp"):
-		s.PutPreference(ctx, userID, "preferred_language", "C#")
+		write("preferred_language", "C#", 4)
 	case strings.Contains(lower, "swift"):
-		s.PutPreference(ctx, userID, "preferred_language", "Swift")
+		write("preferred_language", "Swift", 4)
 	case strings.Contains(lower, "kotlin"):
-		s.PutPreference(ctx, userID, "preferred_language", "Kotlin")
+		write("preferred_language", "Kotlin", 4)
 	}
 
 	// --- Framework preference ---
 	switch {
 	case strings.Contains(lower, "react") && !strings.Contains(lower, "vue"):
-		s.PutPreference(ctx, userID, "preferred_framework", "React")
+		write("preferred_framework", "React", 4)
 	case strings.Contains(lower, "vue"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Vue")
+		write("preferred_framework", "Vue", 4)
 	case strings.Contains(lower, "angular"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Angular")
+		write("preferred_framework", "Angular", 4)
 	case strings.Contains(lower, "spring"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Spring")
+		write("preferred_framework", "Spring", 4)
 	case strings.Contains(lower, "django"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Django")
+		write("preferred_framework", "Django", 4)
 	case strings.Contains(lower, "flask"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Flask")
+		write("preferred_framework", "Flask", 4)
 	case strings.Contains(lower, "gin") && !strings.Contains(lower, "begin"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Gin")
+		write("preferred_framework", "Gin", 4)
 	case strings.Contains(lower, "fib") || strings.Contains(lower, "fiber"):
-		s.PutPreference(ctx, userID, "preferred_framework", "Fiber")
+		write("preferred_framework", "Fiber", 4)
 	}
 
 	// --- Editor/IDE preference ---
 	switch {
 	case strings.Contains(lower, "vscode") || strings.Contains(lower, "vs code"):
-		s.PutPreference(ctx, userID, "preferred_editor", "VSCode")
+		write("preferred_editor", "VSCode", 4)
 	case strings.Contains(lower, "vim") || strings.Contains(lower, "neovim"):
-		s.PutPreference(ctx, userID, "preferred_editor", "Vim")
+		write("preferred_editor", "Vim", 4)
 	case strings.Contains(lower, "emacs"):
-		s.PutPreference(ctx, userID, "preferred_editor", "Emacs")
+		write("preferred_editor", "Emacs", 4)
 	case strings.Contains(lower, "idea") || strings.Contains(lower, "intellij"):
-		s.PutPreference(ctx, userID, "preferred_editor", "IntelliJ IDEA")
+		write("preferred_editor", "IntelliJ IDEA", 4)
 	case strings.Contains(lower, "pycharm"):
-		s.PutPreference(ctx, userID, "preferred_editor", "PyCharm")
+		write("preferred_editor", "PyCharm", 4)
 	case strings.Contains(lower, "goland"):
-		s.PutPreference(ctx, userID, "preferred_editor", "GoLand")
+		write("preferred_editor", "GoLand", 4)
 	}
 
 	// --- Answer style preference ---
 	if strings.Contains(lower, "简洁") || strings.Contains(lower, "简短") {
-		s.PutPreference(ctx, userID, "answer_style", "concise")
+		write("answer_style", "concise", 3)
 	}
 	if strings.Contains(lower, "详细") || strings.Contains(lower, "详尽") {
-		s.PutPreference(ctx, userID, "answer_style", "detailed")
+		write("answer_style", "detailed", 3)
 	}
 
 	// --- Answer language preference ---
 	switch {
 	case strings.Contains(lower, "用中文回答") || strings.Contains(lower, "中文回复"):
-		s.PutPreference(ctx, userID, "answer_language", "Chinese")
+		write("answer_language", "Chinese", 3)
 	case strings.Contains(lower, "用英文回答") || strings.Contains(lower, "英文回复") || strings.Contains(lower, "answer in english"):
-		s.PutPreference(ctx, userID, "answer_language", "English")
+		write("answer_language", "English", 3)
 	}
 
 	// --- City/location preference ---
@@ -305,7 +479,7 @@ func (s *Service) extractWithRules(ctx context.Context, userID, message string) 
 	for _, city := range cities {
 		if strings.Contains(lower, "默认城市") || strings.Contains(lower, "所在城市") || strings.Contains(lower, "我在") {
 			if strings.Contains(lower, city) {
-				s.PutPreference(ctx, userID, "preferred_city", city)
+				write("preferred_city", city, 3)
 				break
 			}
 		}
@@ -314,14 +488,14 @@ func (s *Service) extractWithRules(ctx context.Context, userID, message string) 
 	// --- Output format preference ---
 	switch {
 	case strings.Contains(lower, "表格形式") || strings.Contains(lower, "表格展示"):
-		s.PutPreference(ctx, userID, "output_format", "table")
+		write("output_format", "table", 3)
 	case strings.Contains(lower, "列表形式") || strings.Contains(lower, "列表展示"):
-		s.PutPreference(ctx, userID, "output_format", "list")
+		write("output_format", "list", 3)
 	case strings.Contains(lower, "代码形式") || strings.Contains(lower, "代码展示"):
-		s.PutPreference(ctx, userID, "output_format", "code")
+		write("output_format", "code", 3)
 	}
 
-	return nil
+	return written, nil
 }
 
 // BuildMemoryContext builds a text representation of the user's preferences

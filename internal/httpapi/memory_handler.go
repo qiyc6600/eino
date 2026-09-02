@@ -80,3 +80,23 @@ func (h *MemoryHandler) DeleteMemory(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// ConsolidateMemory handles POST /api/memory/consolidate
+// Runs one memory-lifecycle pass: archives stale low-value entries and
+// consolidates the remaining ones into a user profile (LLM when available,
+// rule-based fallback otherwise).
+func (h *MemoryHandler) ConsolidateMemory(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	result, err := h.memSvc.Consolidate(r.Context(), ac.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}

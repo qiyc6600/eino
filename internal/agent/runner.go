@@ -171,7 +171,7 @@ func (r *Runner) SetSteppedRunner(sr *SteppedRunner) {
 // Called after streaming completes to ensure preferences are captured in all modes.
 func (r *Runner) ExtractAndSavePreferences(authCtx *auth.AuthContext, userMessage string) {
 	ctx := context.Background()
-	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, userMessage)
+	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, authCtx.ThreadID, userMessage)
 }
 
 // ChatOption customizes a single chat run.
@@ -206,8 +206,11 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string, o
 	ctx := context.Background()
 	ctx = injectAuthContext(ctx, authCtx, threadID, runID)
 
-	// Inject long-term memory into system prompt
-	memCtx := r.memorySvc.BuildMemoryContext(ctx, authCtx.UserID)
+	// Inject relevant long-term memory into the system prompt.
+	// RetrieveRelevant scores entries by keyword relevance to the message,
+	// importance, recency and access frequency, and fits them into a token
+	// budget (0 = use the configured default).
+	memCtx := r.memorySvc.RetrieveRelevant(ctx, authCtx.UserID, userMessage, 0)
 
 	// Build dynamic system prompt based on dispatch mode
 	// When sub-agents are registered, use the supervisor routing prompt;
@@ -220,12 +223,6 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string, o
 	}
 	if memCtx != "" {
 		systemContent += "\n\n" + memCtx
-	}
-
-	// Inject vector-retrieved semantic memories (query-specific)
-	vectorCtx := r.memorySvc.QueryVectorMemory(ctx, authCtx.UserID, userMessage, 3)
-	if vectorCtx != "" {
-		systemContent += "\n\n" + vectorCtx
 	}
 
 	messages := []*schema.Message{schema.SystemMessage(systemContent)}
@@ -423,7 +420,7 @@ func (r *Runner) Chat(authCtx *auth.AuthContext, threadID, userMessage string, o
 	}
 
 	// Extract and save user preferences
-	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, userMessage)
+	_ = r.memorySvc.ExtractAndSave(ctx, authCtx.UserID, threadID, userMessage)
 
 	runResult := ChatRunResult{
 		RunID:         runID,
@@ -460,7 +457,7 @@ func (r *Runner) ChatStream(authCtx *auth.AuthContext, threadID, userMessage str
 	ctx := context.Background()
 	ctx = injectAuthContext(ctx, authCtx, threadID, "r_stream")
 
-	memCtx := r.memorySvc.BuildMemoryContext(ctx, authCtx.UserID)
+	memCtx := r.memorySvc.RetrieveRelevant(ctx, authCtx.UserID, userMessage, 0)
 
 	var systemContent string
 	if r.steppedRunner != nil && r.steppedRunner.HasSubAgents() {
@@ -794,9 +791,9 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 
 	// Step 3: Re-enter the ReAct loop with the updated conversation
 	// This is "resume from interrupt point" — the LLM sees the tool result
-	// and continues planning from where it left off
-	memCtx := r.memorySvc.BuildMemoryContext(ctx, authCtx.UserID)
-	vectorCtx := r.memorySvc.QueryVectorMemory(ctx, authCtx.UserID, "", 3)
+	// and continues planning from where it left off.
+	// Empty query: memory ranked by importance/recency/access only.
+	memCtx := r.memorySvc.RetrieveRelevant(ctx, authCtx.UserID, "", 0)
 
 	var systemContent string
 	if r.steppedRunner != nil && r.steppedRunner.HasSubAgents() {
@@ -806,9 +803,6 @@ func (r *Runner) Resume(authCtx *auth.AuthContext, interruptID string, decision 
 	}
 	if memCtx != "" {
 		systemContent += "\n\n" + memCtx
-	}
-	if vectorCtx != "" {
-		systemContent += "\n\n" + vectorCtx
 	}
 
 	messages := append([]*schema.Message{schema.SystemMessage(systemContent)}, threadMessages...)

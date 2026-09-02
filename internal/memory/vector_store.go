@@ -14,9 +14,9 @@ import (
 
 // VectorResult holds a single result from a vector similarity query.
 type VectorResult struct {
-	Content  string         `json:"content"`   // 原始文本
-	Score    float32        `json:"score"`     // 相似度分数 0-1
-	Metadata map[string]any `json:"metadata"`  // 元数据 (thread_id, timestamp 等)
+	Content  string         `json:"content"`  // 原始文本
+	Score    float32        `json:"score"`    // 相似度分数 0-1
+	Metadata map[string]any `json:"metadata"` // 元数据 (thread_id, timestamp 等)
 }
 
 // VectorStore is the interface for semantic memory retrieval.
@@ -96,8 +96,8 @@ func (s *InMemoryVectorStore) Query(ctx context.Context, userID, query string, t
 	}
 
 	type scored struct {
-		entry  vectorEntry
-		score  float32
+		entry vectorEntry
+		score float32
 	}
 
 	results := make([]scored, 0, len(entries))

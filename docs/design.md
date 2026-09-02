@@ -497,3 +497,53 @@ agent-eino-demo/
   web/                         # 前端页面
   docs/                        # 文档
 ```
+
+---
+
+## 9. 记忆系统 v2 设计
+
+在模块 05 的 KV 记忆之上，v2 补齐冲突消解、相关性检索与生命周期管理三块能力。
+
+### 9.1 数据模型
+
+`MemoryEntry` 新增字段（全部 omitempty，旧数据文件向后兼容）：
+
+| 字段 | 说明 |
+|------|------|
+| `type` | preference / identity / fact / episode / rule，空视为 preference |
+| `importance` | 1-5，零值视为 3 |
+| `source_thread_id` / `source_excerpt` | 记忆来源的对话线程与原句摘录 |
+| `access_count` / `last_accessed_at` | 检索命中统计 |
+| `archived` | 归档标记（不删除，仅退出检索与默认列表） |
+| `history` | 被覆盖的旧值修订链（保留最近 5 版） |
+
+### 9.2 写入与冲突消解
+
+`UpsertPreference` 为唯一写入口：key 已存在且值不同 → 旧值进 `history`（新值生效）；值相同 → no-op。
+
+**提取策略为"LLM 主导 + 规则兜底"**：配置了模型时，LLM 提取拥有本轮决定权（结果经轻量防幻觉校验——枚举类 key 如语言/框架/编辑器/城市，其 value 必须在消息原文中出现才落库，防止模型编造）；规则提取仅在无模型或模型调用/解析失败时兜底（如 mock 模式），保证无真实 LLM 时提取依然确定可用。带偏好信号的消息额外写入 `type=episode` 情景条目并进入向量索引；普通闲聊不产生任何写入。
+
+### 9.3 统一检索
+
+`RetrieveRelevant(ctx, userID, query, budget)` 是记忆注入的唯一入口：
+
+```
+score = 关键词重叠×2 (query-aware) + importance/5 + exp(-小时/168) (一周半衰) + min(access×0.05, 0.5)
+```
+
+- 按分数排序，在 `MEMORY_BUDGET_TOKENS` 预算内装配"确定性记忆"与"相关历史记忆"两段
+- 命中条目 `access_count++` 并刷新时间戳（使用即强化，越常用越靠前）
+- 归档条目永远不参与检索
+
+### 9.4 生命周期（遗忘 / 整合 / 沉淀）
+
+`Consolidate` 执行一轮整理：
+
+1. **遗忘**：有效分低于 0.5 的条目 `archived=true`（重要度低且长期未被访问的自然衰减退出）
+2. **整合**：活跃条目达到 `MEMORY_CONSOLIDATE_THRESHOLD` 且有 LLM 时，由模型生成 `user_profile` 用户画像、判定过时条目归档、并从情景沉淀新事实（new_facts）
+3. **降级**：无 LLM（mock 模式）或材料不足时，用规则拼接简版画像，遗忘仍然执行
+
+### 9.5 API 与界面
+
+- `POST /api/memory/consolidate`：手动触发整理，返回归档数/画像/新事实
+- 前端记忆面板：按类型分组、重要度星标、来源 tooltip、归档折叠区、"🧹 整合记忆"按钮

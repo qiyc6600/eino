@@ -39,10 +39,14 @@ type Config struct {
 	EmbeddingModel  string // model name for embedding provider
 
 	// Context management
-	MaxMessages            int
-	MaxTokens              int
-	SummarizeThresholdRatio float64
-	SummaryTargetTokens    int
+	MaxMessages              int
+	MaxTokens                int
+	SummarizeThresholdRatio  float64
+	SummaryTargetTokens      int
+
+	// Memory retrieval & lifecycle
+	MemoryBudgetTokens       int // token budget for memory injection per turn
+	MemoryConsolidateThreshold int // active entries before consolidation pays off
 }
 
 // ModelProfile defines a pre-configured AI model provider profile.
@@ -139,10 +143,12 @@ func LoadConfig() *Config {
 		ArkBaseURL:             getEnv("ARK_BASE_URL", ""),
 		EmbeddingProvider:      getEnv("EMBEDDING_PROVIDER", "hash"),
 		EmbeddingModel:         getEnv("EMBEDDING_MODEL", ""),
-		MaxMessages:            getEnvInt("MAX_MESSAGES", 30),
-		MaxTokens:              getEnvInt("MAX_TOKENS", 8000),
+		MaxMessages:             getEnvInt("MAX_MESSAGES", 30),
+		MaxTokens:               getEnvInt("MAX_TOKENS", 8000),
 		SummarizeThresholdRatio: getEnvFloat("SUMMARIZE_THRESHOLD_RATIO", 0.8),
-		SummaryTargetTokens:    getEnvInt("SUMMARY_TARGET_TOKENS", 800),
+		SummaryTargetTokens:     getEnvInt("SUMMARY_TARGET_TOKENS", 800),
+		MemoryBudgetTokens:      getEnvInt("MEMORY_BUDGET_TOKENS", 400),
+		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
 	}
 }
 

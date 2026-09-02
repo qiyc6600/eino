@@ -12,7 +12,7 @@ func TestService_ExtractAndSave_Language(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "我喜欢用Python")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "我喜欢用Python")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestService_ExtractAndSave_Style(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "请简洁回答")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "请简洁回答")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestService_ExtractAndSave_DetailedStyle(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "请详细回答")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "请详细回答")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestService_ExtractAndSave_NoPreference(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "今天天气怎么样")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "今天天气怎么样")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestService_CrossSessionMemory(t *testing.T) {
 	svc := NewService(store, nil, nil, nil)
 
 	// Session A: user states preference
-	svc.ExtractAndSave(context.Background(), "u_admin", "我喜欢用Python")
+	svc.ExtractAndSave(context.Background(), "u_admin", "t1", "我喜欢用Python")
 
 	// Session B: same user, should read the preference
 	ctx := svc.BuildMemoryContext(context.Background(), "u_admin")
@@ -137,7 +137,7 @@ func TestService_ExtractAndSave_WithLLM(t *testing.T) {
 	mockModel := &mockPrefExtractModel{}
 	svc := NewService(store, nil, nil, mockModel)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "我喜欢用Python，请简洁回答")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "我喜欢用Python，请简洁回答")
 	if err != nil {
 		t.Fatalf("extract with LLM failed: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestService_ExtractAndSave_LLMFallbackToRules(t *testing.T) {
 	mockModel := &mockPrefExtractModel{invalidResponse: true}
 	svc := NewService(store, nil, nil, mockModel)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "我喜欢用Python")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "我喜欢用Python")
 	if err != nil {
 		t.Fatalf("extract with fallback failed: %v", err)
 	}

@@ -108,7 +108,10 @@
                 <div class="sidebar-section">
                     <h3>🧠 用户记忆</h3>
                     <div id="memoryList" class="memory-list"></div>
-                    <button onclick="refreshMemory()" class="btn btn-sm btn-full">刷新</button>
+                    <div class="memory-actions">
+                        <button onclick="refreshMemory()" class="btn btn-sm">刷新</button>
+                        <button onclick="consolidateMemory()" class="btn btn-sm" title="归档低价值记忆，LLM 整合用户画像并沉淀新事实">🧹 整合记忆</button>
+                    </div>
                 </div>
             </div>
         </div>

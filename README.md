@@ -174,6 +174,17 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 **跨会话偏好**：用户在会话 A 表达"我喜欢用 Python"→ 自动提取写入长期记忆 → 会话 B 中 LLM 自动读取偏好。
 
+**记忆系统 v2**：在 KV 之上补齐记忆系统的三块核心能力——
+
+| 能力 | 实现 |
+|------|------|
+| 结构化记忆 | 条目带 `type`（preference/identity/fact/episode/rule）、`importance`（1-5）、来源线程与原句摘录 |
+| 冲突消解 | 偏好变更时旧值进入修订历史（保留最近 5 版），彻底修复"过时偏好永久驻留"问题 |
+| 统一检索 | `RetrieveRelevant` 按 `关键词相关性 × 重要度 × 时间衰减 × 访问频次` 打分，token 预算内取 top-N 注入；被命中的记忆自动强化（使用即强化） |
+| 遗忘 | 有效分衰减到阈值之下的旧条目被归档（可查不可注入），不再无限膨胀 |
+| 整合 | 达到条目阈值后 LLM 将碎片记忆整合为 `user_profile` 用户画像，归档过时条目，并把情景沉淀为持久事实；无 LLM 时规则降级 |
+| 记忆面板 | 前端按类型分组展示、重要度星标、来源 tooltip、归档折叠区、一键"🧹 整合记忆" |
+
 **持久化存储后端（进阶档）**：`SessionStore` / `CheckpointStore` / `MemoryStore` 三个接口均有 `memory`（默认，零依赖）与 `file`（JSON 持久化）两种实现，通过环境变量切换，业务代码零改动。file 版为装饰器实现，完整继承内存版的多用户隔离校验；启用后中断状态与跨会话记忆在进程重启后依然有效。
 
 **向量检索**：三种 embedding 后端可选：
@@ -201,6 +212,8 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | `EMBEDDING_PROVIDER` | `hash` | Embedding 后端：hash / ollama / openai |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
+| `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
+| `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
 | `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file`（JSON 持久化，重启不丢） |
 | `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` |
 | `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` |

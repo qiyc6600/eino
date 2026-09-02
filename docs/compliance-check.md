@@ -93,6 +93,7 @@
 | 5.2 | 长期记忆 MemoryStore（put/get，按 userId） | ✅ | `MemoryStore` 接口 + `InMemoryMemoryStore` |
 | 5.3 | 内存版存储后端（无外部依赖） | ✅ | 两种 InMemory 实现 |
 | 5.4 | 跨会话偏好记忆演示 | ✅ | 会话 A 写入偏好 → 会话 B 读取偏好 |
+| 5.5 | 记忆系统 v2（结构化/冲突消解/统一检索/生命周期） | ✅ | 条目带 type/importance/来源/修订历史；Upsert 消解偏好冲突；RetrieveRelevant 按相关性+重要度+衰减+频次打分并预算内注入；Consolidate 归档遗忘、LLM 整合画像、情景沉淀为事实（无 LLM 规则降级） |
 
 ### 模块 05 技术约束
 

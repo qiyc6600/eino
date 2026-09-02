@@ -129,6 +129,7 @@ func NewApp(cfg *Config) *App {
 		log.Printf("Using InMemoryVectorStore (hash-based pseudo-embeddings)")
 	}
 	memorySvc := memory.NewService(memoryStore, checkpointStore, vectorStore, chatModel)
+	memorySvc.SetRetrievalConfig(cfg.MemoryBudgetTokens, cfg.MemoryConsolidateThreshold)
 
 	// 6. Context management
 	tokenCounter := contextmgr.NewSimpleTokenCounter()

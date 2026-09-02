@@ -26,10 +26,10 @@ type Checkpoint struct {
 	UserID      string    `json:"user_id"`
 	ThreadID    string    `json:"thread_id"`
 	RunID       string    `json:"run_id"`
-	Step        int       `json:"step"`          // disambiguates multiple checkpoints per run
-	State       []byte    `json:"state"`         // serialized state (JSON)
-	Interrupted bool      `json:"interrupted"`   // true if this is an HITL interrupt checkpoint
-	Snapshot    bool      `json:"snapshot"`      // true if this is a conversation snapshot
+	Step        int       `json:"step"`        // disambiguates multiple checkpoints per run
+	State       []byte    `json:"state"`       // serialized state (JSON)
+	Interrupted bool      `json:"interrupted"` // true if this is an HITL interrupt checkpoint
+	Snapshot    bool      `json:"snapshot"`    // true if this is a conversation snapshot
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

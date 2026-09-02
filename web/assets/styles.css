@@ -551,3 +551,54 @@ body {
     padding: 0;
     cursor: pointer;
 }
+
+/* Memory panel: groups, types, importance, archive */
+.memory-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.memory-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #9ca3af;
+    margin: 8px 0 4px;
+}
+
+.memory-type {
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: #eef2ff;
+    color: #4f46e5;
+    margin-right: 2px;
+}
+
+.memory-stars {
+    font-size: 11px;
+    color: #f59e0b;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.memory-history {
+    font-size: 11px;
+    color: #9ca3af;
+    cursor: help;
+}
+
+.memory-item.archived {
+    opacity: 0.5;
+}
+
+.memory-archived {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #9ca3af;
+}
+
+.memory-archived summary {
+    cursor: pointer;
+    user-select: none;
+}

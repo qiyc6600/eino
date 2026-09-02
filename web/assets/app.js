@@ -631,6 +631,49 @@ async function refreshMemory() {
     }
 }
 
+const MEMORY_TYPE_LABELS = {
+    preference: '偏好',
+    identity: '身份',
+    fact: '事实',
+    episode: '情景',
+    rule: '规则',
+};
+
+function memoryTypeLabel(e) {
+    return MEMORY_TYPE_LABELS[e.type || 'preference'] || '其他';
+}
+
+function memoryImportance(e) {
+    const n = e.importance && e.importance >= 1 && e.importance <= 5 ? e.importance : 3;
+    return '★'.repeat(n) + '☆'.repeat(5 - n);
+}
+
+function memoryTooltip(e) {
+    const parts = [];
+    if (e.source) parts.push('来源: ' + e.source);
+    if (e.source_thread_id) parts.push('线程: ' + e.source_thread_id);
+    if (e.source_excerpt) parts.push('原话: ' + e.source_excerpt);
+    if (e.access_count) parts.push('被使用 ' + e.access_count + ' 次');
+    if (e.updated_at) parts.push('更新于 ' + e.updated_at);
+    return parts.join('\n') || '';
+}
+
+function memoryItemHTML(e) {
+    const history = (e.history && e.history.length)
+        ? ` <span class="memory-history" title="${e.history.map(h => h.value).join(' ← ').replace(/"/g, '&quot;')}">⏳${e.history.length}</span>`
+        : '';
+    const stars = memoryImportance(e);
+    const tip = memoryTooltip(e).replace(/"/g, '&quot;');
+    return `
+        <div class="memory-item${e.archived ? ' archived' : ''}" title="${tip}">
+            <span class="memory-type">${memoryTypeLabel(e)}</span>
+            <span class="memory-key">${e.key}</span>: <span class="memory-value">${e.value}</span>
+            ${history}
+            <span class="memory-stars">${stars}</span>
+            <span class="memory-delete" onclick="deleteMemory('${e.key}')" title="删除">✕</span>
+        </div>`;
+}
+
 function renderMemory(entries) {
     const listDiv = document.getElementById('memoryList');
     if (!listDiv) return;
@@ -638,12 +681,53 @@ function renderMemory(entries) {
         listDiv.innerHTML = '<div class="empty-state">暂无记忆（发送"我喜欢用Python"试试）</div>';
         return;
     }
-    listDiv.innerHTML = entries.map(e => `
-        <div class="memory-item">
-            <span class="memory-key">${e.key}</span>: <span class="memory-value">${e.value}</span>
-            <span class="memory-delete" onclick="deleteMemory('${e.key}')" title="删除">✕</span>
-        </div>
-    `).join('');
+
+    const active = entries.filter(e => !e.archived);
+    const archived = entries.filter(e => e.archived);
+
+    // Group active entries by type, fixed display order.
+    const order = ['preference', 'identity', 'rule', 'fact', 'episode'];
+    const groups = {};
+    for (const e of active) {
+        const t = memoryTypeLabel(e);
+        (groups[t] = groups[t] || []).push(e);
+    }
+
+    let html = '';
+    for (const t of order) {
+        if (!groups[t]) continue;
+        html += `<div class="memory-group-title">${t}（${groups[t].length}）</div>`;
+        html += groups[t].map(memoryItemHTML).join('');
+        delete groups[t];
+    }
+    // Any non-standard types still get rendered.
+    for (const t of Object.keys(groups)) {
+        html += `<div class="memory-group-title">${t}（${groups[t].length}）</div>`;
+        html += groups[t].map(memoryItemHTML).join('');
+    }
+
+    if (archived.length > 0) {
+        html += `<details class="memory-archived"><summary>已归档（${archived.length}）</summary>`;
+        html += archived.map(memoryItemHTML).join('');
+        html += '</details>';
+    }
+
+    listDiv.innerHTML = html || '<div class="empty-state">暂无记忆</div>';
+}
+
+async function consolidateMemory() {
+    try {
+        const result = await api('POST', '/api/memory/consolidate', {});
+        let msg = '🧹 整合完成';
+        if (result.archived_count > 0) msg += `，归档 ${result.archived_count} 条`;
+        if (result.profile_updated) msg += '，画像已更新';
+        if (result.new_fact_keys && result.new_fact_keys.length) msg += `，沉淀新事实: ${result.new_fact_keys.join(', ')}`;
+        if (result.skipped) msg += `（${result.skipped}）`;
+        pushMessage(currentThread, 'system', msg);
+        refreshMemory();
+    } catch (e) {
+        alert('整合失败：' + e.message);
+    }
 }
 
 async function deleteMemory(key) {
