@@ -8,10 +8,12 @@
 
 ```bash
 cd agent-eino-demo
+export BOOTSTRAP_ADMIN_USERNAME=admin
+export BOOTSTRAP_ADMIN_PASSWORD=demo-admin-password
 go run ./cmd/server
 ```
 
-浏览器打开 `http://localhost:8080`。
+浏览器打开 `http://localhost:8080`，使用上述管理员凭证登录，通过用户管理创建 `visitor` / `demo-visitor-password`（角色为 `visitor`），然后退出。项目不包含默认密码。
 
 ---
 
@@ -27,14 +29,14 @@ go run ./cmd/server
    - 预期：请求被拒绝，返回 401
 
 2. **visitor 登录**
-   - 用户名：`visitor`，密码：`visitor123`
+   - 用户名：`visitor`，密码：`demo-visitor-password`
    - 点击登录
    - 预期：左侧显示用户信息 `visitor`，角色 `visitor`
    - 预期：可用工具列表只有 3 个：calculator、weather、query_order
 
 3. **admin 登录**
-   - 退出登录
-   - 用户名：`admin`，密码：`admin123`
+	- 退出登录
+	- 用户名：`admin`，密码：`demo-admin-password`
    - 点击登录
    - 预期：左侧显示用户信息 `admin`，角色 `admin`
    - 预期：可用工具列表有 6 个：calculator、weather、grep、query_order、delete_order、send_email
@@ -88,7 +90,7 @@ go run ./cmd/server
    - 使用 admin 登录
    - 输入：`删除订单A-1001`
    - 预期：Agent 回复"该操作需要审批"
-   - 预期：右侧审批面板出现一张审批卡片
+   - 预期：**聊天界面内**出现一张交互式审批卡片（含"⏸ 待审批"标记）
    - 预期：卡片显示工具名 `delete_order`、风险等级 `high`、参数 `{order_id: A-1001}`
 
 2. **拒绝审批**
@@ -124,7 +126,7 @@ go run ./cmd/server
    - 勾选聊天输入框左侧的"⚠️ 执行前确认"开关（对应 API 字段 `confirmBeforeExecute`）
    - 输入：`查询北京天气`，发送
    - 预期：Agent 生成执行计划（如调用 weather 工具），在执行前中断
-   - 预期：右侧审批面板出现审批卡片，类型为 `node`（节点级），节点名 `plan_review`
+   - 预期：**聊天界面内**出现审批卡片，类型为 `node`（节点级），节点名 `plan_review`
    - 预期：卡片显示 Agent 的执行计划摘要
 
 2. **批准执行计划**

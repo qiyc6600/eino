@@ -22,27 +22,28 @@
 # 克隆项目
 cd agent-eino-demo
 
-# 方式一：Mock 模式（无需 API Key，开箱即用）
+# 方式一：Mock 模式（首次启动必须显式设置管理员）
+BOOTSTRAP_ADMIN_USERNAME=admin \
+BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-long-password' \
 go run ./cmd/server
 
 # 方式二：接入真实 LLM
 MODEL_PROVIDER=openai \
 OPENAI_API_KEY=sk-xxx \
 OPENAI_MODEL=gpt-4o \
+BOOTSTRAP_ADMIN_USERNAME=admin \
+BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-long-password' \
 go run ./cmd/server
 
 # 浏览器访问
 open http://localhost:8080
 ```
 
-### 默认账号
+### 初始管理员
 
-| 用户名 | 密码 | 角色 | 可用工具 |
-|--------|------|------|----------|
-| `admin` | `admin123` | admin | calculator, weather, grep, query_order, delete_order, send_email |
-| `visitor` | `visitor123` | visitor | calculator, weather, query_order |
+项目不再内置账号或密码。空用户库首次启动时必须同时设置 `BOOTSTRAP_ADMIN_USERNAME` 与 `BOOTSTRAP_ADMIN_PASSWORD`，密码至少 12 个字符。账户创建后不会在后续启动中覆盖其密码或角色；使用 PostgreSQL 持久化用户时，可以在确认管理员已落库后移除这两个引导变量。
 
-> visitor 调用 admin 工具时被 ACL 拦截，拒绝结果回灌 LLM 使其重新规划。
+需要演示 visitor 权限时，先用管理员通过 `POST /api/users` 创建 visitor 角色账户。visitor 调用 admin 工具时会被 ACL 拦截，拒绝结果回灌 LLM 使其重新规划。
 
 ---
 
@@ -108,14 +109,31 @@ Agent 调用 delete_order → 中断 → 返回审批卡片 → 人工批准/拒
 → 人工拒绝 → LLM 收到拒绝反馈 → 重新规划
 ```
 
+### 执行可靠性
+
+- 同一用户、同一会话的聊天和审批串行执行；重复审批返回已保存结果。存在待审批任务时，先处理审批再发送新消息。
+- `CHECKPOINT_STORE=file` 同时启用审批持久化，文件位于 `<CHECKPOINT_STORE_PATH>.approvals.json`，保存审批、嵌套运行状态和恢复结果。建议同时启用 `THREAD_STORE=file` 和 `SESSION_STORE=file`。
+- 支持“计划审批 → 工具审批 → 后续工具审批”，沿用原 `runId`，每次返回新的可操作 `interrupt`。
+- 模型限流最多重试 3 次（最多调用 4 次），退避为 250/500/1000 ms。每次聊天或恢复限时 2 分钟，响应 HTTP 请求取消；网络工具通过 `ToolIdentity.Context` 接收取消。
+- 模型错误、系统级工具错误、步骤耗尽及检查点或线程落盘失败返回 `error`；主动取消返回 `cancelled`。SSE 保留真实状态。
+- 执行前保存 `running` 凭据，结束后保存结果。若进程在两次写入之间崩溃，或结果落盘失败，系统阻止自动重放并提示核对业务结果。这不是外部副作用的“恰好一次”事务，真实业务工具仍需幂等键或事务对账。
+- PostgreSQL 后端共享用户、会话、线程、检查点、记忆和审批；同一用户/线程通过数据库 advisory lock 跨实例串行，审批通过原子 claim 保证只有一个实例恢复执行。
+- 当 `CHECKPOINT_STORE`、`THREAD_STORE` 和 `APPROVAL_STORE` 均为 `postgres` 时，创建审批所需的 Checkpoint、线程历史和审批请求在同一数据库事务中提交；任一写入失败会全部回滚。混合后端仍按各自存储写入。
+- 同一 PostgreSQL 配置下，审批恢复后的线程最终状态（或下一条待审批记录及 Checkpoint）、旧审批执行凭据和运行事件也在同一事务中提交。事务失败时保留 `running` 认领，阻止自动重放；外部工具副作用仍需幂等键或人工对账。
+- JSON 文件后端仅支持单进程独占使用。`BUSINESS_STORE=postgres` 时，示例订单采用软删除并保存幂等结果，邮件记录按工具调用幂等落库；接入真实邮件供应商时仍应使用 Outbox 或供应商幂等键。
+- 密码使用带随机盐的 Argon2id（19 MiB、2 次迭代）；旧版 SHA-256 账户在首次成功登录后自动升级。角色变更会撤销该用户在内存、文件或 PostgreSQL 中的全部会话；会话校验同时核对当前账户角色，拒绝并删除跨实例竞态产生的旧角色会话。
+- 登录失败分别按用户名和直接连接 IP 计数。默认 15 分钟内失败 5 次后锁定 15 分钟，返回 429 和 `Retry-After`；成功登录清除对应计数。PostgreSQL 部署使用共享事务计数，内存/文件部署使用进程内计数。反向代理场景应在可信代理处限制客户端来源；应用不信任客户端提交的 `X-Forwarded-For`。
+
+回归覆盖见 `internal/agent/execution_test.go` 和 `integration_test/reliability_test.go`；使用 `go test ./...` 和 `go test -race ./...` 验证。
+
 ### 恢复语义
 
 | 中断类型 | 恢复方式 | 说明 |
 |----------|----------|------|
-| 工具级 | 从 Checkpoint 加载完整状态 → 执行工具 → 继续 ReAct | 工具幂等性通过 `runID:toolCallID` 保证 |
+| 工具级 | 从审批快照加载完整状态 → 执行工具 → 继续 ReAct | 持久化执行凭据和响应，阻止重复审批执行 |
 | 节点级 | 从 Checkpoint 加载完整状态 → 保留/清空 PendingToolCalls → 继续 ReAct | 拒绝时 LLM 重新规划 |
 
-Checkpoint 保存完整的 `SteppedRunState`（对话历史 + 步骤数 + 待执行工具），恢复时优先从 Checkpoint 还原，降级为线程重建。
+Checkpoint 与审批记录保存完整的 `SteppedRunState`（对话历史、步骤数、待执行工具和子 Agent 状态）。恢复使用该审批自己的状态快照，按 `toolCallID`、名称和参数精确匹配工具；状态缺失时返回错误，不从线程历史猜测并重新执行。
 
 ---
 
@@ -185,7 +203,33 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | 整合 | 达到条目阈值后 LLM 将碎片记忆整合为 `user_profile` 用户画像，归档过时条目，并把情景沉淀为持久事实；无 LLM 时规则降级 |
 | 记忆面板 | 前端按类型分组展示、重要度星标、来源 tooltip、归档折叠区、一键"🧹 整合记忆" |
 
-**持久化存储后端（进阶档）**：`SessionStore` / `CheckpointStore` / `MemoryStore` 三个接口均有 `memory`（默认，零依赖）与 `file`（JSON 持久化）两种实现，通过环境变量切换，业务代码零改动。file 版为装饰器实现，完整继承内存版的多用户隔离校验；启用后中断状态与跨会话记忆在进程重启后依然有效。
+**持久化存储后端（进阶档）**：会话、检查点、记忆和线程支持 `memory`、单进程 `file` 与多实例 `postgres`；用户账户和示例业务数据支持 `memory` / `postgres`，审批支持 `memory` / `file` / `postgres`。启用 PostgreSQL 后，运行结果与事件也写入数据库，跨实例可按用户读取。PostgreSQL 启动时执行内置的版本化迁移，线程使用 advisory lock 跨实例串行，审批使用条件更新原子认领，订单删除与邮件记录使用工具调用幂等键。file 版启用后可跨重启恢复，但不能由多个进程共同写入。
+
+多实例配置示例：
+
+```dotenv
+DATABASE_URL=postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslmode=disable
+USER_STORE=postgres
+SESSION_STORE=postgres
+CHECKPOINT_STORE=postgres
+MEMORY_STORE=postgres
+THREAD_STORE=postgres
+APPROVAL_STORE=postgres
+BUSINESS_STORE=postgres
+RUN_EVENT_RETENTION=168h
+```
+
+本地可直接启动 PostgreSQL；应用首次连接时自动迁移数据库：
+
+```bash
+docker compose -f compose.postgres.yml up -d
+```
+
+迁移文件位于 `internal/postgres/migrations`。已发布的迁移由 SHA-256 校验，不能原地修改；结构变更应新增编号更大的 SQL 文件。启动时会在一条专用连接上持有 PostgreSQL advisory lock，每个待执行版本在独立事务中提交，因此多个实例可以同时启动。数据库包含当前程序未知的更高版本，或已执行迁移的校验和不匹配时，程序会拒绝启动。
+
+`RUN_EVENT_RETENTION` 默认 168 小时。到期的运行事件不再可读，并在后续写入时从数据库清理。设置 `TEST_DATABASE_URL` 后，`go test ./integration_test -run TestPostgres` 会执行真实数据库的并发迁移、双连接池共享、运行事件隔离、审批竞争和创建／恢复两阶段的事务回滚测试。
+
+生产探针无需认证：`GET /healthz` 用于进程存活检查，`GET /readyz` 用于流量就绪检查。PostgreSQL 模式下，`/readyz` 会在 2 秒超时内核对数据库连接和完整迁移历史；依赖不可用时返回 `503 {"status":"unavailable"}`。内存或文件模式没有外部数据库依赖，初始化成功后即返回 ready。
 
 **向量检索**：三种 embedding 后端可选：
 
@@ -212,12 +256,25 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | `EMBEDDING_PROVIDER` | `hash` | Embedding 后端：hash / ollama / openai |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
+| `BOOTSTRAP_ADMIN_USERNAME` | | 空用户库首次启动时创建的管理员用户名 |
+| `BOOTSTRAP_ADMIN_PASSWORD` | | 初始管理员密码，至少 12 个字符；必须与用户名同时设置 |
+| `LOGIN_MAX_FAILURES` | `5` | 限流窗口内最多允许的失败次数 |
+| `LOGIN_FAILURE_WINDOW` | `15m` | 登录失败计数窗口 |
+| `LOGIN_LOCKOUT` | `15m` | 达到阈值后的锁定时长 |
 | `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
-| `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file`（JSON 持久化，重启不丢） |
-| `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` |
-| `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` |
+| `USER_STORE` | `memory` | 用户账户存储：`memory` / `postgres` |
+| `SESSION_STORE` | `memory` | 会话存储：`memory` / `file` / `postgres` |
+| `CHECKPOINT_STORE` | `memory` | 检查点存储：`memory` / `file` / `postgres` |
+| `MEMORY_STORE` | `memory` | 长期记忆存储：`memory` / `file` / `postgres` |
+| `THREAD_STORE` | `memory` | 对话线程存储：`memory` / `file` / `postgres` |
+| `APPROVAL_STORE` | 同 `CHECKPOINT_STORE` | 审批存储：`memory` / `file` / `postgres` |
+| `BUSINESS_STORE` | `memory` | 示例订单、邮件记录和幂等凭据：`memory` / `postgres` |
 | `*_STORE_PATH` | `data/*.json` | file 后端的数据文件路径（默认 `data/sessions.json` 等） |
+| `DATABASE_URL` | | PostgreSQL DSN；任一存储选择 `postgres` 时必填 |
+| `DATABASE_MAX_OPEN_CONNS` | `25` | PostgreSQL 最大打开连接数 |
+| `DATABASE_MAX_IDLE_CONNS` | `5` | PostgreSQL 最大空闲连接数 |
+| `DATABASE_CONN_MAX_LIFETIME` | `30m` | PostgreSQL 连接最长复用时间 |
 
 ### 一键接入 OpenAI 兼容 API
 
@@ -382,7 +439,7 @@ go test ./...
 |------|------|
 | HITL 为异步审批模式 | 中断后 run 结束，通过独立 API 恢复，非"挂起等待"语义 |
 | grep 使用示例数据 | 搜索日志为硬编码 mock，无真实文件系统访问 |
-| 密码无盐 SHA-256 | 演示项目简化，生产应使用 bcrypt/argon2 |
+| 凭证经 Bearer 头传递、JS 可读 | sessionId 仅存前端内存并经 Authorization 头发送（不支持 URL 查询参数，避免泄漏进日志/历史）；XSS 场景防护有限，生产应用 HttpOnly Cookie + CSRF 防护 |
 
 > 多用户隔离为框架强制：类型化工具身份（不可伪造）、线程/运行事件/审批属主校验、存储层 `CheckUserScope` 上下文校验，详见 `docs/design.md` 5.3 节。节点级中断由请求显式 `confirmBeforeExecute` 标志触发，不依赖消息关键词。
 

@@ -8,17 +8,13 @@
 
 ### 认证方式
 
-除 `/api/auth/login` 外，所有端点均需在请求头中携带 Session ID：
+除 `/healthz`、`/readyz` 和 `/api/auth/login` 外，所有端点均需在请求头中携带 Session ID：
 
 ```
 Authorization: Bearer <sessionId>
 ```
 
-或通过查询参数传递：
-
-```
-?sessionId=<sessionId>
-```
+> ⚠️ 仅支持请求头传递。**查询参数（`?sessionId=`）不被接受**——URL 中的凭证会泄漏到浏览器历史、访问日志与 Referer 头，后端对查询参数一律返回 401。
 
 ### 响应格式
 
@@ -39,6 +35,38 @@ Authorization: Bearer <sessionId>
 | 404 | 资源不存在 |
 | 409 | 冲突（如用户名重复） |
 | 500 | 服务器内部错误 |
+| 503 | 服务依赖尚未就绪 |
+| 429 | 登录失败次数超过限制（带 `Retry-After` 秒数） |
+
+---
+
+## 健康检查（公开）
+
+### GET /healthz
+
+进程存活探针，不检查外部依赖。成功时返回：
+
+```json
+{"status": "ok"}
+```
+
+### GET /readyz
+
+流量就绪探针。内存/文件模式在应用初始化完成后直接就绪；PostgreSQL 模式会在 2 秒超时内查询迁移表，检查数据库连接、全部预期版本及迁移校验和。
+
+成功响应（200）：
+
+```json
+{"status": "ready"}
+```
+
+依赖不可用、迁移缺失或迁移历史不匹配时返回通用响应，不暴露数据库错误（503）：
+
+```json
+{"status": "unavailable"}
+```
+
+两个端点仅接受 `GET`，并返回 `Cache-Control: no-store`。
 
 ---
 
@@ -53,7 +81,7 @@ Authorization: Bearer <sessionId>
 ```json
 {
   "username": "admin",
-  "password": "admin123"
+  "password": "<BOOTSTRAP_ADMIN_PASSWORD>"
 }
 ```
 
@@ -76,12 +104,9 @@ Authorization: Bearer <sessionId>
 {"error": "invalid credentials"}
 ```
 
-**默认账户**：
+默认按用户名和直接连接 IP 各自统计：15 分钟内失败 5 次后锁定 15 分钟。锁定期间返回 429，响应包含 `Retry-After` 秒数；限流存储不可用时返回通用 503。成功登录清零对应计数。
 
-| 用户名 | 密码 | 角色 |
-|--------|------|------|
-| admin | admin123 | admin |
-| visitor | visitor123 | visitor |
+项目没有默认账户。空用户库启动时，通过 `BOOTSTRAP_ADMIN_USERNAME` 和 `BOOTSTRAP_ADMIN_PASSWORD` 创建初始管理员。
 
 ---
 
@@ -210,7 +235,7 @@ Authorization: Bearer <sessionId>
 
 ### PUT /api/users/{userId}/roles
 
-更新用户角色。
+更新用户角色。更新成功后，该用户的所有现有会话立即撤销，需要使用新角色重新登录；其他用户的会话不受影响。
 
 **请求头**：`Authorization: Bearer <sessionId>`
 
@@ -311,7 +336,7 @@ Connection: keep-alive
 
 ### GET /api/agent/runs/{runId}/events
 
-获取指定运行的执行事件列表。
+获取指定运行的执行事件列表。仅运行所属用户可读取；其他用户的运行返回 404。启用 PostgreSQL 后可跨实例读取，事件默认保留 168 小时（可用 `RUN_EVENT_RETENTION` 配置），过期后返回 404。审批恢复后的事件追加在同一运行记录中。
 
 **请求头**：`Authorization: Bearer <sessionId>`
 

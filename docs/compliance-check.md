@@ -16,6 +16,8 @@
 | 1.6 | 身份上下文传递 | ✅ | `AuthContext` 通过 HTTP context + 类型化 `ToolIdentity` 双链路传播 |
 | 1.7 | 会话过期/续期 TTL（任务注明的进阶档） | ✅ | Session 带 `ExpiresAt`，`ValidateSession` 过期拒绝并删除会话；每次校验成功滑动续期；`SESSION_TTL` 可配置（默认 30m），login/me 返回 `expiresAt` |
 | 1.8 | 持久化 SessionStore 后端（任务注明的进阶档） | ✅ | `FileSessionStore` 装饰器实现，`SESSION_STORE=file` 切换，重启后会话不丢（集成测试验证） |
+| 1.9 | 密码与角色变更安全 | ✅ | 随机盐 Argon2id；旧 SHA-256 成功登录后升级；角色更新后跨后端批量撤销会话并在校验时对照当前角色 |
+| 1.10 | 初始管理员安全引导 | ✅ | 不包含默认凭证；空用户库从环境变量创建管理员；弱密码和不完整配置拒绝启动；并发引导幂等 |
 
 ### 模块 01 技术约束
 

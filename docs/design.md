@@ -218,7 +218,7 @@ type CheckpointStore interface {
 
 #### 3.2.4 幂等性保证
 
-每个审批通过的工具执行都通过 `runID + toolCallID` 生成 `idempotencyKey`，同一 key 的重复执行只返回第一次的结果。
+同一会话串行执行，审批执行前保存 `running` 凭据，完成后保存响应。重复审批返回原响应。重启后存在 `running` 且无响应的记录时，阻止自动重放并要求核对业务结果；外部副作用仍需业务系统的幂等或事务支持。
 
 ### 3.3 多 Agent 与工具（agent + tools）
 
@@ -372,6 +372,14 @@ type MemoryStore interface {
 
 ## 5. 多用户隔离策略
 
+账户密码以 PHC 格式保存为随机盐 Argon2id 哈希，参数为 19 MiB 内存、2 次迭代和单线程。解析器在计算前限制内存、迭代次数、并行度、盐和输出长度，防止损坏的数据库值触发异常资源消耗。此前版本的 64 位十六进制 SHA-256 哈希仍可验证，但只在密码正确时生成 Argon2id 哈希并通过 `UserStore.UpdatePasswordHash` 原地升级。
+
+系统不编译任何默认凭证。空用户库启动时，`BOOTSTRAP_ADMIN_USERNAME` 和 `BOOTSTRAP_ADMIN_PASSWORD` 必须同时提供，且密码至少 12 个字符。引导账户 ID 由用户名稳定生成，确保文件会话重启和多实例使用相同身份；若账户已存在则不覆盖密码或角色。持久化用户库已经包含 admin 角色账户后，可以移除引导变量。
+
+角色更新成功后，`SessionStore.DeleteByUser` 撤销该用户的全部会话；内存、JSON 文件和 PostgreSQL 后端均实现批量撤销。每次会话校验还会重新读取当前用户并比较用户名与角色，因此另一个实例在角色更新并发窗口内创建的旧角色会话也会在使用时被拒绝和删除。
+
+登录失败限流同时维护规范化用户名和直接连接 IP 两个桶。密钥以 SHA-256 摘要保存，避免将用户名和 IP 明文写入限流表。默认固定窗口 15 分钟内失败 5 次后锁定 15 分钟；锁定时 HTTP 返回 429 和 `Retry-After`。PostgreSQL 后端使用 `agent_login_rate_limits` 共享状态，失败次数在事务内通过排序后的 advisory lock 串行更新。成功登录清除相应计数；存储失败时不放行登录。应用不使用未经可信代理认证的 `X-Forwarded-For`，因此在反向代理后按代理直接连接 IP 计数，应在代理侧另设客户端限流。
+
 ### 5.1 隔离键设计
 
 | 数据类型 | 隔离键 | 说明 |
@@ -399,7 +407,7 @@ orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的�
 | 层 | 机制 | 效果 |
 |----|------|------|
 | 工具边界 | `ToolFunc func(*auth.ToolIdentity, string) ToolResult` — 身份是类型化参数，只能由框架从 `AuthContext` 构造（`auth.ToolIdentityFromContext`），无身份（nil）即拒绝 | 工具拿不到伪造的身份 |
-| 运行时资源 | 线程按 `(userID, threadID)` 复合键存储（`threadStore`）；run 事件记录属主（`runOwners`）；审批/恢复校验 `req.UserID == 当前用户` | 任何用户无法读/删他人线程、事件、审批 |
+| 运行时资源 | 线程按 `(userID, threadID)` 复合键存储；运行事件在内存模式记录属主，在 PostgreSQL 模式按 `(user_id, run_id)` 读取；审批/恢复校验 `req.UserID == 当前用户` | 任何用户无法读/删他人线程、事件、审批 |
 | 存储层 | `auth.CheckUserScope(ctx, userID)`：当 ctx 携带身份时，所有 Memory/Checkpoint/Vector 访问的 userID 参数必须与之一致，否则报"cross-user access denied" | 即使上游某处传错 userID，框架调用链内也无法跨用户读写 |
 | ACL 预检 | RBAC 预检无条件执行（空角色/无身份一律拒绝，无旁路） | 无角色的调用不可能触达工具 |
 
@@ -407,9 +415,21 @@ orders := store.QueryByUser(identity.UserID)          // ← 只能查自己的�
 
 ### 5.4 存储后端可替换（持久化实现）
 
-三个存储接口均有 `memory`（默认，零依赖）与 `file`（JSON 持久化）两种实现，通过环境变量（`SESSION_STORE` / `CHECKPOINT_STORE` / `MEMORY_STORE`）切换，业务代码零改动。
+会话、检查点、长期记忆和线程均有 `memory`（默认）、`file`（单进程 JSON）与 `postgres`（多实例）实现；用户账户和示例业务数据提供 `memory` / `postgres`，审批提供 `memory` / `file` / `postgres`。对应环境变量为 `USER_STORE`、`SESSION_STORE`、`CHECKPOINT_STORE`、`MEMORY_STORE`、`THREAD_STORE`、`APPROVAL_STORE` 和 `BUSINESS_STORE`。
 
 file 版采用**装饰器模式**：内嵌对应的 InMemory 实现并拦截全部写操作（Create/Update/Delete/Save），每次写盘后原子落盘（临时文件 + rename，崩溃不损坏文件），启动时从文件恢复状态。由于隔离校验在内存实现内部，file 版自动继承 `CheckUserScope` 强制，隔离语义不因后端切换而减弱。
+
+PostgreSQL 版在启动时执行编译进程序的版本化 SQL 迁移。`agent_schema_migrations` 记录版本、名称、SHA-256 校验和与执行时间；全局 advisory lock 串行化多个实例的迁移过程，每个版本在独立事务中执行。迁移历史被改写、数据库版本高于当前程序或任一版本执行失败时，应用停止启动。初始迁移幂等创建用户、会话、线程、检查点、记忆、审批、订单、邮件记录和工具幂等凭据表，可兼容升级此前由启动代码自动建表的数据库。
+
+只要启用了 PostgreSQL 后端，运行结果及事件也存入 `agent_runs`。读取以用户 ID 与运行 ID 联合定位，审批恢复会追加之前的事件。`RUN_EVENT_RETENTION` 设置保留期限（默认 168 小时）；查询过滤过期记录，后续写入清理过期行。写入失败会返回运行错误，避免把未持久化的结果报告为成功。
+
+当 Checkpoint、线程和审批三个存储均选 PostgreSQL 时，创建中断的三项记录由 `PublishInterrupt` 在一个数据库事务内提交。若最后的审批插入失败，前面的 Checkpoint 和线程写入也回滚；新审批 ID 冲突会拒绝此次提交，不覆盖旧审批。混合后端无法共享数据库事务，继续使用逐项写入路径。
+
+恢复时先原子认领审批，再执行模型和工具。恢复产生的数据库状态由 `PublishResume` 一次提交：完成时写线程历史、旧审批的完整响应及运行事件；再次中断时写新 Checkpoint、新审批、线程历史、旧审批响应及运行事件。任何一步失败都回滚这些收尾写入，并保留旧审批的 `running` 认领以禁止可能重复的外部副作用。外部工具调用不在数据库事务中，需依赖幂等凭据或业务对账。
+
+线程执行先取得基于 `(userID, threadID)` 的 PostgreSQL advisory lock，使不同应用实例对同一线程串行更新；锁使用独立连接池，避免长时间持锁耗尽业务 SQL 连接。审批通过带状态条件的 `UPDATE ... RETURNING` 原子认领，只有一个实例能从 `pending` 转为 `running`。订单使用软删除，`(runID, toolCallID)` 派生的幂等键保存原始删除结果；邮件示例记录使用唯一幂等键，重复恢复不会生成第二条记录。连接池由 `DATABASE_MAX_OPEN_CONNS`、`DATABASE_MAX_IDLE_CONNS` 和 `DATABASE_CONN_MAX_LIFETIME` 控制。
+
+部署探针分为存活与就绪两类。`/healthz` 只确认 HTTP 进程可响应；`/readyz` 使用 2 秒独立 context 检查服务依赖。PostgreSQL 模式会读取完整迁移历史并验证版本、名称和校验和，因此数据库断连、迁移缺失、历史被改写或数据库版本高于程序时均返回 503。响应不包含底层错误，避免泄露连接与结构信息。
 
 ---
 
@@ -420,39 +440,38 @@ file 版采用**装饰器模式**：内嵌对应的 InMemory 实现并拦截全�
 **语义**：恢复时从 Checkpoint 加载完整 `SteppedRunState`，执行被中断的工具，然后继续 ReAct 循环。
 
 **恢复流程**：
-1. `Runner.Resume()` 从 `ApprovalRequest` 获取 `interruptID` 和 `RunID`
-2. 优先从 Checkpoint 加载 `SteppedRunState`（含完整对话历史 + PendingToolCalls）
-3. 调用 `SteppedRunner.HandleApproval()` 执行被中断的工具或注入拒绝消息
-4. 继续执行 ReAct 循环直到完成或再次中断
-5. 若 Checkpoint 不可用，降级为线程重建模式（从线程历史重建对话）
+1. 校验审批属主，取得会话执行锁，重新读取审批记录。
+2. 已保存响应时直接返回；不同的审批决定被拒绝；`running` 且无响应时报告结果不确定，禁止重放。
+3. 从该审批自己的 `State` 恢复完整 `SteppedRunState`，包括 `Children` 中的子 Agent 状态。缺失或不匹配时直接报错，不使用线程历史猜测执行步骤。
+4. 保存决定和 `running` 凭据，再通过 `HandleApproval()` 精确匹配 `toolCallID`、工具名称、参数，执行或拒绝该调用。
+5. 共用 `advance` 循环继续执行。再次中断时保存新审批和状态并返回新的 `interrupt`；完成时保存对话。
+6. 保存本次审批的完整响应和 `finished` 标记，再返回客户端。
 
-**降级路径**（线程重建模式）：
-- 从线程历史中恢复 assistant 的 tool_call 消息
-- 追加工具结果消息（执行/拒绝）
-- 重建对话后重新运行 `SteppedRunner.RunAll()`
-
-**幂等性保证**：
-- 每个 HITL 审批通过的工具执行都通过 `runID + toolCallID` 生成 `idempotencyKey`
-- 同一 `idempotencyKey` 的重复执行只返回第一次的结果
-- 危险工具（delete_order、send_email）必须保证幂等性
+`CHECKPOINT_STORE=file` 同时在 `<CHECKPOINT_STORE_PATH>.approvals.json` 保存审批、嵌套状态和执行响应。JSON 后端仅支持单进程独占写入；外部副作用与本地凭据并非同一事务，崩溃窗口需要业务对账。订单、邮件示例数据仍在内存中。
 
 ### 6.2 节点级中断恢复
 
-**语义**：恢复时从 Checkpoint 加载 `SteppedRunState`，根据审批结果决定是否执行 PendingToolCalls。
+**语义**：恢复该审批记录的 `SteppedRunState`，根据决定处理 PendingToolCalls。
 
 **恢复流程**：
 1. `Runner.Resume()` 检测 `req.NodeName != ""`，识别为节点级中断
-2. 从 Checkpoint 加载完整 `SteppedRunState`
+2. 从该审批记录加载完整 `SteppedRunState`
 3. 调用 `SteppedRunner.HandleApproval()`：
    - **批准**：PendingToolCalls 保留，下一轮 `executePendingTools()` 执行所有待定工具
-   - **拒绝**：清空 PendingToolCalls，注入拒绝消息，LLM 重新规划
+   - **拒绝**：为每个待执行调用补充配对的拒绝结果，再清空 PendingToolCalls，让 LLM 重新规划
 4. 继续执行 ReAct 循环
 
 **节点级中断触发条件**：
-- 用户消息包含"确认后再执行"、"先审批再执行"等关键词
-- `wantsNodeInterrupt()` 检测意图 → `SetNodeInterruptConfig(Enabled=true)`
+- 请求显式设置 `confirmBeforeExecute=true`，不检测消息关键词
 - SteppedRunner 在 LLM 返回工具调用后、执行前触发中断
-- 中断时保存完整 `SteppedRunState`（含对话历史、步骤数、PendingToolCalls）
+- 中断前先保存完整待执行批次；批准计划后高风险工具仍需要单独审批
+- 同批调用逐个出队，子 Agent 完成仅移除对应调用；子 Agent 中断时保留其完整状态
+
+### 6.3 重试、取消与存储失败
+
+模型限流最多重试 3 次，退避 250/500/1000 ms，工具副作用不自动重试。每次聊天和恢复限时 2 分钟，HTTP context 贯穿执行和退避；网络工具通过 `ToolIdentity.Context` 接收取消。
+
+线程与检查点写入先构造新快照，写入并同步临时文件，重命名成功后再发布内存状态。失败返回错误，不把仅存于内存的数据报告成已保存。审批凭据写入失败时不启动工具，结果写入失败时阻止重放。检查点、审批或线程存储初始化失败时停止启动，不静默降级。
 
 ---
 
@@ -466,12 +485,26 @@ file 版采用**装饰器模式**：内嵌对应的 InMemory 实现并拦截全�
 | `OPENAI_MODEL` | - | 模型名称 |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
-| `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file` |
+| `BOOTSTRAP_ADMIN_USERNAME` | - | 空用户库首次启动时创建的管理员用户名 |
+| `BOOTSTRAP_ADMIN_PASSWORD` | - | 初始管理员密码，至少 12 个字符，必须与用户名同时设置 |
+| `LOGIN_MAX_FAILURES` | `5` | 失败窗口内允许的次数 |
+| `LOGIN_FAILURE_WINDOW` | `15m` | 失败计数窗口 |
+| `LOGIN_LOCKOUT` | `15m` | 达到阈值后的锁定时长 |
+| `USER_STORE` | `memory` | 用户账户存储后端：`memory` / `postgres` |
+| `SESSION_STORE` | `memory` | 会话存储后端：`memory` / `file` / `postgres` |
 | `SESSION_STORE_PATH` | `data/sessions.json` | file 后端数据文件路径 |
-| `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` |
+| `CHECKPOINT_STORE` | `memory` | 检查点存储后端：`memory` / `file` / `postgres` |
 | `CHECKPOINT_STORE_PATH` | `data/checkpoints.json` | file 后端数据文件路径 |
-| `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` |
+| `MEMORY_STORE` | `memory` | 长期记忆存储后端：`memory` / `file` / `postgres` |
 | `MEMORY_STORE_PATH` | `data/memory.json` | file 后端数据文件路径 |
+| `THREAD_STORE` | `memory` | 对话线程存储后端：`memory` / `file` / `postgres` |
+| `THREAD_STORE_PATH` | `data/threads.json` | file 后端数据文件路径 |
+| `APPROVAL_STORE` | 同 `CHECKPOINT_STORE` | 审批存储后端：`memory` / `file` / `postgres` |
+| `BUSINESS_STORE` | `memory` | 示例订单、邮件记录和工具幂等凭据：`memory` / `postgres` |
+| `DATABASE_URL` | - | PostgreSQL DSN；任一存储使用 `postgres` 时必填 |
+| `DATABASE_MAX_OPEN_CONNS` | `25` | PostgreSQL 最大打开连接数 |
+| `DATABASE_MAX_IDLE_CONNS` | `5` | PostgreSQL 最大空闲连接数 |
+| `DATABASE_CONN_MAX_LIFETIME` | `30m` | PostgreSQL 连接最长复用时间 |
 | `MAX_TOKENS` | `8000` | 上下文 token 上限 |
 | `MAX_MESSAGES` | `30` | 最大消息数 |
 | `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例 |
