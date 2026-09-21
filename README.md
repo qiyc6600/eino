@@ -258,7 +258,9 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 接口：`GET /api/documents`（列表，不含分块原文）、`POST /api/documents`（`{name, content}`）、`DELETE /api/documents/{id}`。
 
-> **检索质量取决于 embedding 提供方。** 默认的 `EMBEDDING_PROVIDER=hash` 是哈希伪嵌入，只做词面匹配；实测中文查询对**正确**文档的相似度只有 0.168，低于为真实 embedding 标定的 0.3 阈值——所以应用会为 hash 模式自动把阈值降到 0.1，否则中文检索会完全失效。即便如此，hash 模式的排序质量有限：想要真正的语义检索请配置 `EMBEDDING_PROVIDER=openai`（或 `ollama`），此时阈值自动用 0.3。
+> **检索质量取决于 embedding 提供方。** 默认的 `EMBEDDING_PROVIDER=hash` 是哈希伪嵌入，只做词面匹配（不是语义匹配）：它无法把"发布流程"和"怎么上线"联系起来，只认字面重合。应用会为 hash 模式自动把相关度下限降到 0.02（真实 embedding 用 0.3），因为它的分数整体偏低——实测相关的中文片段落在 0.04–0.19。
+>
+> 那个 0.02 是**噪声下限，不是相关性判据**：无关的中文片段实测为 0.000，所以下限只用来丢掉纯碰撞噪声；英文的无关片段仍有约 0.11（共用虚词），此时靠**排序**而不是阈值来区分。想要真正的语义检索请配置 `EMBEDDING_PROVIDER=openai`（或 `ollama`）。
 >
 > **未做**：PDF / DOCX 解析（只接受纯文本与 `.txt`/`.md`）；共享知识库（文档按用户隔离）；同名文档重复上传会新建一份而非覆盖。
 
@@ -440,7 +442,7 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | `LOGIN_LOCKOUT` | `15m` | 达到阈值后的锁定时长 |
 | `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
 | `DOCUMENT_BUDGET_TOKENS` | `800` | 文档片段的 token 预算，与记忆预算独立；`0` 关闭文档检索 |
-| `VECTOR_MIN_SCORE` | `0`（自动） | 向量召回的相关度下限；自动时按 embedding 提供方选值（hash → 0.1，真实 embedding → 0.3） |
+| `VECTOR_MIN_SCORE` | `0`（自动） | 向量召回的噪声下限；自动时按 embedding 提供方选值（hash → 0.02，真实 embedding → 0.3） |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
 | `MAX_TOKENS` | `8000` | 上下文窗口上限（进度条满刻度） |
 | `MAX_MESSAGES` | `0` | 送给模型的消息条数上限，0 = 不按条数裁剪 |

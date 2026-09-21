@@ -59,11 +59,25 @@ type InMemoryVectorStore struct {
 	dim     int                      // vector dimensionality
 }
 
+// hashEmbeddingDim is the dimension of the hash embedding.
+//
+// It has to be large relative to the number of features one chunk contributes,
+// because hashed features that collide are indistinguishable. A ~125-rune
+// Chinese chunk contributes about 140 features (one per word, one per adjacent
+// rune pair), so at the original 128 dimensions it filled 73% of the space and
+// collisions dominated: measured on a nine-pair fixture, an unrelated passage
+// outscored a relevant one (worst margin -0.28). At 8192 the occupancy is 2% and
+// no pair inverted; 16384 measured no better.
+//
+// The cost is 32KB per indexed entry and an O(dim) cosine per candidate, both of
+// which are fine for an in-process index holding a user's own memories.
+const hashEmbeddingDim = 8192
+
 // NewInMemoryVectorStore creates a new simple in-memory vector store.
 func NewInMemoryVectorStore() *InMemoryVectorStore {
 	return &InMemoryVectorStore{
 		entries: make(map[string][]vectorEntry),
-		dim:     128, // hash embedding dimension
+		dim:     hashEmbeddingDim,
 	}
 }
 
@@ -256,8 +270,16 @@ func tokenize(text string) []string {
 	return words
 }
 
+// isWordChar reports whether a rune belongs to a word for the hash embedder.
+//
+// It used to be `... || r > 0x4e00`, which is wrong in both directions:
+// U+4E00 is 一, so `>` excluded it and a document containing 一 lost that
+// character ("一二三" tokenised to just ["二三"]); and every rune above the
+// threshold counted as a word character, so fullwidth punctuation was glued into
+// tokens ("写，注意先切流量" became a single word). unicode.IsLetter/IsDigit is
+// what the context manager's counter already uses, so the two now agree.
 func isWordChar(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r > 0x4e00
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
 
 // overlapTokens splits text for the lexical-overlap channel used by retrieval

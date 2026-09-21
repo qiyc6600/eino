@@ -592,12 +592,22 @@ func newCheckpointStore(cfg *Config, pg *pgstore.Backend) (memory.CheckpointStor
 	}
 }
 
-// newMemoryStore builds the MemoryStore backend selected by MEMORY_STORE.
 // hashEmbeddingMinScore is the relevance cut-off for the hash-based fallback.
-// Its cosine scores are compressed into roughly 0.15-0.4, so the 0.3 used for
-// real embeddings would discard genuinely relevant matches — a correct Chinese
-// document scores about 0.17 against its own topic.
-const hashEmbeddingMinScore = 0.1
+//
+// It is a noise floor, not a relevance classifier. The hash embedder is purely
+// lexical, so it cannot rank a pair that shares no terms at all — an unrelated
+// English passage still scores around 0.11 against any English query, purely from
+// shared function words. What the floor removes is the other failure: with the
+// dimension too small, hashed features collide and an unrelated passage can score
+// above a relevant one.
+//
+// Measured with the dimension the fallback now uses (see
+// memory.NewInMemoryVectorStore): a relevant Chinese chunk scores 0.043-0.19 and
+// an unrelated one 0.000, so 0.02 keeps every relevant match and drops the
+// collisions. The 0.1 this used to be was measured against a much noisier
+// embedding, and it discarded relevant Chinese matches (0.043) along with the
+// noise.
+const hashEmbeddingMinScore = 0.02
 
 // newVectorStore builds one embedding-backed index. The label only distinguishes
 // the two indexes in logs (memories vs document chunks).
