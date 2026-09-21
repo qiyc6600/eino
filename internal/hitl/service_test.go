@@ -18,8 +18,7 @@ func newTestService(t *testing.T) (*Service, *InterruptManager) {
 }
 
 // raiseToolInterrupt creates a pending tool approval through the production API
-// and returns its id. The tests below used to call ExecuteWithApproval, which
-// was a second, unused way to raise the same interrupt.
+// and returns its id.
 func raiseToolInterrupt(t *testing.T, svc *Service, authCtx *auth.AuthContext, runID string) string {
 	t.Helper()
 	req, err := svc.RequestToolInterrupt(context.Background(), authCtx, runID,
@@ -164,18 +163,6 @@ func TestHITL_Reject(t *testing.T) {
 	}
 	if req.Status != StatusRejected {
 		t.Errorf("expected rejected status, got: %s", req.Status)
-	}
-}
-
-func TestHITL_RejectedToolResult(t *testing.T) {
-	svc, _ := newTestService(t)
-
-	result := svc.ExecuteRejectedTool("delete_order", "interrupt_123", "user declined")
-	if result.Metadata["status"] != "disapproved" {
-		t.Errorf("expected status=disapproved, got %v", result.Metadata["status"])
-	}
-	if result.Metadata["interrupt_id"] != "interrupt_123" {
-		t.Errorf("expected interrupt_id in metadata")
 	}
 }
 

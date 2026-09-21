@@ -81,19 +81,6 @@ func ACLDeniedResult(toolName, reason string, userID string, roles []string) Too
 	}
 }
 
-// HITLDisapprovedResult creates a ToolResult for a HITL rejection.
-func HITLDisapprovedResult(toolName, reason string, interruptID string) ToolResult {
-	return ToolResult{
-		Content: "用户拒绝执行该操作" + conditionalSuffix(reason),
-		Metadata: map[string]any{
-			"tool":         toolName,
-			"status":       "disapproved",
-			"interrupt_id": interruptID,
-			"reason":       reason,
-		},
-	}
-}
-
 // SystemErrorResult creates a ToolResult for a system-level error.
 func SystemErrorResult(toolName, errMsg string, traceID string) ToolResult {
 	return ToolResult{

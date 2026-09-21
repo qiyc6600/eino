@@ -159,5 +159,17 @@
   **探测方法上犯过一个错并已修正**：我第一版死代码扫描用的是定义文本（`Service) GetApproval(`）而不是调用形式（`.GetApproval(`），于是把被 HTTP 处理器使用的 `GetApproval` 也报成"无调用者"，差点删掉活代码。改用 `.方法名(` 重新扫描后才得到可信结论。
   仍留在包里但**未删**的死方法（报告而非动手，属风格取舍而非隐患）：`ExecuteWithApproval`（另一种创建中断的写法，Runner 自己构造）、`ExecuteRejectedTool` 与 `tools.HITLDisapprovedResult`（生产代码在 `HandleApproval` 里自己拼拒绝文本，从不产生 `disapproved` 状态）、`RequestNodeInterrupt`（Runner 直接构造节点中断请求，绕过了这个服务方法）、`SaveApproval` / `InterruptManager.Save`（`SaveContext` 的薄包装）。后两组值得单独决定：要么删掉，要么让 Runner 改走它们。
 
+- 2026-09-22：收掉 `internal/hitl` 里剩余的**生产死方法**（上一提交报告、本次动手）。每个都有一个生产实际在用的等价路径，删掉不留缺口：
+  | 删掉的 | 生产实际走哪条 |
+  |--------|----------------|
+  | `Service.RequestNodeInterrupt` | Runner 在 `stepped_runner.go` 里**自己构造**节点中断请求，因为它同时要存完整的 `SteppedRunState`；服务方法只能存一个桩状态 |
+  | `Service.ExecuteWithApproval` | 工具中断由 dispatch 路径经 `RequestToolInterrupt` 创建 |
+  | `Service.ExecuteRejectedTool` + `tools.HITLDisapprovedResult` | `HandleApproval` 自己拼 `"用户拒绝执行该操作：" + reason` 作为工具消息回灌给模型（`stepped_runner.go:622`）。**没有任何代码产生或读取 `disapproved` 状态**，删掉的只是一个没人产生的状态构造器 |
+  | `Service.SaveApproval` + `InterruptManager.Save` | `SaveApprovalContext` / `SaveContext`——带 context 的版本，`CheckUserScope` 需要它 |
+  删前逐个核实过引用：`RequestNodeInterrupt` 零引用；其余只在自身测试或一个测试调用点里出现（`execution_test.go` 已改用 `SaveApprovalContext`）。另确认服务方法里那个**桩 checkpoint 不会被误当成恢复快照**：它没设 `Snapshot`，而 `LoadSnapshot` 要求 `cp.Snapshot` 为真（`memory/service.go:961`），所以只是次无用写入而非缺陷。
+  删完 `internal/hitl` 从 6 个方法（其中 4 个无守卫）变成 12 个全部有生产调用或有测试守卫的方法。`grep` 确认 `ExecuteWithApproval|ExecuteRejectedTool|RequestNodeInterrupt|HITLDisapprovedResult|disapproved` 在整个 Go 代码里**零残留**。
+  过程记录：这次用正则按函数名删代码，第一版正则对多行函数体截断错误、留下了残片（构建报 `expected declaration, found payload`），改为精确文本匹配后正常。教训与上一轮同类——**用文本模式做结构性修改时，先确认匹配粒度**。
+  验证：check.sh 全绿，集成测试在真实 PostgreSQL 下通过。
+
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

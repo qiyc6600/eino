@@ -481,7 +481,7 @@ func TestExecution_UncertainOutcomeBlocksReplayAfterRestart(t *testing.T) {
 	req, _ := r.hitlSvc.GetApproval(id)
 	req.Phase = "running"
 	req.Decision = &hitl.ApprovalDecision{Approved: true}
-	if err := r.hitlSvc.SaveApproval(req); err != nil {
+	if err := r.hitlSvc.SaveApprovalContext(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	r = testRuntime(t, sequence("send"), registry, []*DispatchEntry{entry}, dir)

@@ -147,10 +147,6 @@ func (m *InterruptManager) putLocked(req *ApprovalRequest) error {
 	return nil
 }
 
-func (m *InterruptManager) Save(req *ApprovalRequest) error {
-	return m.SaveContext(context.Background(), req)
-}
-
 func (m *InterruptManager) SaveContext(ctx context.Context, req *ApprovalRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
