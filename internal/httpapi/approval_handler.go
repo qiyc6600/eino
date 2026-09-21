@@ -29,6 +29,10 @@ func (h *ApprovalHandler) ListApprovals(w http.ResponseWriter, r *http.Request) 
 	}
 
 	pending := h.hitlSvc.ListPending(r.Context(), ac.UserID)
+	for _, req := range pending {
+		req.State = nil
+		req.Result = nil
+	}
 	writeJSON(w, http.StatusOK, pending)
 }
 
@@ -50,6 +54,8 @@ func (h *ApprovalHandler) GetApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.State = nil
+	req.Result = nil
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -85,16 +91,18 @@ func (h *ApprovalHandler) MakeDecision(w http.ResponseWriter, r *http.Request) {
 	// executes the gated tool (if approved), and re-enters the ReAct loop so the
 	// LLM continues reasoning from where it paused. The returned answer reflects
 	// the tool execution result, not a hardcoded message.
-	result := h.runner.Resume(ac, interruptID, decision)
+	result := h.runner.ResumeContext(r.Context(), ac, interruptID, decision)
 	if result.Status == "error" {
 		writeError(w, http.StatusBadRequest, result.Answer)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"runId":    result.RunID,
-		"status":   result.Status,
-		"answer":   result.Answer,
-		"approved": decision.Approved,
+		"runId":     result.RunID,
+		"status":    result.Status,
+		"answer":    result.Answer,
+		"approved":  decision.Approved,
+		"interrupt": result.Interrupt,
+		"events":    result.Events,
 	})
 }

@@ -3,6 +3,7 @@ package hitl
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/example/agent-eino-demo/internal/auth"
@@ -12,10 +13,11 @@ import (
 
 // Service provides HITL approval and resume operations.
 type Service struct {
-	manager      *InterruptManager
-	checkpoint   memory.CheckpointStore
-	rbac         *auth.RBACManager
-	idempotency  map[string]*tools.ToolResult // idempotencyKey -> result
+	executionMu sync.Mutex
+	manager     *InterruptManager
+	checkpoint  memory.CheckpointStore
+	rbac        *auth.RBACManager
+	idempotency map[string]*tools.ToolResult // idempotencyKey -> result
 }
 
 // NewService creates a new HITL service.
@@ -97,6 +99,9 @@ func (s *Service) ExecuteWithApproval(ctx context.Context, authCtx *auth.AuthCon
 // 恢复语义：工具级中断恢复时重新执行工具，而非从中断行继续。
 // 通过 idempotencyKey (runID:toolCallID) 保证同一工具调用的幂等性。
 func (s *Service) ExecuteApprovedTool(ctx context.Context, authCtx *auth.AuthContext, runID, toolCallID string, tool tools.RegisteredTool, arguments string) tools.ToolResult {
+	s.executionMu.Lock()
+	defer s.executionMu.Unlock()
+
 	// Idempotency check
 	idempotencyKey := runID + ":" + toolCallID
 	if result, ok := s.idempotency[idempotencyKey]; ok {
@@ -123,9 +128,18 @@ func (s *Service) ListPending(ctx context.Context, userID string) []*ApprovalReq
 	return s.manager.GetPendingForUser(ctx, userID)
 }
 
+// ListPendingE is the error-preserving form used by database-backed callers.
+func (s *Service) ListPendingE(ctx context.Context, userID string) ([]*ApprovalRequest, error) {
+	return s.manager.GetPendingForUserE(ctx, userID)
+}
+
 // GetApproval returns a specific approval request.
 func (s *Service) GetApproval(interruptID string) (*ApprovalRequest, bool) {
 	return s.manager.GetRequest(interruptID)
+}
+
+func (s *Service) GetApprovalContext(ctx context.Context, interruptID string) (*ApprovalRequest, bool, error) {
+	return s.manager.GetRequestContext(ctx, interruptID)
 }
 
 // SaveCheckpoint is a convenience method for saving checkpoints.
@@ -144,4 +158,19 @@ func (s *Service) SaveCheckpoint(ctx context.Context, userID, threadID, runID st
 // LoadCheckpoint loads a checkpoint by key.
 func (s *Service) LoadCheckpoint(ctx context.Context, userID, threadID, runID string) (memory.Checkpoint, bool, error) {
 	return s.checkpoint.Load(ctx, memory.CheckpointKey{UserID: userID, ThreadID: threadID, RunID: runID})
+}
+
+// SaveApproval persists an immutable approval snapshot and execution receipt.
+func (s *Service) SaveApproval(req *ApprovalRequest) error { return s.manager.Save(req) }
+
+func (s *Service) SaveApprovalContext(ctx context.Context, req *ApprovalRequest) error {
+	return s.manager.SaveContext(ctx, req)
+}
+
+func (s *Service) ClaimApproval(ctx context.Context, interruptID, userID string, decision ApprovalDecision, claimToken string) (*ApprovalRequest, bool, error) {
+	return s.manager.Claim(ctx, interruptID, userID, decision, claimToken)
+}
+
+func (s *Service) CompleteApproval(ctx context.Context, req *ApprovalRequest) error {
+	return s.manager.Complete(ctx, req)
 }
