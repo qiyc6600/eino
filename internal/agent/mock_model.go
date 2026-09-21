@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -341,8 +342,21 @@ func generateFinalAnswer(lower, raw, preferredLang string) string {
 }
 
 func summarizeToolResults(messages []*schema.Message) string {
+	// Only this turn's tool results. The message list carries the whole thread, so
+	// summarizing all of it made every answer repeat every earlier result: a
+	// weather lookup from an earlier turn reappeared in the summary of a later
+	// arithmetic question. A run's tool results always follow the user message
+	// that started it.
+	start := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == schema.User {
+			start = i + 1
+			break
+		}
+	}
+
 	var parts []string
-	for _, m := range messages {
+	for _, m := range messages[start:] {
 		if m.Role == schema.Tool {
 			name := m.Name
 			if name == "" {
@@ -440,22 +454,76 @@ func containsWord(s, needle string) bool {
 	return false
 }
 
+// extractMathExpr pulls an arithmetic expression out of a message, or returns ""
+// when there is none.
+//
+// It used to return a hardcoded "1 + 1", which made the mock answer a question
+// nobody asked: the old parser split on whitespace and required the operator to be
+// its own field, so "计算1+4" — no spaces around the operator — found nothing and
+// came back as "1 + 1 = 2". A fabricated result that looks plausible is worse than
+// a failure, because the user has to notice that the expression changed to catch
+// it. Returning "" makes the calculator report "unsupported expression", which is
+// visible.
 func extractMathExpr(s string) string {
-	parts := splitFields(s)
-	for i, p := range parts {
-		if p == "*" || p == "+" || p == "-" || p == "/" || p == "×" || p == "÷" {
-			if i > 0 && i < len(parts)-1 {
-				op := p
-				if p == "×" {
-					op = "*"
-				} else if p == "÷" {
-					op = "/"
-				}
-				return parts[i-1] + " " + op + " " + parts[i+1]
-			}
+	// Normalise spelled-out operators so "23 乘以 19" and "1加4" reach the same
+	// path as their symbolic forms. Multi-character forms first, or "除以" would be
+	// eaten by "除".
+	normalised := strings.NewReplacer(
+		"乘以", "*", "除以", "/", "加上", "+", "减去", "-",
+		"乘", "*", "除", "/", "加", "+", "减", "-",
+		"×", "*", "÷", "/",
+	).Replace(s)
+
+	// Keep only what an expression can contain. Everything else — prose,
+	// punctuation — becomes a separator, so it cannot be glued onto an operand.
+	var filtered []rune
+	for _, r := range normalised {
+		switch {
+		case r >= '0' && r <= '9', r == '.', r == '(', r == ')':
+			filtered = append(filtered, r)
+		case r == '+' || r == '-' || r == '*' || r == '/':
+			// Padded, so "1+4" and "1 + 4" yield the same fields.
+			filtered = append(filtered, ' ', r, ' ')
+		default:
+			filtered = append(filtered, ' ')
 		}
 	}
-	return "1 + 1"
+	fields := strings.Fields(string(filtered))
+
+	isOperand := func(f string) bool {
+		if _, err := strconv.ParseFloat(f, 64); err == nil {
+			return true
+		}
+		// A parenthesised operand counts as an operand; it is not parsed further.
+		return strings.HasPrefix(f, "(") && strings.HasSuffix(f, ")")
+	}
+	isOperator := func(f string) bool {
+		return f == "+" || f == "-" || f == "*" || f == "/"
+	}
+
+	// The longest alternating operand/operator run. Requiring an operand on both
+	// sides is what rejects an operator left over from a word — "除了计算 3*2"
+	// normalises to a leading "*", which is not an expression.
+	best := ""
+	for i := range fields {
+		if !isOperator(fields[i]) || i == 0 || i+1 >= len(fields) {
+			continue
+		}
+		if !isOperand(fields[i-1]) || !isOperand(fields[i+1]) {
+			continue
+		}
+		start, end := i-1, i+1
+		for start-2 >= 0 && isOperand(fields[start-2]) && isOperator(fields[start-1]) {
+			start -= 2
+		}
+		for end+2 < len(fields) && isOperator(fields[end+1]) && isOperand(fields[end+2]) {
+			end += 2
+		}
+		if candidate := strings.Join(fields[start:end+1], " "); len(candidate) > len(best) {
+			best = candidate
+		}
+	}
+	return best
 }
 
 func extractCity(s string) string {
