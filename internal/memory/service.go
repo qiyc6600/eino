@@ -29,6 +29,11 @@ type Service struct {
 	// the index is rebuilt from the KV store the first time a user needs it.
 	indexMu      sync.Mutex
 	indexedUsers map[string]bool
+
+	// pruneMu guards lastPruned, which throttles the thread-scoped prune per user.
+	pruneMu             sync.Mutex
+	lastPruned          map[string]time.Time
+	threadPruneInterval time.Duration
 }
 
 // NewService creates a new memory service.
@@ -45,6 +50,8 @@ func NewService(store MemoryStore, checkpointStore CheckpointStore, vectorStore 
 		documentBudgetTokens: DefaultDocumentBudgetTokens,
 		consolidateThreshold: DefaultConsolidateThresh,
 		indexedUsers:         make(map[string]bool),
+		lastPruned:           make(map[string]time.Time),
+		threadPruneInterval:  DefaultThreadPruneInterval,
 	}
 }
 
@@ -253,13 +260,15 @@ func (s *Service) PutPreference(ctx context.Context, userID, key, value string) 
 	})
 }
 
-// ListThreadPreferences returns one thread's scoped entries, keyed by their
-// logical key (the prefix stripped), so callers never see the encoding.
-func (s *Service) ListThreadPreferences(ctx context.Context, userID, threadID string) (map[string]MemoryEntry, error) {
-	entries, err := s.store.List(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
+// scopedEntriesIn filters an already-fetched entry set down to one thread's
+// scoped entries, keyed by their logical key so callers never see the encoding.
+//
+// It is pure, and that is the point: retrieval already reads the user's whole
+// namespace, so it must filter that slice rather than ask the store again. The
+// second read re-materialised every row — document chunks included — once per
+// turn, and being a separate read it could also disagree with the first about
+// the state of the store, making the injected context internally inconsistent.
+func scopedEntriesIn(entries []MemoryEntry, threadID string) map[string]MemoryEntry {
 	prefix := threadScopePrefix(threadID)
 	out := make(map[string]MemoryEntry)
 	for _, e := range entries {
@@ -269,7 +278,18 @@ func (s *Service) ListThreadPreferences(ctx context.Context, userID, threadID st
 		e.Key = strings.TrimPrefix(e.Key, prefix)
 		out[e.Key] = e
 	}
-	return out, nil
+	return out
+}
+
+// ListThreadPreferences returns one thread's scoped entries. It reads the store
+// because it stands alone; the retrieval path uses scopedEntriesIn on the slice
+// it has already read.
+func (s *Service) ListThreadPreferences(ctx context.Context, userID, threadID string) (map[string]MemoryEntry, error) {
+	entries, err := s.store.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return scopedEntriesIn(entries, threadID), nil
 }
 
 // DeleteThreadPreferences drops everything scoped to one thread. It is called
@@ -299,7 +319,32 @@ func (s *Service) DeleteThreadPreferences(ctx context.Context, userID, threadID 
 // would buy nothing — an entry whose thread is gone is stale by definition, and
 // an entry older than the retention window belongs to a thread that is about to
 // be pruned anyway.
+// DefaultThreadPruneInterval bounds how often the memory-side thread prune runs
+// for one user. Retention is expressed in hours or days, so pruning on every turn
+// would re-read the user's whole namespace — every document chunk included — to
+// delete entries that cannot have aged past the window since the last pass.
+const DefaultThreadPruneInterval = time.Hour
+
+// SetThreadPruneInterval overrides the prune throttle. 0 prunes on every call.
+func (s *Service) SetThreadPruneInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.threadPruneInterval = d
+}
+
 func (s *Service) PruneThreadPreferences(ctx context.Context, userID string, cutoff time.Time) (int, error) {
+	// Throttled per user, mirroring how ensureVectorIndex avoids repeating work.
+	// The throttle is marked only after a successful pass, so a failing store is
+	// retried on the next turn rather than being silenced for an interval.
+	interval := s.threadPruneInterval
+	s.pruneMu.Lock()
+	if last, ok := s.lastPruned[userID]; ok && time.Since(last) < interval {
+		s.pruneMu.Unlock()
+		return 0, nil
+	}
+	s.pruneMu.Unlock()
+
 	entries, err := s.store.List(ctx, userID)
 	if err != nil {
 		return 0, err
@@ -309,7 +354,15 @@ func (s *Service) PruneThreadPreferences(ctx context.Context, userID string, cut
 		if !strings.HasPrefix(e.Key, threadKeyPrefix) {
 			continue
 		}
-		t, err := time.Parse(time.RFC3339, e.UpdatedAt)
+		// Age is measured from the last touch, not from creation: injection
+		// refreshes LastAccessedAt without touching UpdatedAt, so keying on
+		// UpdatedAt would delete the scoped preferences of a conversation that is
+		// in active use. scoreEntry already reads age this way.
+		ref := e.UpdatedAt
+		if e.LastAccessedAt != "" {
+			ref = e.LastAccessedAt
+		}
+		t, err := time.Parse(time.RFC3339, ref)
 		if err != nil {
 			// No usable timestamp: keep it, the same way the thread store keeps
 			// entries whose age it cannot determine.
@@ -323,6 +376,10 @@ func (s *Service) PruneThreadPreferences(ctx context.Context, userID string, cut
 		}
 		removed++
 	}
+
+	s.pruneMu.Lock()
+	s.lastPruned[userID] = time.Now()
+	s.pruneMu.Unlock()
 	return removed, nil
 }
 

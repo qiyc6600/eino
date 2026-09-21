@@ -753,9 +753,15 @@ agent-eino-demo/
 | 触发 | 入口 | 依据 |
 |------|------|------|
 | 会话被删除 | `DeleteThreadContext` → `DeleteThreadPreferences` | 线程 ID 精确匹配 |
-| 保留期清理 | `pruneThreads` → `PruneThreadPreferences` | 条目**自身**的 `UpdatedAt` |
+| 保留期清理 | `pruneThreads` → `PruneThreadPreferences` | 条目**最后触碰**时间 |
 
-保留期清理按条目时间戳而不是"刚被删掉的线程集合"：`PruneThreadsBefore` 只返回数量、不返回是哪些线程，为它加返回值要动四个实现，而收益为零——线程已消失的条目按定义就是陈旧的，早于保留期的条目所属线程也即将被清理。无法解析时间戳的条目**保留**，与线程存储"无法判断年龄则保留"一致。
+保留期清理按条目时间戳而不是"刚被删掉的线程集合"：`PruneThreadsBefore` 只返回数量、不返回是哪些线程，为它加返回值要动四个实现，而收益为零——线程已消失的条目按定义就是陈旧的。无法解析时间戳的条目**保留**，与线程存储"无法判断年龄则保留"一致。
+
+**清理必须按"最后触碰时间"而不是创建时间**：注入时的强化只更新 `LastAccessedAt`，不动 `UpdatedAt`，所以按创建时间判断会删掉**活跃会话**的会话级偏好——每轮都在用的那条，静默消失。`scoreEntry` 早已按"最后触碰"计算近因，清理必须与它一致。
+
+**清理按用户节流**（`DefaultThreadPruneInterval`，默认 1 小时，`SetThreadPruneInterval` 可改，0 = 每次执行）。保留期以小时/天计，逐轮清理等于每轮把整个命名空间读一遍去删"还不可能过期"的条目。节流状态在成功清理之后才写入，失败的下轮会重试而不是被静默一小时。
+
+**检索路径只读一次命名空间**：会话级条目与用户级条目来自同一次 `store.List`——它们本来就在结果里，只是被 `IsReservedKey` 挡在竞争池之外，因此过滤用纯函数 `scopedEntriesIn` 作用在已取到的切片上，不再查一次存储。这不只是省一次读：PostgreSQL 的 `List` 是 `SELECT data FROM agent_memories WHERE user_id=$1`，会把每一行（含每个文档片段的正文）都取回并反序列化；两次独立的读还可能对存储状态得出不同快照，使注入内容自相矛盾。有测试用计数存储包装器断言每轮恰好一次（含注入验证）。
 
 **来源权威性：弱来源不得侵蚀强来源**。`sourceAuthority` 给来源定级（`user_stated` 3 > `consolidated` 2 > `llm_extracted` 1），用于冲突消解：
 

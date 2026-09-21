@@ -271,21 +271,21 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, threadID, query 
 	used := 0
 
 	// Thread-scoped entries first: the most specific scope wins the budget, and
-	// there are only ever a handful of them. They are read straight from the
-	// store rather than scored — they were stated for this conversation, so
-	// relevance is not what qualifies them.
+	// there are only ever a handful of them. They are taken from the entries read
+	// above — they are in there already, filtered out of the competing pool by
+	// IsReservedKey — rather than scored or re-read: they were stated for this
+	// conversation, so relevance is not what qualifies them, and a second read
+	// would re-materialise the whole namespace once per turn.
 	if threadID != "" {
-		if scoped, err := s.ListThreadPreferences(ctx, userID, threadID); err == nil {
-			for _, e := range sortedByKey(scoped) {
-				line := formatEntryLine(e)
-				cost := contextmgr.CountText(line)
-				if used+cost > budgetTokens {
-					continue
-				}
-				used += cost
-				threadLines = append(threadLines, line)
-				reinforced = append(reinforced, e)
+		for _, e := range sortedByKey(scopedEntriesIn(entries, threadID)) {
+			line := formatEntryLine(e)
+			cost := contextmgr.CountText(line)
+			if used+cost > budgetTokens {
+				continue
 			}
+			used += cost
+			threadLines = append(threadLines, line)
+			reinforced = append(reinforced, e)
 		}
 	}
 

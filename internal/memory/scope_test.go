@@ -206,3 +206,94 @@ func TestThreadScopedPreference_DiesWithItsThread(t *testing.T) {
 		}
 	})
 }
+
+// TestPruneThreadPreferences_UsesLastTouchNotCreation is the correctness guard
+// for the prune's notion of age.
+//
+// Injection refreshes LastAccessedAt without touching UpdatedAt, so keying age on
+// UpdatedAt deletes the scoped preferences of a conversation that is in active
+// use — silently, and exactly the conversations the user is relying on.
+// scoreEntry already reads age from the last touch; the prune must agree with it.
+func TestPruneThreadPreferences_UsesLastTouchNotCreation(t *testing.T) {
+	store := NewInMemoryMemoryStore()
+	svc := NewService(store, nil, nil, nil)
+	svc.SetThreadPruneInterval(0)
+	ctx := context.Background()
+
+	if err := svc.UpsertPreference(ctx, "u1", "answer_style", "concise", EntryMeta{
+		Type: MemoryTypePreference, Importance: 3, Source: "user_stated",
+		ThreadID: "t_a", Scope: ScopeThread,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Created long ago, touched just now.
+	stored, _, _ := store.Get(ctx, "u1", threadScopedKey("t_a", "answer_style"))
+	stored.UpdatedAt = time.Now().Add(-720 * time.Hour).Format(time.RFC3339)
+	stored.LastAccessedAt = time.Now().Format(time.RFC3339)
+	if err := store.Put(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := svc.PruneThreadPreferences(ctx, "u1", time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("an entry in active use was pruned for its creation time (%d removed)", removed)
+	}
+	if _, ok, _ := store.Get(ctx, "u1", threadScopedKey("t_a", "answer_style")); !ok {
+		t.Fatal("the actively used entry is gone")
+	}
+}
+
+// TestPruneThreadPreferences_Throttled covers the throttle: retention is measured
+// in hours or days, so a prune on every turn would re-read the whole namespace to
+// delete entries that cannot have aged past the window yet.
+func TestPruneThreadPreferences_Throttled(t *testing.T) {
+	store := NewInMemoryMemoryStore()
+	svc := NewService(store, nil, nil, nil)
+	ctx := context.Background()
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	seedStale := func(t *testing.T, key string) {
+		t.Helper()
+		if err := svc.UpsertPreference(ctx, "u1", key, "concise", EntryMeta{
+			Type: MemoryTypePreference, Importance: 3, Source: "user_stated",
+			ThreadID: "t_a", Scope: ScopeThread,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		e, _, _ := store.Get(ctx, "u1", threadScopedKey("t_a", key))
+		e.UpdatedAt = time.Now().Add(-720 * time.Hour).Format(time.RFC3339)
+		if err := store.Put(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The default interval allows the first pass...
+	seedStale(t, "answer_style")
+	removed, err := svc.PruneThreadPreferences(ctx, "u1", cutoff)
+	if err != nil || removed != 1 {
+		t.Fatalf("first pass should prune the stale entry: removed=%d err=%v", removed, err)
+	}
+	// ...and suppresses the second, even with a fresh stale entry to find.
+	seedStale(t, "output_format")
+	removed, err = svc.PruneThreadPreferences(ctx, "u1", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("the second pass should have been throttled, removed %d", removed)
+	}
+	if _, ok, _ := store.Get(ctx, "u1", threadScopedKey("t_a", "output_format")); !ok {
+		t.Fatal("the throttled pass deleted anyway")
+	}
+
+	// Zero disables the throttle, so an operator or a test can force a pass.
+	svc.SetThreadPruneInterval(0)
+	removed, err = svc.PruneThreadPreferences(ctx, "u1", cutoff)
+	if err != nil || removed != 1 {
+		t.Fatalf("with the throttle off the entry should be pruned: removed=%d err=%v", removed, err)
+	}
+}
