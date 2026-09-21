@@ -15,11 +15,21 @@ import (
 // AuthHandler handles authentication API endpoints.
 type AuthHandler struct {
 	authSvc *auth.Service
+	cookie  SessionCookieConfig
+}
+
+// SessionCookieConfig configures the browser session cookie.
+type SessionCookieConfig struct {
+	// TTL mirrors the session lifetime so the cookie expires with the session.
+	TTL time.Duration
+	// Secure must be false when serving plain HTTP on a non-localhost address,
+	// where browsers drop Secure cookies and every request looks unauthenticated.
+	Secure bool
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(authSvc *auth.Service) *AuthHandler {
-	return &AuthHandler{authSvc: authSvc}
+func NewAuthHandler(authSvc *auth.Service, cookie SessionCookieConfig) *AuthHandler {
+	return &AuthHandler{authSvc: authSvc, cookie: cookie}
 }
 
 // Login handles POST /api/auth/login
@@ -49,6 +59,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The cookie is what keeps a browser signed in across reloads; sessionId
+	// stays in the body so non-browser clients can keep using the header.
+	auth.SetSessionCookie(w, resp.SessionID, h.cookie.TTL, h.cookie.Secure)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -85,6 +98,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if ac != nil {
 		h.authSvc.Logout(r.Context(), ac.SessionID)
 	}
+	auth.ClearSessionCookie(w, h.cookie.Secure)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

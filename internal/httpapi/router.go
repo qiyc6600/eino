@@ -37,9 +37,10 @@ func NewRouter(
 	registry *tools.ToolRegistry,
 	modelSwitcher ModelSwitcher,
 	readinessChecker ReadinessChecker,
+	cookie SessionCookieConfig,
 ) *Router {
 	return &Router{
-		authHandler:     NewAuthHandler(authSvc),
+		authHandler:     NewAuthHandler(authSvc, cookie),
 		agentHandler:    NewAgentHandler(runner, memSvc),
 		approvalHandler: NewApprovalHandler(hitlSvc, runner),
 		memoryHandler:   NewMemoryHandler(memSvc),

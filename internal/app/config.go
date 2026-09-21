@@ -2,6 +2,7 @@ package app
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +79,11 @@ type Config struct {
 	ThreadHistoryMaxMessages int
 	// ThreadRetention deletes threads untouched for this long (0 = keep forever).
 	ThreadRetention time.Duration
+
+	// SessionCookieSecure marks the browser session cookie Secure. Browsers only
+	// store Secure cookies over HTTPS or on localhost, so serving the demo over
+	// plain HTTP on a LAN address requires turning this off.
+	SessionCookieSecure bool
 }
 
 // ModelProfile defines a pre-configured AI model provider profile.
@@ -199,6 +205,7 @@ func LoadConfig() *Config {
 		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
 		ThreadHistoryMaxMessages:   getEnvInt("THREAD_HISTORY_MAX_MESSAGES", 0),
 		ThreadRetention:            getEnvDuration("THREAD_RETENTION", 0),
+		SessionCookieSecure:        getEnvBool("SESSION_COOKIE_SECURE", true),
 	}
 }
 
@@ -244,6 +251,19 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return n
+}
+
+// getEnvBool reads a boolean flag. Only the common truthy/falsy spellings are
+// accepted; anything else falls back rather than guessing.
+func getEnvBool(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func getEnvFloat(key string, fallback float64) float64 {

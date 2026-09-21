@@ -49,6 +49,7 @@
 | 39 | 按消息数裁剪接入执行路径 | 模块 04 | ✅ | `TrimByCount` 此前无生产调用方，`MAX_MESSAGES` 是只读不用的配置。现接入 `compressMessages`（先条数、后 token），默认值改为 0 保持既有行为。顺带修掉一个隐蔽缺陷：`ModelContext` 原本以 `TokenInfo.Compressed` 为赋值条件，导致窗口生效但结果被丢弃——改为按长度差判定 |
 | 40 | 记忆召回独立于 KV 来源 | 模块 05 | ✅ | `RetrieveRelevant` 不再因 KV 为空而提前返回，只有向量条目的用户也能获得召回 |
 | 41 | 审批恢复路径流式 | 模块 02 | ✅ | `ResumeContext` 接受 `WithProgressSink`；决策接口 `stream=true` 走 SSE（默认 JSON 响应逐字节不变）；`HandleApproval` 接受 recorder 并记录被批准工具的执行事件；claim 之后执行 context 与客户端连接解耦（`WithoutCancel` + 重新施加 2 分钟超时），断连不再消耗审批或把已发生的副作用记为取消 |
+| 42 | 会话改用 HttpOnly Cookie | 模块 01 | ✅ | 登录下发 `HttpOnly` + `SameSite=Strict` 会话 Cookie，登出使其立即过期；认证中间件接受 Cookie 且请求头优先；前端不再读写 token，页面加载时探测会话以恢复登录态。`SESSION_COOKIE_SECURE` 控制 Secure 标记（默认开启，普通 HTTP 局域网演示需关闭） |
 
 ---
 
@@ -63,7 +64,7 @@
 | 5 | ~~向量记忆文本无长度上限~~ | 模块 05 | **已修复**：向量召回文本按预算截断（整条丢弃、保留能装下的），KV 条目使用剩余预算，注入总量不再超预算。修复前实测：120 token 预算下注入 1242 token |
 | 6 | ~~`MAX_MESSAGES` / `TrimByCount` 未接入~~ | 模块 04 | **已修复**：接入 `compressMessages`（在 token 裁剪之前），默认值由 30 改为 0 以保持既有行为——窗口设得过小会使摘要压缩永不触发。注意开启条数窗口会关闭追加式写入的收益，两者取舍见 design.md 3.4.2 |
 | 7 | ~~审批恢复路径不流式~~ | 模块 02 | **已修复**：`ResumeContext` 接受进度出口，决策接口 `stream=true` 时复用与聊天相同的 SSE 帧；被批准的工具执行现在也记录事件（此前 `HandleApproval` 直接调用工具、不记录任何事件，在实时流与运行事件里都是空白）。另：claim 之后恢复执行与客户端连接解耦 |
-| 8 | 刷新页面需重新登录 | 模块 01 | sessionId 仅存于页面内存，不写入 localStorage/sessionStorage |
+| 8 | ~~刷新页面需重新登录~~ | 模块 01 | **已修复**：改用 HttpOnly + SameSite=Strict 会话 Cookie，刷新页面保持登录；顺带解决"凭证对 JS 可读"——页面脚本已读不到会话。请求头认证保留且优先，脚本与第三方客户端不受影响 |
 | 9 | ~~前端无自动化语法检查~~ | 全局 | **已修复**：新增 `scripts/check.sh` 与 `.github/workflows/ci.yml`，前端语法作为独立 CI 任务运行。`go:embed` 不校验 JS，语法错误不影响任何 Go 测试却会让整个页面失去交互——该缺陷曾真实发生一次 |
 | 10 | ~~记忆检索在 KV 为空时提前返回~~ | 模块 05 | **已修复**：召回改为独立于 KV 来源，KV 为空时仍查询向量存储。代价是尚无记忆的用户多一次 embedding 调用 |
 
@@ -98,6 +99,7 @@
 - 2026-09-21：按消息数裁剪接入执行路径。`TrimByCount` 此前只有单测而无生产调用方，`MAX_MESSAGES` 是只读不用的配置；现接入 `compressMessages` 并在 token 裁剪之前应用，默认值由 30 改为 0 以保持既有行为（窗口设得过小会使摘要压缩永不触发，这一取舍已写入文档）。修复过程中发现一个隐蔽缺陷：`ModelContext` 原本以 `TokenInfo.Compressed` 为赋值条件，窗口生效时该标志为假，裁掉的列表被丢弃、模型仍拿到完整历史——改为按"压缩结果与完整历史的长度差"判定，并验证过恢复旧条件即测试失败。
 - 2026-09-21：记忆召回不再依赖 KV 存储非空。`RetrieveRelevant` 此前在 KV 为空时提前返回，导致 KV 条目被清空而向量情景仍在的用户静默失去召回；现改为 KV 为空时仍查询向量存储，代价是尚无记忆的用户多一次 embedding 调用。
 - 2026-09-21：审批恢复路径改为可流式。`ResumeContext` 接受与聊天相同的进度出口，决策接口 `stream=true` 时复用同一套 SSE 帧（默认 JSON 响应逐字节不变，现有客户端与测试不受影响）。顺带补上一个可观测性缺口：`HandleApproval` 直接调用 `executeTool` 而不记录任何事件，因此被批准的工具执行在实时流与运行事件里都是空白，现在会记录 `tool_call_start/end`。同时修正一个可靠性语义：claim 之后恢复执行与客户端连接解耦——此前浏览器断连会取消恢复，导致这次审批被消耗且无法重试（凭据已存在），并把可能已经发生的副作用记录为 `cancelled`。断连守卫通过注入缺陷验证：恢复旧行为（context 派生自请求）后测试报 `status=cancelled`。
+- 2026-09-21：浏览器会话改用 HttpOnly Cookie。此前 sessionId 只存页面内存，刷新即退出登录，且凭证对 JS 可读（XSS 可窃取）。现在登录下发 `HttpOnly` + `SameSite=Strict` 会话 Cookie，登出使其立即过期；认证中间件接受 Cookie 而请求头优先，脚本与第三方客户端不受影响；前端不再读写 token，页面加载时探测会话恢复登录态。`SESSION_COOKIE_SECURE` 默认开启（浏览器只在 HTTPS 或 localhost 下保存 Secure Cookie，局域网 HTTP 演示需关闭）。实机验证：刷新后仍在应用内、`document.cookie` 读不到会话、登出后刷新回到登录页。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

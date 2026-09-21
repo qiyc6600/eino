@@ -1,5 +1,4 @@
 // ========== State ==========
-let sessionId = '';
 let currentUser = null;
 let currentThread = 't_default';
 let threads = [];
@@ -58,14 +57,15 @@ function saveThreadList(list) {
 }
 
 // ========== API Helpers ==========
+// The session travels in an HttpOnly cookie, so it is never read or written by
+// page script and survives a reload. `credentials: 'same-origin'` is the default
+// for same-origin requests; it is stated explicitly because auth depends on it.
 async function api(method, path, body) {
     const opts = {
         method,
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
     };
-    if (sessionId) {
-        opts.headers['Authorization'] = `Bearer ${sessionId}`;
-    }
     if (body) {
         opts.body = JSON.stringify(body);
     }
@@ -83,7 +83,6 @@ async function doLogin() {
     const password = document.getElementById('loginPassword').value;
     try {
         const data = await api('POST', '/api/auth/login', { username, password });
-        sessionId = data.sessionId;
         currentUser = data.user;
         showMainApp();
     } catch (e) {
@@ -93,25 +92,34 @@ async function doLogin() {
 
 async function doLogout() {
     try { await api('POST', '/api/auth/logout'); } catch (e) {}
-    sessionId = '';
     currentUser = null;
     document.getElementById('loginPage').classList.add('active');
     document.getElementById('mainApp').classList.remove('active');
 }
 
-// ========== Main App ==========
-async function showMainApp() {
-    document.getElementById('loginPage').classList.remove('active');
-    document.getElementById('mainApp').classList.add('active');
+// ========== Bootstrap ==========
+// The session lives in an HttpOnly cookie, so a reload keeps the user signed in.
+// Quiet mode means a visitor without a session simply stays on the login page.
+document.addEventListener('DOMContentLoaded', () => { showMainApp(true); });
 
+// ========== Main App ==========
+// showMainApp reveals the main view. It probes the session before revealing
+// anything, so a fresh visit never flashes the app before falling back to login,
+// and `quiet` suppresses the alert when the caller already expects no session.
+async function showMainApp(quiet = false) {
     try {
         const me = await api('GET', '/api/auth/me');
         currentUser = me.user;
         renderUserInfo(me);
     } catch (e) {
-        alert('获取用户信息失败：' + e.message);
-        return;
+        if (!quiet) {
+            alert('获取用户信息失败：' + e.message);
+        }
+        return false;
     }
+
+    document.getElementById('loginPage').classList.remove('active');
+    document.getElementById('mainApp').classList.add('active');
 
     loadTools();
     loadModels();
@@ -122,6 +130,7 @@ async function showMainApp() {
     renderThreads();
     renderChat();
     refreshTokenBar(currentThread);
+    return true;
 }
 
 function renderUserInfo(me) {
@@ -182,7 +191,7 @@ async function deleteThread(threadId) {
     localStorage.removeItem(cacheKey(threadId));
 
     // Remove from backend
-    try { await fetch(`/api/chat/${threadId}/delete`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${sessionId}` } }); } catch (e) {}
+    try { await fetch(`/api/chat/${threadId}/delete`, { method: 'DELETE', credentials: 'same-origin' }); } catch (e) {}
 
     // If deleting current thread, switch to the first one
     if (threadId === currentThread) {
@@ -489,8 +498,8 @@ async function chatStream(threadId, message) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${sessionId}`,
             },
+            credentials: 'same-origin',
             body: JSON.stringify({ threadId, message, stream: true, confirmBeforeExecute }),
             signal: controller.signal,
         });
@@ -756,8 +765,8 @@ async function decideApproval(interruptId, approved) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${sessionId}`,
             },
+            credentials: 'same-origin',
             body: JSON.stringify({ approved, reason, stream: true }),
         });
         if (!resp.ok) {

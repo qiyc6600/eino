@@ -28,7 +28,7 @@ func TestLoginHandlerRateLimitAndDirectPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetLoginLimiter(limiter)
-	handler := NewAuthHandler(service)
+	handler := NewAuthHandler(service, SessionCookieConfig{TTL: time.Minute})
 	attempt := func(source string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
 		req.RemoteAddr = source + ":12345"
@@ -69,7 +69,7 @@ func TestLoginHandlerIgnoresUntrustedForwardedIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetLoginLimiter(limiter)
-	handler := NewAuthHandler(service)
+	handler := NewAuthHandler(service, SessionCookieConfig{TTL: time.Minute})
 	attempt := func(username, peer string) int {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"`+username+`","password":"wrong"}`))
 		req.RemoteAddr = peer + ":12345"

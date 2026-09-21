@@ -8,6 +8,15 @@
 
 ### 认证方式
 
+除登录接口与静态页面外，所有接口都需要认证。支持两种方式，**请求头优先**：
+
+| 方式 | 适用场景 | 说明 |
+|------|----------|------|
+| `Authorization: Bearer <sessionId>` | 脚本、CLI、第三方客户端 | 登录响应体中的 `sessionId` |
+| 会话 Cookie `agent_session` | 浏览器 | 登录时由服务端下发，`HttpOnly` + `SameSite=Strict`，页面脚本读不到，刷新页面仍保持登录 |
+
+URL 查询参数**不接受**作为凭证：URL 会进入浏览器历史、访问日志与 Referer 头。
+
 除 `/healthz`、`/readyz` 和 `/api/auth/login` 外，所有端点均需在请求头中携带 Session ID：
 
 ```
@@ -98,6 +107,14 @@ Authorization: Bearer <sessionId>
 }
 ```
 
+同时下发会话 Cookie（浏览器无需处理响应体中的 `sessionId`）：
+
+```
+Set-Cookie: agent_session=s_550e8400-...; Path=/; Max-Age=1800; HttpOnly; Secure; SameSite=Strict
+```
+
+`Max-Age` 跟随 `SESSION_TTL`；`Secure` 由 `SESSION_COOKIE_SECURE` 控制（普通 HTTP 的局域网地址下需关闭，否则浏览器会丢弃该 Cookie）。
+
 **失败响应** (401)：
 
 ```json
@@ -134,9 +151,9 @@ Authorization: Bearer <sessionId>
 
 ### POST /api/auth/logout
 
-登出当前会话。
+登出当前会话：服务端删除会话记录，并让会话 Cookie 立即过期（`Max-Age=-1`）。
 
-**请求头**：`Authorization: Bearer <sessionId>`
+**认证**：`Authorization: Bearer <sessionId>` 或会话 Cookie
 
 **成功响应** (200)：
 

@@ -129,6 +129,10 @@ HTTP 请求 → AuthMiddleware 提取 sessionId → ValidateSession → 构建 A
   → EinoTool.InvokableRun() → FromToolContext(ctx) → 工具函数
 ```
 
+**凭证的传递方式**：`extractSessionID` 先读 `Authorization: Bearer`，缺失时回退到会话 Cookie `agent_session`——请求头优先，因此脚本与第三方客户端不受影响。URL 查询参数不接受：URL 会进入浏览器历史、访问日志与 Referer 头。
+
+浏览器走 Cookie 的原因是它同时解决两个问题：`HttpOnly` 让页面脚本读不到会话（XSS 拿不到凭证），Cookie 随请求自动携带（刷新页面不必重新登录）。Cookie 用 `SameSite=Strict`——SPA 与接口同源，没有任何跨站导航需要带上它，因此这一档就足以覆盖 CSRF。`Secure` 由 `SESSION_COOKIE_SECURE` 控制并默认开启；浏览器只在 HTTPS 或 localhost 下保存 Secure Cookie，所以用普通 HTTP 在局域网地址上演示时必须关闭，否则 Cookie 被静默丢弃、表现为"每次请求都未认证"。
+
 **安全红线**：`AuthContext` 绝不暴露给 LLM。工具上下文中的 `user_id`、`roles` 等通过 `WithToolContext` 在 Go `context.Context` 中传递，不进入 LLM 的消息历史。
 
 #### 3.1.2 SessionStore 接口

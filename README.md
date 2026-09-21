@@ -45,6 +45,12 @@ open http://localhost:8080
 
 需要演示 visitor 权限时，先用管理员通过 `POST /api/users` 创建 visitor 角色账户。visitor 调用 admin 工具时会被 ACL 拦截，拒绝结果回灌 LLM 使其重新规划。
 
+### 会话如何传递
+
+浏览器端使用 **HttpOnly + SameSite=Strict 的会话 Cookie**（`agent_session`）：页面脚本读不到它，XSS 拿不到会话，刷新页面也不会退出登录。非浏览器客户端仍可用 `Authorization: Bearer <sessionId>` 请求头，两者同时存在时**请求头优先**。
+
+Cookie 的 `Secure` 标记由 `SESSION_COOKIE_SECURE` 控制，默认开启。浏览器只在 HTTPS 或 localhost/127.0.0.1 下保存 Secure Cookie，因此用普通 HTTP 在局域网 IP 上演示时需要设为 `false`，否则 Cookie 会被静默丢弃、每次请求都显示未认证。
+
 ---
 
 ## 🏗️ 架构总览
@@ -326,6 +332,7 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | `EMBEDDING_PROVIDER` | `hash` | Embedding 后端：hash / ollama / openai |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `SESSION_TTL` | `30m` | 会话滑动过期时间（如 30m/2h），每次校验成功自动续期 |
+| `SESSION_COOKIE_SECURE` | `true` | 会话 Cookie 的 Secure 标记。浏览器只在 HTTPS 或 localhost 下保存 Secure Cookie，因此用普通 HTTP 在局域网 IP 上演示时需设为 `false` |
 | `BOOTSTRAP_ADMIN_USERNAME` | | 空用户库首次启动时创建的管理员用户名 |
 | `BOOTSTRAP_ADMIN_PASSWORD` | | 初始管理员密码，至少 12 个字符；必须与用户名同时设置 |
 | `LOGIN_MAX_FAILURES` | `5` | 限流窗口内最多允许的失败次数 |
@@ -525,11 +532,9 @@ go test ./...
 |------|------|
 | HITL 为异步审批模式 | 中断后 run 结束，通过独立 API 恢复，非"挂起等待"语义 |
 | grep 使用示例数据 | 搜索日志为硬编码 mock，无真实文件系统访问 |
-| 凭证经 Bearer 头传递、JS 可读 | sessionId 仅存前端内存并经 Authorization 头发送（不支持 URL 查询参数，避免泄漏进日志/历史）；XSS 场景防护有限，生产应用 HttpOnly Cookie + CSRF 防护 |
 | 线程历史默认无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长。**可通过 `THREAD_HISTORY_MAX_MESSAGES` 与 `THREAD_RETENTION` 显式开启上限或清理**（默认保持完整保留：静默丢弃用户对话属于产品决策）。写入成本已通过追加式写入解决 |
 | 文件后端写入为全量重写 | 单文件 JSON 无法原地追加，成本为 O(全部会话)；写入成本敏感的场景应使用 PostgreSQL |
 | 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
-| 刷新页面需重新登录 | sessionId 仅存页面内存，未写入 localStorage/sessionStorage |
 
 > 多用户隔离为框架强制：类型化工具身份（不可伪造）、线程/运行事件/审批属主校验、存储层 `CheckUserScope` 上下文校验，详见 `docs/design.md` 5.3 节。节点级中断由请求显式 `confirmBeforeExecute` 标志触发，不依赖消息关键词。
 

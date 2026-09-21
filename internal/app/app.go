@@ -238,7 +238,8 @@ func NewApp(cfg *Config) *App {
 	}
 
 	// 8. Router (needs App for model switching)
-	a.Router = httpapi.NewRouter(authSvc, runner, hitlSvc, memorySvc, toolRegistry, a, a)
+	a.Router = httpapi.NewRouter(authSvc, runner, hitlSvc, memorySvc, toolRegistry, a, a,
+		httpapi.SessionCookieConfig{TTL: cfg.SessionTTL, Secure: cfg.SessionCookieSecure})
 
 	return a
 }
