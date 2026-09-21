@@ -40,6 +40,7 @@
 | 30 | Token 计费覆盖完整请求 | 模块 04 | ✅ | 计数补上工具调用参数与工具名；工具定义 schema 开销计入；新增 `RESERVE_OUTPUT_TOKENS` 与 `MAX_TOOL_RESULT_CHARS`；采集 `ResponseMeta.Usage` 并在界面区分估算与实际 |
 | 31 | 记忆开关（禁止记忆） | 模块 05 | ✅ | 保留键 `__settings` 存每用户开关；`ExtractAndSave` / `RetrieveRelevant` / `Consolidate` 内部强制拦截；`GET`/`PUT /api/memory/settings`；前端开关与置灰提示 |
 | 32 | 事件补全与自描述 | 模块 02/03 | ✅ | 补齐 `model_call_start/end`、`tool_call_start`、`acl_denied`、`hitl_interrupt` 的记录点；`Record` 从 metadata 提取 `ToolName`/`AgentName` |
+| 33 | 持续集成与统一检查脚本 | 全局 | ✅ | `scripts/check.sh`（gofmt / vet / build / test -race / 前端语法）作为本地与 CI 的单一事实来源；`.github/workflows/ci.yml` 两个并行任务；前端语法检查在缺少 Node 时只能显式跳过 |
 
 ---
 
@@ -55,7 +56,7 @@
 | 6 | `MAX_MESSAGES` / `TrimByCount` 未接入 | 模块 04 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |
 | 7 | 审批恢复路径不流式 | 模块 02 | 审批决策接口返回一次性 JSON，恢复期间界面无进度；恢复耗时可能与一次聊天相当 |
 | 8 | 刷新页面需重新登录 | 模块 01 | sessionId 仅存于页面内存，不写入 localStorage/sessionStorage |
-| 9 | 前端无自动化语法检查 | 全局 | `go:embed` 不校验 JS，语法错误不影响任何 Go 测试却会让整个页面失去交互。当前依赖 README 中的 `node --check` 手工步骤，CI 缺失 |
+| 9 | ~~前端无自动化语法检查~~ | 全局 | **已修复**：新增 `scripts/check.sh` 与 `.github/workflows/ci.yml`，前端语法作为独立 CI 任务运行。`go:embed` 不校验 JS，语法错误不影响任何 Go 测试却会让整个页面失去交互——该缺陷曾真实发生一次 |
 
 > 已修复：多用户隔离非自动强制（原限制 #1）——已升级为框架强制（类型化 ToolIdentity + 线程/run/审批属主校验 + 存储层 CheckUserScope），详见 docs/design.md 5.3 节。
 > 已修复：节点级中断需意图触发（原限制 #2）——改为请求显式 `confirmBeforeExecute` 标志（前端开关/API 字段），消息文本不再参与触发判断。
@@ -79,6 +80,7 @@
 - 2026-09-21：Token 计费覆盖完整请求。补上工具调用参数、工具名与工具定义 schema 开销；新增回答预留空间与工具结果长度上限两个配置；采集并透出模型实际用量，界面区分估算与实际。
 - 2026-09-21：新增记忆开关（禁止记忆）。开关在记忆服务内部强制拦截写入与注入，保留键设置项复用现有存储后端，不新增迁移；配套 API 与界面开关。
 - 2026-09-21：端到端浏览器走查修复三处缺陷：app.js 语法错误导致整个前端失去交互（Go 测试全绿，`go:embed` 不校验 JS）、mock 流式节奏放错位置导致无打字机效果、进度帧缺工具名；另修复记忆开关接口字段不一致导致刷新后状态丢失。README 补充前端语法检查步骤。
+- 2026-09-21：新增 `scripts/check.sh` 与 GitHub Actions 流水线。检查逻辑收敛到单一脚本（gofmt / go vet / go build / go test -race / 前端语法），本地与 CI 共用；前端语法作为独立任务，因为 `go build` 不校验 `go:embed` 的 JS。脚本的两个守卫均通过注入真实缺陷验证会失败。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

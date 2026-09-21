@@ -128,13 +128,30 @@ Agent 调用 delete_order → 中断 → 返回审批卡片 → 人工批准/拒
 - 密码使用带随机盐的 Argon2id（19 MiB、2 次迭代）；旧版 SHA-256 账户在首次成功登录后自动升级。角色变更会撤销该用户在内存、文件或 PostgreSQL 中的全部会话；会话校验同时核对当前账户角色，拒绝并删除跨实例竞态产生的旧角色会话。
 - 登录失败分别按用户名和直接连接 IP 计数。默认 15 分钟内失败 5 次后锁定 15 分钟，返回 429 和 `Retry-After`；成功登录清除对应计数。PostgreSQL 部署使用共享事务计数，内存/文件部署使用进程内计数。反向代理场景应在可信代理处限制客户端来源；应用不信任客户端提交的 `X-Forwarded-For`。
 
-回归覆盖见 `internal/agent/execution_test.go` 和 `integration_test/reliability_test.go`；使用 `go test ./...` 和 `go test -race ./...` 验证。
+回归覆盖见 `internal/agent/execution_test.go` 和 `integration_test/reliability_test.go`。
 
-前端改动需额外做一次语法检查——`go build` 不会校验 `go:embed` 进去的 JS，一个语法错误会让整个页面失去交互（`onclick` 里的函数全部未定义）却不影响任何 Go 测试：
+全部检查（格式、vet、构建、测试、前端语法）统一走一个脚本，本地与 CI 共用同一份逻辑：
 
 ```bash
-node --check web/assets/app.js
+./scripts/check.sh            # 全部
+./scripts/check.sh go         # gofmt + go vet + go build + go test -race
+./scripts/check.sh frontend   # node --check web/assets/app.js
 ```
+
+`go test` 带 `-count=1`，避免命中缓存后把旧结果当成当前状态。`go test -race` 需要 C 编译器（Linux 上即 gcc，`golang` 官方镜像已包含）。
+
+**前端语法检查为什么单独存在**：`go build` 不会校验 `go:embed` 进去的 JS。一个语法错误会让整个页面失去交互（`onclick` 里的函数全部未定义），而所有 Go 测试仍然全绿——本项目就发生过一次。因此它是独立的 CI 任务，只有在环境缺少 Node 时才能通过 `SKIP_FRONTEND_CHECK=1` **显式**跳过；静默跳过正是当初漏掉这个错误的原因。
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在每次 push 和 PR 时运行两个并行任务：
+
+| 任务 | 内容 |
+|------|------|
+| Go checks | `gofmt` 校验、`go vet`、`go build`、`go test -race`（按 `go.mod` 声明的版本） |
+| Frontend syntax | `node --check web/assets/app.js` |
+
+集成测试使用 `httptest` 与 mock 模型，不依赖外部服务；PostgreSQL 相关测试在未设置 `DATABASE_URL` 时自动跳过。
 
 ### 恢复语义
 
@@ -493,7 +510,6 @@ go test ./...
 | `MAX_MESSAGES` / `TrimByCount` 未接入 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |
 | 审批恢复路径不流式 | 审批决策接口返回一次性 JSON，恢复期间界面无进度 |
 | 刷新页面需重新登录 | sessionId 仅存页面内存，未写入 localStorage/sessionStorage |
-| 前端无自动化语法检查 | `go:embed` 不校验 JS；语法错误不影响任何 Go 测试却会让页面失去交互，当前依赖手工 `node --check`，CI 缺失 |
 
 > 多用户隔离为框架强制：类型化工具身份（不可伪造）、线程/运行事件/审批属主校验、存储层 `CheckUserScope` 上下文校验，详见 `docs/design.md` 5.3 节。节点级中断由请求显式 `confirmBeforeExecute` 标志触发，不依赖消息关键词。
 

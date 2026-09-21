@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A new push to the same branch makes the previous run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Respect the version declared in go.mod, so CI verifies the
+          # project's own minimum rather than an unrelated pinned release.
+          go-version-file: go.mod
+          cache: true
+
+      # gofmt, go vet, go build, go test -race.
+      # The integration tests use httptest with the mock model and need no
+      # external services; the PostgreSQL tests skip when DATABASE_URL is unset.
+      - name: Run checks
+        run: ./scripts/check.sh go
+        env:
+          SKIP_FRONTEND_CHECK: "1"
+
+  frontend:
+    name: Frontend syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Separate job because go build does not validate embedded JS: a syntax
+      # error there breaks the whole page while every Go test still passes.
+      - name: Check embedded JavaScript
+        run: ./scripts/check.sh frontend
