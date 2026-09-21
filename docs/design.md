@@ -341,6 +341,24 @@ type Message struct {
 - **动机**：若把压缩结果直接写回 `Messages`，线程存储里保存的就是压缩版——原始对话被摘要永久覆盖，且下一轮摘要会被当作普通 assistant 消息再次参与压缩，形成"摘要的摘要"。
 - **代价**：线程存储会持续增长（完整历史永不丢弃），且压缩过的 run 其 checkpoint 会同时序列化两份。线程历史的保留上限/归档策略尚未实现，属于已知限制。
 
+#### 3.4.7 追加式写入
+
+线程历史的持久化不再是"每轮重写整块"。
+
+| 后端 | 写入方式 | 成本 |
+|------|----------|------|
+| 内存 | 追加 | O(新增) |
+| PostgreSQL | `messages = messages \|\| $new::jsonb` | O(新增) |
+| 文件 | 整文件重写 | O(全部会话)，见下 |
+
+**判定规则**：`SteppedRunState` 记录 `StoredCount`（本轮开始时存储中的条数）与 `HistoryRepaired`。只有"纯追加"的 run 才走追加路径；若加载历史时修复过孤立的 tool_call（`sanitizeMessages` 插入过占位结果），说明已经存储的消息被改动，必须回退为全量替换。
+
+**守卫让优化自我纠正**：`AppendHistoryContext` 带一个"期望长度"参数，由数据库在 SQL 内用 `jsonb_array_length(messages)` 求值，因此不需要读取既有 blob。任何不匹配——并发写入、早于该字段存在的 checkpoint、被修复过的前缀——都会返回 `ErrThreadAppendMismatch`，调用方随即改为全量替换。这样优化失效时最坏情况是慢，而不是数据错误。
+
+**无需 schema 迁移**：长度守卫用 `jsonb_array_length` 在既有列上计算，没有新增列或表。
+
+**文件后端仍是全量重写**：单个 JSON 文件无法原地追加，其成本是 O(全部会话) 而非 O(当前会话)。该后端定位为单进程演示用途，如需写入成本可控应使用 PostgreSQL。文件后端显式实现了 `AppendHistoryContext`——`FileThreadStore` 内嵌 `*threadStore`，若不覆盖就会通过方法提升拿到一个只改内存、不落盘的版本，重启后静默丢数据。
+
 #### 3.4.6 工具结果长度上限
 
 单个工具结果在进入历史前经 `capToolResult` 截断（`MAX_TOOL_RESULT_CHARS`，默认 8000 字符），超出部分截断并标注原始长度。真实工具、子 Agent 结果与审批恢复三条路径都经过该上限，避免一条冗长结果挤占整个窗口。

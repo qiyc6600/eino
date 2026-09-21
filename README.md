@@ -222,8 +222,11 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | LLM 摘要压缩 | `Summarizer.Compress` | 超阈值触发 LLM 摘要，规则提取降级兜底 |
 | 工具结果上限 | `capToolResult` | 单个结果超 `MAX_TOOL_RESULT_CHARS` 截断并标注原始长度 |
 | 历史与上下文分离 | `SteppedRunState.ModelContext` | 压缩只改模型视图，完整对话仍完整落盘 |
+| 追加式写入 | `ThreadHistoryAppender` | 线程历史只写新增消息，不再每轮重写整块（PostgreSQL 与内存后端；文件后端仍为全量重写） |
 
 **可用预算** = `MAX_TOKENS` − 工具定义 schema 开销 − `RESERVE_OUTPUT_TOKENS`（为回答预留）。压缩判定与裁剪都以它为准，而界面显示的是含基础开销的请求真实大小。token 条同时展示本地估算与服务商返回的实际用量。
+
+**追加式写入的长度守卫**：追加请求带一个"期望长度"，由数据库在 SQL 内用 `jsonb_array_length` 求值，因此不读取既有历史。任何不匹配（并发写入、被修复过的前缀、早于该字段存在的 checkpoint）都会退化为全量替换——优化失效时最坏是慢，不会写错数据。
 
 ---
 
@@ -504,7 +507,8 @@ go test ./...
 | HITL 为异步审批模式 | 中断后 run 结束，通过独立 API 恢复，非"挂起等待"语义 |
 | grep 使用示例数据 | 搜索日志为硬编码 mock，无真实文件系统访问 |
 | 凭证经 Bearer 头传递、JS 可读 | sessionId 仅存前端内存并经 Authorization 头发送（不支持 URL 查询参数，避免泄漏进日志/历史）；XSS 场景防护有限，生产应用 HttpOnly Cookie + CSRF 防护 |
-| 线程历史无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储持续增长；缺少保留期与归档策略 |
+| 线程历史无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长；缺少保留期与归档策略（写入成本已通过追加式写入解决） |
+| 文件后端写入为全量重写 | 单文件 JSON 无法原地追加，成本为 O(全部会话)；写入成本敏感的场景应使用 PostgreSQL |
 | 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
 | 向量记忆文本无长度上限 | `FormatVectorResults` 不截断，向量文本可能单独超出记忆预算 |
 | `MAX_MESSAGES` / `TrimByCount` 未接入 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |

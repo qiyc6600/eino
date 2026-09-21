@@ -41,6 +41,8 @@
 | 31 | 记忆开关（禁止记忆） | 模块 05 | ✅ | 保留键 `__settings` 存每用户开关；`ExtractAndSave` / `RetrieveRelevant` / `Consolidate` 内部强制拦截；`GET`/`PUT /api/memory/settings`；前端开关与置灰提示 |
 | 32 | 事件补全与自描述 | 模块 02/03 | ✅ | 补齐 `model_call_start/end`、`tool_call_start`、`acl_denied`、`hitl_interrupt` 的记录点；`Record` 从 metadata 提取 `ToolName`/`AgentName` |
 | 33 | 持续集成与统一检查脚本 | 全局 | ✅ | `scripts/check.sh`（gofmt / vet / build / test -race / 前端语法）作为本地与 CI 的单一事实来源；`.github/workflows/ci.yml` 两个并行任务；前端语法检查在缺少 Node 时只能显式跳过 |
+| 34 | 追加式写入（消除写放大） | 模块 04/05 | ✅ | `ThreadHistoryAppender` 带长度守卫的追加，守卫在 SQL 内用 `jsonb_array_length` 求值，不读取既有 blob，无需 schema 迁移；只有纯追加的 run 走该路径，前缀被修复或守卫不匹配时回退全量替换。实测 6 轮对话：追加 2538 字节 vs 每轮替换 15558 字节 |
+| 35 | 行尾统一为 LF | 全局 | ✅ | `.gitattributes` 强制文本文件 LF：`core.autocrlf=true` 下 Windows 检出为 CRLF，会让 gofmt 把整个仓库判为未格式化，使检查脚本在本地误报 |
 
 ---
 
@@ -50,7 +52,7 @@
 |---|------|----------|------|
 | 1 | HITL 为异步审批模式 | 模块 02 | 中断后 run 结束，通过独立 API 调用恢复，非"挂起等待"语义 |
 | 2 | grep 使用硬编码 mock 数据 | 模块 03 | 搜索日志是示例场景，数据完全合成 |
-| 3 | 线程历史无保留上限 | 模块 04/05 | 历史分离后线程存储永久保留完整对话，模型输入由压缩保证有界，但存储持续增长；缺少保留期与归档策略。PostgreSQL 后端下表现为表持续膨胀 |
+| 3 | 线程历史无保留上限 | 模块 04/05 | 历史分离后线程存储永久保留完整对话，模型输入由压缩保证有界，但存储持续增长；缺少保留期与归档策略。PostgreSQL 后端下表现为表持续膨胀。**写入成本已通过追加式写入解决（见第 34 项），此处仅剩存储总量问题** |
 | 4 | 压缩后的 checkpoint 体积上升 | 模块 02/04 | 真正压缩的 run 会同时序列化完整历史与压缩上下文两份 |
 | 5 | 向量记忆文本无长度上限 | 模块 05 | `FormatVectorResults` 不截断，向量文本可能单独超出记忆预算（此时 KV 条目会被跳过，但向量部分已超） |
 | 6 | `MAX_MESSAGES` / `TrimByCount` 未接入 | 模块 04 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |
@@ -81,6 +83,8 @@
 - 2026-09-21：新增记忆开关（禁止记忆）。开关在记忆服务内部强制拦截写入与注入，保留键设置项复用现有存储后端，不新增迁移；配套 API 与界面开关。
 - 2026-09-21：端到端浏览器走查修复三处缺陷：app.js 语法错误导致整个前端失去交互（Go 测试全绿，`go:embed` 不校验 JS）、mock 流式节奏放错位置导致无打字机效果、进度帧缺工具名；另修复记忆开关接口字段不一致导致刷新后状态丢失。README 补充前端语法检查步骤。
 - 2026-09-21：新增 `scripts/check.sh` 与 GitHub Actions 流水线。检查逻辑收敛到单一脚本（gofmt / go vet / go build / go test -race / 前端语法），本地与 CI 共用；前端语法作为独立任务，因为 `go build` 不校验 `go:embed` 的 JS。脚本的两个守卫均通过注入真实缺陷验证会失败。
+- 2026-09-21：线程历史改为追加式写入。`saveHistory` 此前每轮重写整块历史，PostgreSQL 侧是整块 JSONB 覆盖，写入成本随对话长度线性增长。新增带长度守卫的追加接口（守卫在 SQL 内求值，无需读取既有 blob，也无需 schema 迁移），纯追加的 run 只写新增消息，前缀被修复或守卫不匹配时回退全量替换。顺带修复 `AppendContext` 缺少 `CheckUserScope`、以及 `FileThreadStore` 会通过方法提升拿到不落盘的追加实现这两个问题。文件后端仍为全量重写。
+- 2026-09-21：新增 `.gitattributes` 统一文本文件为 LF。此前 `core.autocrlf=true` 使 Windows 检出为 CRLF，gofmt 会把整个仓库判为未格式化，导致检查脚本在本地误报全部文件——正是脚本要防的"本地与 CI 不一致"。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
