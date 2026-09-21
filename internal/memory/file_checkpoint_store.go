@@ -35,25 +35,26 @@ func NewFileCheckpointStore(path string) (*FileCheckpointStore, error) {
 	return store, nil
 }
 
-func (f *FileCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) error {
-	if err := f.InMemoryCheckpointStore.Save(ctx, checkpoint); err != nil {
-		return err
-	}
-	return f.persist()
-}
-
-func (f *FileCheckpointStore) Delete(ctx context.Context, key CheckpointKey) error {
-	if err := f.InMemoryCheckpointStore.Delete(ctx, key); err != nil {
-		return err
-	}
-	return f.persist()
-}
-
-// persist atomically writes the full checkpoint snapshot to disk.
-func (f *FileCheckpointStore) persist() error {
+func (f *FileCheckpointStore) update(fn func(*InMemoryCheckpointStore) error) error {
 	f.persistMu.Lock()
 	defer f.persistMu.Unlock()
-	return storage.WriteJSONFileAtomic(f.path, f.InMemoryCheckpointStore.Snapshot())
+	staged := NewInMemoryCheckpointStore()
+	staged.Restore(f.InMemoryCheckpointStore.Snapshot())
+	if err := fn(staged); err != nil {
+		return err
+	}
+	snapshot := staged.Snapshot()
+	if err := storage.WriteJSONFileAtomic(f.path, snapshot); err != nil {
+		return err
+	}
+	f.InMemoryCheckpointStore.Restore(snapshot)
+	return nil
+}
+func (f *FileCheckpointStore) Save(ctx context.Context, checkpoint Checkpoint) error {
+	return f.update(func(s *InMemoryCheckpointStore) error { return s.Save(ctx, checkpoint) })
+}
+func (f *FileCheckpointStore) Delete(ctx context.Context, key CheckpointKey) error {
+	return f.update(func(s *InMemoryCheckpointStore) error { return s.Delete(ctx, key) })
 }
 
 // Ensure FileCheckpointStore implements CheckpointStore.

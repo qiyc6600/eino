@@ -41,11 +41,12 @@ type scoredEntry struct {
 // RetrieveRelevant is the single memory-injection entry point. It scores the
 // user's non-archived entries by keyword overlap with the query, importance,
 // recency, and access frequency; merges vector-retrieved episodes; and
-// renders the top entries within a token budget. A selected entry is
-// reinforced (access count + timestamp) so frequently used memories rank
-// higher over time ("use strengthens memory").
+// renders the top entries within a token budget. When reinforce is true a
+// selected entry is refreshed (access count + timestamp) so frequently used
+// memories rank higher over time ("use strengthens memory"); pass false for
+// read-only recounts (e.g. UI display) that must not skew the statistics.
 // An empty query scores on importance/recency/access only.
-func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, budgetTokens int) string {
+func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, budgetTokens int, reinforce bool) string {
 	if budgetTokens <= 0 {
 		budgetTokens = s.budgetTokens
 	}
@@ -95,11 +96,14 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	}
 
 	// "Use strengthens memory": refresh access stats for what was injected.
-	now := time.Now().Format(time.RFC3339)
-	for _, e := range reinforced {
-		e.AccessCount++
-		e.LastAccessedAt = now
-		_ = s.store.Put(ctx, e)
+	// Read-only recounts (reinforce=false) leave the statistics untouched.
+	if reinforce {
+		now := time.Now().Format(time.RFC3339)
+		for _, e := range reinforced {
+			e.AccessCount++
+			e.LastAccessedAt = now
+			_ = s.store.Put(ctx, e)
+		}
 	}
 
 	var parts []string

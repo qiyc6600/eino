@@ -206,7 +206,7 @@ func TestRetrieveRelevant_ScoringBudgetAndReinforcement(t *testing.T) {
 	seed("stale_marginal", "old noise", old, 1, false)
 	seed("archived_one", "hidden", now.Format(time.RFC3339), 5, true)
 
-	out := svc.RetrieveRelevant(ctx, "u1", "", 0)
+	out := svc.RetrieveRelevant(ctx, "u1", "", 0, true)
 	if !strings.Contains(out, "fresh_important") {
 		t.Errorf("high-importance fresh entry should be retrieved, got: %s", out)
 	}
@@ -228,7 +228,7 @@ func TestRetrieveRelevant_ScoringBudgetAndReinforcement(t *testing.T) {
 
 	// Tiny budget keeps only one line, and the second retrieval
 	// reinforces again — use strengthens memory.
-	out2 := svc.RetrieveRelevant(ctx, "u1", "", 30)
+	out2 := svc.RetrieveRelevant(ctx, "u1", "", 30, true)
 	if strings.Count(out2, "\n") > 2 {
 		t.Errorf("budget should limit injected lines, got: %s", out2)
 	}

@@ -24,7 +24,7 @@ func TestIntegration_FileStoreBackends(t *testing.T) {
 	application := createTestApp(t)
 	server := httptest.NewServer(application.Router.Handler())
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	resp := doPost(t, server.URL, "/api/memory", sessionID, map[string]string{
 		"key":   "language",
