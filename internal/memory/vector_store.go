@@ -390,8 +390,9 @@ func FormatVectorResults(results []VectorResult) string {
 // below minScore (0 = use the default threshold).
 //
 // The threshold has to match the embedder's score scale: real embeddings put a
-// relevant pair around 0.6-0.9, while the hash fallback compresses everything
-// into roughly 0.15-0.4, so one fixed cut-off cannot serve both.
+// relevant pair around 0.6-0.9, while the hash fallback is an order of magnitude
+// lower (a relevant Chinese chunk measures 0.043-0.19), so one fixed cut-off
+// cannot serve both.
 //
 // Whole entries are skipped rather than truncating the text: a recalled episode
 // cut in half reads as a different fact. Results arrive ranked, so higher-ranked

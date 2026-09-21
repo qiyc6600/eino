@@ -79,10 +79,11 @@ func (s *Service) SetDocumentBudgetTokens(tokens int) {
 // SetVectorMinScore overrides the relevance cut-off applied to vector results.
 //
 // It exists because the cut-off is only meaningful relative to the embedder's
-// score scale: real embeddings place a relevant pair around 0.6-0.9, while the
-// hash fallback compresses everything into roughly 0.15-0.4 — with the default
-// 0.3, a genuinely relevant Chinese document (measured at 0.168) is discarded
-// while an unrelated one can slip through. 0 restores the default.
+// score scale. Real embeddings place a relevant pair around 0.6-0.9; the hash
+// fallback is a different order of magnitude entirely — measured, a relevant
+// Chinese chunk scores 0.043-0.19 and an unrelated one 0.000, so the 0.3 used for
+// real embeddings would discard every relevant match. The application picks a
+// value per provider; 0 restores the package default.
 func (s *Service) SetVectorMinScore(score float64) {
 	if score < 0 {
 		score = 0

@@ -3,7 +3,9 @@ package app
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -266,25 +268,33 @@ func getEnvDuration(key string, fallback time.Duration) time.Duration {
 	if v == "" {
 		return fallback
 	}
-	d, err := time.ParseDuration(v)
+	// Trimmed like the other helpers: a value pasted with a trailing space
+	// ("SESSION_TTL=2h ") would otherwise fail to parse and silently fall back to
+	// the default, so the session would expire on a different schedule than the
+	// one configured.
+	d, err := time.ParseDuration(strings.TrimSpace(v))
 	if err != nil || d <= 0 {
 		return fallback
 	}
 	return d
 }
 
+// getEnvInt reads a non-negative integer. Anything else — a sign, a decimal
+// point, trailing text, or a value that overflows int — falls back rather than
+// being guessed at.
+//
+// The hand-rolled loop this replaces accepted digits and wrapped silently on
+// overflow, which for a variable that is a count or a limit meant a huge typo
+// became a small plausible number: "18446744073709551617" read as 1, and
+// "99999999999999999999" as 7766279631452241919.
 func getEnvInt(key string, fallback int) int {
-	v := os.Getenv(key)
+	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
 	}
-	n := 0
-	for _, c := range v {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		} else {
-			return fallback
-		}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return fallback
 	}
 	return n
 }
@@ -343,39 +353,22 @@ func getEnvMCPServers(key string) []MCPServerConfig {
 	return valid
 }
 
+// getEnvFloat reads a non-negative finite float. Malformed input falls back for
+// the same reason as getEnvInt.
+//
+// The hand-rolled parser this replaces skipped over extra decimal points instead
+// of rejecting them, so a typo produced a plausible value rather than the
+// documented default: "1.2.3" read as 1.23 and "0.1.5" as 0.15. NaN and Inf are
+// rejected explicitly, because ParseFloat accepts both spellings and neither is
+// a usable threshold.
 func getEnvFloat(key string, fallback float64) float64 {
-	v := os.Getenv(key)
+	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
 	}
-	// Simple float parsing: handle "0.8" style values
-	intPart := 0
-	fracPart := 0
-	fracDigits := 0
-	afterDot := false
-	for _, c := range v {
-		if c == '.' {
-			afterDot = true
-			continue
-		}
-		if c >= '0' && c <= '9' {
-			if afterDot {
-				fracPart = fracPart*10 + int(c-'0')
-				fracDigits++
-			} else {
-				intPart = intPart*10 + int(c-'0')
-			}
-		} else {
-			return fallback
-		}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return fallback
 	}
-	result := float64(intPart)
-	if fracDigits > 0 {
-		div := 1.0
-		for i := 0; i < fracDigits; i++ {
-			div *= 10
-		}
-		result += float64(fracPart) / div
-	}
-	return result
+	return f
 }
