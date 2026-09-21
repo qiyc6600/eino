@@ -263,9 +263,12 @@ func isWordChar(r rune) bool {
 // overlapTokens splits text for the lexical-overlap channel used by retrieval
 // scoring.
 //
-// It is deliberately NOT tokenize. tokenize feeds hashEmbed, so its output has
-// to stay stable — changing it would invalidate every stored hash vector and the
-// VECTOR_MIN_SCORE calibration measured against them.
+// It is deliberately NOT tokenize. tokenize feeds hashEmbed, and the hash-mode
+// relevance cut-off (VECTOR_MIN_SCORE = 0.1) was measured against the score
+// distribution the current tokenization produces — changing it would move that
+// distribution, so the cut-off would have to be re-measured. Nothing persists
+// vectors (both backends are in-process and rebuilt from KV text), so the cost
+// of changing it is the calibration, not a migration.
 //
 // The difference is CJK. tokenize emits a whole Chinese run as a single token,
 // so a Chinese query can only match an entry containing that exact run: measured
