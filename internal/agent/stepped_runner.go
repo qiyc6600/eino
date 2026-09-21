@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -204,7 +205,7 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 	einoMsgs := fromSchemaMessages(state.Messages)
 
 	// Step 1: Call LLM (with tools bound)
-	resp, err := r.generate(ctx, einoMsgs)
+	resp, err := r.generate(ctx, einoMsgs, recorder)
 	if err != nil {
 		return state, nil, fmt.Errorf("LLM generate failed at step %d: %w", state.Step, err)
 	}
@@ -265,7 +266,7 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 
 		// Save state to checkpoint so Resume can restore it
 		if recorder != nil {
-			recorder.Record(EventAgentEnd, fmt.Sprintf("Node interrupt at %s — awaiting approval", "plan_review"), map[string]any{
+			recorder.Record(EventHITLInterrupt, fmt.Sprintf("Plan review requested at %s", "plan_review"), map[string]any{
 				"node":         "plan_review",
 				"tool_calls":   len(resp.ToolCalls),
 				"interrupt_id": interruptReq.InterruptID,
@@ -338,7 +339,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 					}
 					state.Messages = append(state.Messages, toolMsg)
 					if recorder != nil {
-						recorder.Record(EventToolCallEnd, fmt.Sprintf("ACL denied sub-agent %s", tc.Name), map[string]any{
+						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied sub-agent %s", tc.Name), map[string]any{
 							"agent":  tc.Name,
 							"denied": true,
 						})
@@ -358,7 +359,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 					}
 					state.Messages = append(state.Messages, toolMsg)
 					if recorder != nil {
-						recorder.Record(EventToolCallEnd, fmt.Sprintf("ACL denied tool %s", toolName), map[string]any{
+						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied tool %s", toolName), map[string]any{
 							"tool":   toolName,
 							"denied": true,
 						})
@@ -376,6 +377,12 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 
 		// Real tool dispatch: check HITL gate
 		if entry.RequiresApproval {
+			if recorder != nil {
+				recorder.Record(EventHITLInterrupt, fmt.Sprintf("Tool %s requires approval", tc.Name), map[string]any{
+					"tool":   tc.Name,
+					"reason": "high_risk_tool",
+				})
+			}
 			return state, &InterruptRequest{
 				InterruptID: "i_" + uuid.New().String(),
 				ToolCallID:  tc.ID,
@@ -389,6 +396,12 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		}
 
 		// Execute the real tool directly
+		if recorder != nil {
+			recorder.Record(EventToolCallStart, fmt.Sprintf("Calling tool %s", tc.Name), map[string]any{
+				"tool": tc.Name,
+				"step": state.Step,
+			})
+		}
 		toolResult, err := r.executeTool(ctx, tc)
 		if err != nil {
 			return state, nil, err
@@ -531,20 +544,36 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 	return state, fmt.Errorf("approved tool call does not match checkpoint")
 }
 
-// generate retries only model calls, never tool side effects. Backoff respects cancellation.
-func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+// generate retries only model calls, never tool side effects. Backoff respects
+// cancellation. Content is forwarded to the recorder's sink as it arrives, so a
+// rate-limited call is retried only while nothing has been emitted: once the
+// client has seen part of an answer, replaying it would duplicate that text.
+func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) (*schema.Message, error) {
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		response, err := r.toolModel.Generate(ctx, messages)
+		if recorder != nil {
+			recorder.Record(EventModelCallStart, fmt.Sprintf("Model call (attempt %d)", attempt+1), map[string]any{
+				"attempt": attempt + 1,
+			})
+		}
+		response, emitted, err := r.streamOnce(ctx, messages, recorder)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		if err == nil && response == nil {
 			return nil, fmt.Errorf("model returned an empty response")
 		}
-		if err == nil || !isRateLimitError(err.Error()) || attempt >= 3 {
+		if err == nil || !isRateLimitError(err.Error()) || attempt >= 3 || emitted {
+			if recorder != nil {
+				meta := map[string]any{"attempt": attempt + 1, "failed": err != nil}
+				if usage := messageUsage(response); usage != nil {
+					meta["prompt_tokens"] = usage.PromptTokens
+					meta["completion_tokens"] = usage.CompletionTokens
+				}
+				recorder.Record(EventModelCallEnd, "Model call finished", meta)
+			}
 			return response, err
 		}
 		timer := time.NewTimer(r.retryDelay * time.Duration(1<<attempt))
@@ -555,6 +584,56 @@ func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message
 		case <-timer.C:
 		}
 	}
+}
+
+// streamOnce performs one streaming model call, forwarding content fragments to
+// the recorder and merging the chunks into the complete message the ReAct loop
+// needs. The bool reports whether any content reached the sink, which decides
+// whether a retry is still safe.
+func (r *SteppedRunner) streamOnce(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) (*schema.Message, bool, error) {
+	stream, err := r.toolModel.Stream(ctx, messages)
+	if err != nil {
+		return nil, false, err
+	}
+	defer stream.Close()
+
+	emitted := false
+	var chunks []*schema.Message
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, emitted, err
+		}
+		if chunk == nil {
+			continue
+		}
+		chunks = append(chunks, chunk)
+		if chunk.Content != "" {
+			emitted = true
+			recorder.Delta(chunk.Content)
+		}
+	}
+	if len(chunks) == 0 {
+		return nil, emitted, nil
+	}
+	// Tool call arguments arrive split across chunks for OpenAI-compatible
+	// providers, so the merged message — not the last chunk — is authoritative.
+	merged, err := schema.ConcatMessages(chunks)
+	if err != nil {
+		return nil, emitted, err
+	}
+	return merged, emitted, nil
+}
+
+// messageUsage extracts provider-reported token usage when the model supplies it.
+func messageUsage(msg *schema.Message) *schema.TokenUsage {
+	if msg == nil || msg.ResponseMeta == nil {
+		return nil
+	}
+	return msg.ResponseMeta.Usage
 }
 
 // Serialize serializes the run state to bytes for checkpoint storage.

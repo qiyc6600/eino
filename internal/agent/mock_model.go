@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -89,13 +90,48 @@ func (m *MockChatModel) Generate(ctx context.Context, input []*schema.Message, o
 	return schema.AssistantMessage(answer, nil), nil
 }
 
-// Stream implements model.BaseChatModel.Stream.
+// mockStreamChunkRunes is how many runes each simulated stream chunk carries.
+// Small enough that the UI shows a typing effect, large enough that a long
+// answer does not turn into hundreds of SSE frames.
+const mockStreamChunkRunes = 6
+
+// mockStreamChunkDelay paces simulated chunks so the typing effect is visible
+// in the browser. Zero in tests keeps the suite fast.
+var mockStreamChunkDelay = 8 * time.Millisecond
+
+// Stream implements model.BaseChatModel.Stream. The mock replays the answer it
+// would have generated as several content chunks so streaming can be exercised
+// without a real provider; tool calls are delivered in a single chunk because
+// their arguments are not meaningful to split.
 func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	msg, err := m.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+	if msg == nil || msg.Content == "" {
+		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+	}
+
+	runes := []rune(msg.Content)
+	chunks := make([]*schema.Message, 0, len(runes)/mockStreamChunkRunes+1)
+	for start := 0; start < len(runes); start += mockStreamChunkRunes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := start + mockStreamChunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, schema.AssistantMessage(string(runes[start:end]), nil))
+		if mockStreamChunkDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(mockStreamChunkDelay):
+			}
+		}
+	}
+	return schema.StreamReaderFromArray(chunks), nil
 }
 
 // WithTools implements model.ToolCallingChatModel.WithTools.

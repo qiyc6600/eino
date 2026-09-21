@@ -98,9 +98,15 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// Progress is written to the response while the run executes. The sink runs
+	// on this same goroutine (ChatContext is synchronous), so no locking is
+	// needed around the ResponseWriter.
+	sink := &progressSink{w: w, flusher: flusher}
+
 	// Always use Chat() — it goes through SteppedRunner which records events,
 	// handles interrupts, and provides complete results.
-	result := h.runner.ChatContext(r.Context(), ac, req.ThreadID, req.Message, chatOptionsFromRequest(req)...)
+	opts := append(chatOptionsFromRequest(req), agent.WithProgressSink(sink))
+	result := h.runner.ChatContext(r.Context(), ac, req.ThreadID, req.Message, opts...)
 
 	// Fetch current memory
 	memEntries, _ := h.memorySvc.ListPreferences(r.Context(), ac.UserID)
@@ -121,9 +127,11 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 		return
 	}
 
-	// Send the complete answer as a single chunk (no streaming typing effect,
-	// but ensures events, memory, and interrupt handling are all correct).
-	if result.Answer != "" {
+	// The answer was already streamed fragment by fragment when a sink was
+	// active; resending it whole would make the client append it twice. Failed
+	// and cancelled runs carry an error message in Answer, which belongs in the
+	// done frame only — sending it as content would render it as an answer.
+	if result.Answer != "" && sink.deltas == 0 && result.Status == agent.StatusCompleted {
 		fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{
 			"content": result.Answer,
 		}))
@@ -138,8 +146,58 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 		"runId":         result.RunID,
 		"events":        result.Events,
 		"contextTokens": result.ContextTokens,
+		"streamed":      sink.deltas > 0,
 	}))
 	flusher.Flush()
+}
+
+// progressSink forwards run progress to an SSE response. Every callback runs on
+// the goroutine executing the run, so writes are naturally serialized.
+type progressSink struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	deltas  int // content fragments already sent, to avoid resending the answer
+}
+
+func (s *progressSink) OnEvent(event agent.Event) {
+	name, payload, ok := sseFrameForEvent(event)
+	if !ok {
+		return
+	}
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, jsonEncode(payload))
+	s.flusher.Flush()
+}
+
+func (s *progressSink) OnDelta(content string) {
+	s.deltas++
+	fmt.Fprintf(s.w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{"content": content}))
+	s.flusher.Flush()
+}
+
+// sseFrameForEvent maps an execution event to the frame the UI renders in the
+// chat area. Model-call and compression events stay in the events panel (sent
+// with the final payload) so the chat does not fill with noise.
+func sseFrameForEvent(event agent.Event) (string, map[string]any, bool) {
+	target := event.ToolName
+	if target == "" {
+		if agentName, ok := event.Metadata["agent"].(string); ok {
+			target = agentName
+		}
+	}
+
+	switch event.Type {
+	case agent.EventSupervisorRoute:
+		return "tool_call", map[string]any{"phase": "route", "tool": target, "detail": event.Detail}, true
+	case agent.EventToolCallStart:
+		return "tool_call", map[string]any{"phase": "start", "tool": target, "detail": event.Detail}, true
+	case agent.EventToolCallEnd:
+		return "tool_call", map[string]any{"phase": "end", "tool": target, "detail": event.Detail, "result": event.Metadata["result"]}, true
+	case agent.EventACLDenied:
+		return "tool_call", map[string]any{"phase": "denied", "tool": target, "detail": event.Detail}, true
+	case agent.EventHITLInterrupt:
+		return "tool_call", map[string]any{"phase": "approval", "tool": target, "detail": event.Detail}, true
+	}
+	return "", nil, false
 }
 
 // GetRunEvents handles GET /api/agent/runs/{runId}/events

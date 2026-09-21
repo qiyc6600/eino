@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent Eino Demo</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/assets/styles.css?v=10">
+    <link rel="stylesheet" href="/assets/styles.css?v=11">
 </head>
 <body>
     <!-- Login Page -->
@@ -76,13 +76,15 @@
                         <span id="tokenBarText">上下文: 0 / 8000 tokens</span>
                     </div>
                 </div>
+                <div id="streamProgress" class="stream-progress" style="display:none;"></div>
                 <div class="chat-input">
                     <label class="confirm-toggle" title="开启后，Agent 生成执行计划会先暂停，等待人工审批后才执行工具">
                         <input type="checkbox" id="confirmBeforeExecute">
                         <span>⚠️ 执行前确认</span>
                     </label>
                     <input type="text" id="chatInput" placeholder="输入消息..." onkeypress="if(event.key==='Enter')sendMessage()">
-                    <button onclick="sendMessage()" class="btn btn-primary">发送</button>
+                    <button id="stopBtn" onclick="stopStreaming()" class="btn btn-danger" style="display:none;">停止</button>
+                    <button id="sendBtn" onclick="sendMessage()" class="btn btn-primary">发送</button>
                 </div>
             </div>
 
@@ -114,7 +116,7 @@
         </div>
     </div>
 
-    <script src="/assets/app.js?v=20"></script>
+    <script src="/assets/app.js?v=21"></script>
 
     <!-- API Key Modal -->
     <div id="apiKeyModal" class="modal-overlay" style="display:none;">

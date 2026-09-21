@@ -28,6 +28,16 @@ type scriptModel struct {
 func (m *scriptModel) Generate(ctx context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	return m.generateFn(ctx, msgs)
 }
+
+// Stream must be overridden alongside Generate: the promoted MockChatModel.Stream
+// would call MockChatModel.Generate directly and silently bypass the script.
+func (m *scriptModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, msgs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
 func (m *scriptModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }

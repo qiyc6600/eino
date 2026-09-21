@@ -110,6 +110,9 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	messages := append([]*schema.Message{schema.SystemMessage(prompt)}, threadMessages...)
 	messages = append(messages, schema.UserMessage(message))
 	recorder := NewEventRecorder(id)
+	if options.sink != nil {
+		recorder.SetSink(options.sink)
+	}
 	messages, tokens := r.compressMessages(ctx, sanitizeMessages(messages), recorder)
 	state := &SteppedRunState{RunID: id, ThreadID: thread, Messages: toSchemaMessages(messages)}
 	result, _ := r.advance(ctx, ac, state, recorder, options.confirmBeforeExecute, false)

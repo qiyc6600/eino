@@ -381,9 +381,15 @@ async function sendMessage() {
     renderChat();
 
     isStreaming = true;
+    setStreamingControls(true);
 
     try {
-        await chatStream(currentThread, message);
+        const outcome = await chatStream(currentThread, message);
+        if (outcome === 'aborted') {
+            isStreaming = false;
+            setStreamingControls(false);
+            return;
+        }
     } catch (e) {
         // Fallback: if streaming fails, try non-streaming
         try {
@@ -424,129 +430,205 @@ async function sendMessage() {
         renderChat();
     }
 
+        renderChat();
+    }
+
     isStreaming = false;
+    setStreamingControls(false);
+}
+
+// AbortController of the in-flight chat stream, so the stop button can cancel it.
+let streamAbort = null;
+
+// setStreamingControls swaps the send button for the stop button while a run is
+// in flight.
+function setStreamingControls(active) {
+    const sendBtn = document.getElementById('sendBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    if (sendBtn) sendBtn.style.display = active ? 'none' : '';
+    if (stopBtn) stopBtn.style.display = active ? '' : 'none';
+}
+
+// stopStreaming closes the SSE connection. The server observes the disconnect
+// through the request context and cancels the run.
+function stopStreaming() {
+    if (streamAbort) streamAbort.abort();
+}
+
+// setStreamProgress shows a live one-line status above the input while tools run.
+function setStreamProgress(text) {
+    const el = document.getElementById('streamProgress');
+    if (!el) return;
+    if (!text) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+    }
+    el.style.display = 'block';
+    el.textContent = text;
+}
+
+function progressTextForToolFrame(data) {
+    const tool = data.tool || '工具';
+    switch (data.phase) {
+        case 'route': return `🔀 路由到 ${tool}`;
+        case 'start': return `🔧 正在调用 ${tool}…`;
+        case 'end': return `✅ ${tool} 执行完成`;
+        case 'denied': return `🚫 ${tool} 被权限拦截`;
+        case 'approval': return `⏸️ ${tool} 等待人工审批`;
+        default: return `• ${tool}`;
+    }
 }
 
 // chatStream sends a message and reads the SSE stream
 async function chatStream(threadId, message) {
     const confirmBeforeExecute = document.getElementById('confirmBeforeExecute')?.checked || false;
-    const resp = await fetch('/api/agent/chat', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${sessionId}`,
-        },
-        body: JSON.stringify({ threadId, message, stream: true, confirmBeforeExecute }),
-    });
-
-    if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-        throw new Error(err.error || `HTTP ${resp.status}`);
-    }
-
-    // Add a placeholder assistant message marked as streaming
-    const msgs = loadMessages(threadId);
-    msgs.push({ role: 'assistant', content: '', _streaming: true });
-    saveMessages(threadId, msgs);
-    renderChat();
-
+    const controller = new AbortController();
+    streamAbort = controller;
     let fullContent = '';
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    try {
+        const resp = await fetch('/api/agent/chat', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${sessionId}`,
+            },
+            body: JSON.stringify({ threadId, message, stream: true, confirmBeforeExecute }),
+            signal: controller.signal,
+        });
 
-        buffer += decoder.decode(value, { stream: true });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+        }
 
-        // Parse SSE events from buffer
-        const lines = buffer.split('\n');
-        buffer = ''; // remaining incomplete line
+        // Add a placeholder assistant message marked as streaming
+        const msgs = loadMessages(threadId);
+        msgs.push({ role: 'assistant', content: '', _streaming: true });
+        saveMessages(threadId, msgs);
+        renderChat();
 
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-            if (line.startsWith('event: ')) {
-                const eventType = line.slice(7).trim();
-                // Next line should be "data: ..."
-                const dataLine = lines[i + 1];
-                if (dataLine && dataLine.startsWith('data: ')) {
-                    const dataStr = dataLine.slice(6);
-                    i++; // skip data line
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-                    try {
-                        const data = JSON.parse(dataStr);
+            buffer += decoder.decode(value, { stream: true });
 
-                        if (eventType === 'chunk' && data.content) {
-                            fullContent += data.content;
-                            // Update the streaming message in localStorage
-                            updateStreamingMessageContent(threadId, fullContent);
-                            // Update the DOM element directly (fast, no full re-render)
-                            updateStreamingMessage(fullContent);
-                        } else if (eventType === 'tool_call') {
-                            // Tool call notification — could show in UI
-                        } else if (eventType === 'done') {
-                            // Handle HITL interrupt: show interrupt message + refresh approval cards
-                            if (data.status === 'interrupted' && data.interrupt) {
-                                const interruptInfo = data.interrupt;
-                                // The assistant's pending text becomes a normal message;
-                                // the approval arrives as an interactive inline card.
-                                finalizeStreamingMessage(threadId, data.answer || '');
-                                pushApprovalCard(threadId, {
-                                    interruptId: interruptInfo.interrupt_id,
-                                    toolName: interruptInfo.tool_name,
-                                    nodeName: interruptInfo.node_name,
-                                    message: interruptInfo.message,
-                                    args: interruptInfo.arguments,
-                                    plan: interruptInfo.plan,
-                                });
-                                // Refresh approvals (updates badge + syncs cards).
-                                refreshApprovals();
-                            } else {
-                                // Normal completion — save complete message
-                                finalizeStreamingMessage(threadId, data.answer || fullContent);
+            // Parse SSE events from buffer
+            const lines = buffer.split('\n');
+            buffer = ''; // remaining incomplete line
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+
+                if (line.startsWith('event: ')) {
+                    const eventType = line.slice(7).trim();
+                    // Next line should be "data: ..."
+                    const dataLine = lines[i + 1];
+                    if (dataLine && dataLine.startsWith('data: ')) {
+                        const dataStr = dataLine.slice(6);
+                        i++; // skip data line
+
+                        try {
+                            const data = JSON.parse(dataStr);
+
+                            if (eventType === 'chunk' && data.content) {
+                                fullContent += data.content;
+                                // Update the streaming message in localStorage
+                                updateStreamingMessageContent(threadId, fullContent);
+                                // Update the DOM element directly (fast, no full re-render)
+                                updateStreamingMessage(fullContent);
+                            } else if (eventType === 'tool_call') {
+                                // Live tool/route progress for this run.
+                                setStreamProgress(progressTextForToolFrame(data));
+                            } else if (eventType === 'done') {
+                                setStreamProgress('');
+                                // Handle HITL interrupt: show interrupt message + refresh approval cards
+                                if (data.status === 'interrupted' && data.interrupt) {
+                                    const interruptInfo = data.interrupt;
+                                    // The assistant's pending text becomes a normal message;
+                                    // the approval arrives as an interactive inline card.
+                                    finalizeStreamingMessage(threadId, data.answer || '');
+                                    pushApprovalCard(threadId, {
+                                        interruptId: interruptInfo.interrupt_id,
+                                        toolName: interruptInfo.tool_name,
+                                        nodeName: interruptInfo.node_name,
+                                        message: interruptInfo.message,
+                                        args: interruptInfo.arguments,
+                                        plan: interruptInfo.plan,
+                                    });
+                                    // Refresh approvals (updates badge + syncs cards).
+                                    refreshApprovals();
+                                } else if (data.status === 'error' || data.status === 'cancelled') {
+                                    // A failed run may have already streamed part of an
+                                    // answer; keep it and mark why it stopped.
+                                    const label = data.status === 'cancelled' ? '⏹️ 已取消' : '❌ 执行失败';
+                                    const reason = data.answer ? `：${data.answer}` : '';
+                                    const partial = fullContent ? `${fullContent}\n\n${label}${reason}` : `${label}${reason}`;
+                                    finalizeStreamingMessage(threadId, partial);
+                                    renderChat();
+                                } else {
+                                    // Normal completion — save complete message
+                                    finalizeStreamingMessage(threadId, data.answer || fullContent);
+                                    renderChat();
+                                }
+
+                                // Use server-provided memory if available, else refresh via API
+                                if (data.memory && data.memory.length > 0) {
+                                    renderMemory(data.memory);
+                                } else if (data.memory) {
+                                    renderMemory([]);
+                                } else {
+                                    setTimeout(refreshMemory, 500);
+                                }
+
+                                // Render run events (supervisor routing, tool calls, compressions, etc.)
+                                if (data.events && data.events.length > 0) {
+                                    renderEvents(data.events);
+                                }
+
+                                // Update context token bar
+                                if (data.contextTokens) {
+                                    updateTokenBar(data.contextTokens);
+                                }
+                            } else if (eventType === 'error') {
+                                finalizeStreamingMessage(threadId, `❌ ${data.error}`);
                                 renderChat();
                             }
-
-                            // Use server-provided memory if available, else refresh via API
-                            if (data.memory && data.memory.length > 0) {
-                                renderMemory(data.memory);
-                            } else if (data.memory) {
-                                renderMemory([]);
-                            } else {
-                                setTimeout(refreshMemory, 500);
-                            }
-
-                            // Render run events (supervisor routing, tool calls, compressions, etc.)
-                            if (data.events && data.events.length > 0) {
-                                renderEvents(data.events);
-                            }
-
-                            // Update context token bar
-                            if (data.contextTokens) {
-                                updateTokenBar(data.contextTokens);
-                            }
-                        } else if (eventType === 'error') {
-                            finalizeStreamingMessage(threadId, `❌ ${data.error}`);
-                            renderChat();
+                        } catch (e) {
+                            // Ignore parse errors for individual events
                         }
-                    } catch (e) {
-                        // Ignore parse errors for individual events
                     }
+                } else if (line && !line.startsWith(':') && i === lines.length - 1) {
+                    // Incomplete line, keep in buffer
+                    buffer = line;
                 }
-            } else if (line && !line.startsWith(':') && i === lines.length - 1) {
-                // Incomplete line, keep in buffer
-                buffer = line;
             }
         }
-    }
 
-    // If we got content but no 'done' event, finalize anyway
-    if (fullContent) {
-        finalizeStreamingMessage(threadId, fullContent);
-        renderChat();
+        // If we got content but no 'done' event, finalize anyway
+        if (fullContent) {
+            finalizeStreamingMessage(threadId, fullContent);
+            renderChat();
+        }
+        return 'completed';
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            // The user stopped the run: keep whatever had already arrived.
+            finalizeStreamingMessage(threadId, fullContent ? `${fullContent}\n\n⏹️ 已停止` : '⏹️ 已停止');
+            renderChat();
+            return 'aborted';
+        }
+        throw e;
+    } finally {
+        streamAbort = null;
+        setStreamProgress('');
+        setStreamingControls(false);
     }
 }
 

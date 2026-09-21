@@ -87,6 +87,13 @@ type failingModel struct{ *agent.MockChatModel }
 func (m *failingModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
 	return nil, errors.New("upstream unavailable")
 }
+
+// Stream must fail too: the promoted MockChatModel.Stream calls
+// MockChatModel.Generate directly, which would bypass the override above and
+// make this model succeed on the streaming path.
+func (m *failingModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, errors.New("upstream unavailable")
+}
 func (m *failingModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }

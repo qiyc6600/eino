@@ -215,6 +215,7 @@ type ChatOption func(*chatOptions)
 
 type chatOptions struct {
 	confirmBeforeExecute bool
+	sink                 ProgressSink
 }
 
 // WithConfirmBeforeExecute enables the node-level plan review interrupt for
@@ -223,6 +224,13 @@ type chatOptions struct {
 // explicit per request (frontend toggle / API field) — no keyword guessing.
 func WithConfirmBeforeExecute() ChatOption {
 	return func(o *chatOptions) { o.confirmBeforeExecute = true }
+}
+
+// WithProgressSink attaches a sink that receives events and content fragments
+// while the run is still executing, so a caller can stream progress to a client
+// instead of waiting for the final result.
+func WithProgressSink(sink ProgressSink) ChatOption {
+	return func(o *chatOptions) { o.sink = sink }
 }
 
 // Chat executes a chat request through the Eino agent pipeline.
