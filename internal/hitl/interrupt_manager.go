@@ -66,31 +66,6 @@ func (m *InterruptManager) RequestInterrupt(ctx context.Context, payload map[str
 	return cloneApproval(req), nil
 }
 
-// Resume atomically claims a pending approval. Existing callers receive the
-// request as before; Runner uses Claim directly to inspect whether it won.
-func (m *InterruptManager) Resume(ctx context.Context, interruptID string, decision ApprovalDecision) (*ApprovalRequest, error) {
-	req, ok, err := m.GetRequestContext(ctx, interruptID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, fmt.Errorf("interrupt not found: %s", interruptID)
-	}
-	claimed, won, err := m.Claim(ctx, interruptID, req.UserID, decision, uuid.New().String())
-	if err != nil {
-		return nil, err
-	}
-	if !won && claimed.Decision != nil && claimed.Decision.Approved != decision.Approved {
-		return nil, fmt.Errorf("interrupt already decided: %s (status: %s)", interruptID, claimed.Status)
-	}
-	return claimed, nil
-}
-
-func (m *InterruptManager) GetPending(ctx context.Context) []*ApprovalRequest {
-	result, _ := m.GetPendingForUserE(ctx, "")
-	return result
-}
-
 func (m *InterruptManager) GetPendingForUser(ctx context.Context, userID string) []*ApprovalRequest {
 	result, _ := m.GetPendingForUserE(ctx, userID)
 	return result
@@ -103,7 +78,7 @@ func (m *InterruptManager) GetPendingForUserE(ctx context.Context, userID string
 		defer m.mu.RUnlock()
 		var result []*ApprovalRequest
 		for _, req := range m.pending {
-			if req.Status == StatusPending && (userID == "" || req.UserID == userID) {
+			if req.Status == StatusPending && req.UserID == userID {
 				result = append(result, cloneApproval(req))
 			}
 		}

@@ -61,11 +61,6 @@ func (s *Service) RequestNodeInterrupt(ctx context.Context, authCtx *auth.AuthCo
 	return s.manager.RequestInterrupt(ctx, payload)
 }
 
-// Approve processes an approval decision.
-func (s *Service) Approve(ctx context.Context, interruptID string, decision ApprovalDecision) (*ApprovalRequest, error) {
-	return s.manager.Resume(ctx, interruptID, decision)
-}
-
 // ExecuteWithApproval wraps a dangerous tool call with the HITL flow:
 // 1. Request interrupt
 // 2. Wait for approval (synchronous for in-process demo)
@@ -93,29 +88,6 @@ func (s *Service) ExecuteWithApproval(ctx context.Context, authCtx *auth.AuthCon
 			"message":      req.Message,
 		},
 	}
-}
-
-// ExecuteApprovedTool executes a tool after approval, with idempotency.
-// 恢复语义：工具级中断恢复时重新执行工具，而非从中断行继续。
-// 通过 idempotencyKey (runID:toolCallID) 保证同一工具调用的幂等性。
-func (s *Service) ExecuteApprovedTool(ctx context.Context, authCtx *auth.AuthContext, runID, toolCallID string, tool tools.RegisteredTool, arguments string) tools.ToolResult {
-	s.executionMu.Lock()
-	defer s.executionMu.Unlock()
-
-	// Idempotency check
-	idempotencyKey := runID + ":" + toolCallID
-	if result, ok := s.idempotency[idempotencyKey]; ok {
-		return *result
-	}
-
-	// Execute the real tool with the framework-minted identity from ctx.
-	// The resume caller chain must carry the authenticated AuthContext.
-	result := tool.Fn(auth.ToolIdentityFromContext(ctx), arguments)
-
-	// Cache for idempotency
-	s.idempotency[idempotencyKey] = &result
-
-	return result
 }
 
 // ExecuteRejectedTool returns a disapproval result when a HITL interrupt is rejected.

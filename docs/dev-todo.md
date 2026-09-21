@@ -151,5 +151,13 @@
   注入验证：把 `dim` 改回 128 → 排序守卫报出 `zh short deploy: the unrelated passage outscored the relevant one (0.3111 vs 0.0333)`，占用率守卫报 `a chunk fills 73% of the 128 dimensions`；把 `isWordChar` 改回 `r > 0x4e00` → tokenize 测试报 `tokenize("一二三") = ["二三"]`。补 fixture 时发现排序守卫在 128 维下**原本不会失败**（长文本配对恰好没倒挂），于是补上当初大倒挂的两组短文本配对，让这条守卫独立成立而不是只靠占用率那条。
   实机验证：阈值日志变为 `Vector relevance cut-off: 0.02 (embedding provider "hash")`，上传两份文档→切分→索引→提问全流程正常。**未能实机验证排序本身**——注入内容不经任何 API 暴露，且只有两三个片段时全都会被注入（topK=5、预算 800），排序无从观察；这条的证据是单测加注入验证。
 
+- 2026-09-22：清掉 `internal/hitl` 里**无生产调用且是隐患**的那部分审批 API（该包 5 个源文件原先只有 6 个测试，而它是唯一一处"出错就让危险操作未经审批执行或重复执行"的地方）。删掉四个方法，每个都满足"生产零调用 + 一旦被调用就绕过活路径的守卫"：
+  - `InterruptManager.Resume` + `Service.Approve`：**没有属主校验**（它把自己刚查到的 `req.UserID` 传回去，所以校验恒真）、**没有 `Phase == "running"` 检查**（崩溃后恢复会重复执行；活路径会拒绝并提示"上次执行结果未确认"）、**没有 `len(req.Result) > 0` 短路**（忽略已记录的结果）。另外它在数据库路径上**会空指针崩溃**：postgres 的 `Claim` 在行不存在时返回 `(nil, false, nil)`，下一行就解引用 `claimed.Decision`——活路径（`Runner.ResumeContext`）对 `req == nil` 有显式处理，这条没有。
+  - `InterruptManager.GetPending`：`userID == ""` 会**绕过过滤返回所有用户的待审批**（零调用，但它是 `/api/approvals` 背后的包里的一个无守卫跨用户读取）。顺带把 `GetPendingForUserE` 里的 `userID == "" ||` 分支去掉——它只为 `GetPending` 而存在。
+  - `Service.ExecuteApprovedTool`：**第二套内存版幂等**（`map[runID:toolCallID]`），与活路径的持久化幂等键不是一回事。它唯一的使用者是自己的测试，那条测试因此给"幂等性"制造了虚假信心；真正的幂等覆盖在 `tools/order_test.go`、`tools/email_test.go` 与真实库的 `postgres_test.go`（删前已确认）。
+  重写 `service_test.go` 改走受守卫的 API（`RequestToolInterrupt` / `ClaimApproval` / `CompleteApproval`），并补上原先只存在于 Runner 层的四条守卫断言：**认领只能有一个赢家**（同决定、反决定都不行）、**认领必须属于本人**（非属主拿不到请求体，也不确认其存在）、**完成必须持有当前 claim**（过期 token 被拒）、**空 userID 不等于所有人**。四条注入验证均确认测试会变红（去掉单一赢家守卫 → "a second claim must not win"；去掉属主校验 → "another user claimed an approval they do not own"；去掉 token 守卫 → "completing with a stale claim token must be refused"；恢复 `userID == ""` 分支 → "an empty userID must not return other users' approvals"）。
+  **探测方法上犯过一个错并已修正**：我第一版死代码扫描用的是定义文本（`Service) GetApproval(`）而不是调用形式（`.GetApproval(`），于是把被 HTTP 处理器使用的 `GetApproval` 也报成"无调用者"，差点删掉活代码。改用 `.方法名(` 重新扫描后才得到可信结论。
+  仍留在包里但**未删**的死方法（报告而非动手，属风格取舍而非隐患）：`ExecuteWithApproval`（另一种创建中断的写法，Runner 自己构造）、`ExecuteRejectedTool` 与 `tools.HITLDisapprovedResult`（生产代码在 `HandleApproval` 里自己拼拒绝文本，从不产生 `disapproved` 状态）、`RequestNodeInterrupt`（Runner 直接构造节点中断请求，绕过了这个服务方法）、`SaveApproval` / `InterruptManager.Save`（`SaveContext` 的薄包装）。后两组值得单独决定：要么删掉，要么让 Runner 改走它们。
+
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
