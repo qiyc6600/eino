@@ -44,8 +44,7 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -295,8 +294,7 @@ func (h *AgentHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ResumeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -383,7 +381,11 @@ func (h *AgentHandler) CreateThread(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ThreadID string `json:"threadId"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	// This used to ignore the decode error, so a malformed body silently fell
+	// through to the generated-id branch and created a thread nobody asked for.
+	if !decodeBody(w, r, &req) {
+		return
+	}
 	if req.ThreadID == "" {
 		req.ThreadID = "t_" + randomID()
 	}

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -81,8 +80,7 @@ func (h *ApprovalHandler) MakeDecision(w http.ResponseWriter, r *http.Request) {
 	interruptID = trimSuffix(interruptID, "/decision")
 
 	var req DecisionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 

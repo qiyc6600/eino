@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -55,8 +54,7 @@ func (h *DocumentHandler) IngestDocument(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req IngestDocumentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	if len([]rune(req.Content)) > maxDocumentChars {

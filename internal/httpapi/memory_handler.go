@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/example/agent-eino-demo/internal/auth"
@@ -50,8 +49,7 @@ func (h *MemoryHandler) PutMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req PutMemoryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -125,8 +123,7 @@ func (h *MemoryHandler) MemorySettings(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
+		if !decodeBody(w, r, &body) {
 			return
 		}
 		if body.Enabled == nil {

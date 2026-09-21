@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
 	"math/rand"
 	"net/http"
@@ -121,7 +123,52 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/models", authMw(http.HandlerFunc(r.modelHandler.ListModels)))
 	mux.Handle("/api/models/switch", authMw(http.HandlerFunc(r.modelHandler.SwitchModel)))
 
-	return mux
+	// The body limit wraps the whole mux, so it covers the public login route as
+	// well as every authenticated one — login is the only decode site reachable
+	// without a session, and it is the one most worth bounding.
+	return limitRequestBody(mux)
+}
+
+// maxRequestBytes bounds one request body.
+//
+// The per-field caps are not a substitute: maxDocumentChars is checked after the
+// body has already been decoded, so a client could hand over a body of any size
+// and have the server materialise all of it before rejecting it. This bound is
+// what makes that impossible.
+//
+// The value is derived from the largest legitimate body: a document at
+// maxDocumentChars (200,000 runes) is about 600KB as UTF-8, and up to 1.2MB if a
+// client sends \uXXXX escapes for every rune. 4MB leaves room for the name, the
+// JSON envelope and future growth without letting an unbounded body through.
+const maxRequestBytes = 4 << 20
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// decodeBody reads a JSON request body and reports whether it was usable,
+// writing the response itself when it was not.
+//
+// An over-sized body is a different failure from a malformed one and gets its own
+// status: the caller hit the configured bound rather than sending something the
+// server could not parse, and a client that retries on 400 would retry forever.
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("request body exceeds %d bytes", maxRequestBytes))
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
 }
 
 func (r *Router) handleUsers(w http.ResponseWriter, req *http.Request) {

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 )
 
@@ -53,8 +52,7 @@ type SwitchModelRequest struct {
 // Switches the active model to the specified profile.
 func (h *ModelHandler) SwitchModel(w http.ResponseWriter, r *http.Request) {
 	var req SwitchModelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 

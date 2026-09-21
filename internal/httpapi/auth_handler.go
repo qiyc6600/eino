@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -35,8 +34,7 @@ func NewAuthHandler(authSvc *auth.Service, cookie SessionCookieConfig) *AuthHand
 // Login handles POST /api/auth/login
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req auth.LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 
@@ -119,8 +117,7 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Password string   `json:"password"`
 		Roles    []string `json:"roles"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	user, err := h.authSvc.CreateUser(r.Context(), req.Username, req.Password, req.Roles)
@@ -157,8 +154,7 @@ func (h *AuthHandler) UpdateUserRoles(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Roles []string `json:"roles"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeBody(w, r, &req) {
 		return
 	}
 

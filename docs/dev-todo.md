@@ -171,5 +171,14 @@
   过程记录：这次用正则按函数名删代码，第一版正则对多行函数体截断错误、留下了残片（构建报 `expected declaration, found payload`），改为精确文本匹配后正常。教训与上一轮同类——**用文本模式做结构性修改时，先确认匹配粒度**。
   验证：check.sh 全绿，集成测试在真实 PostgreSQL 下通过。
 
+- 2026-09-22：补上请求体大小上限，并把所有 JSON 解码统一到一个入口（"输入校验"这一层里唯一真正缺失的一项）。
+  **问题**：全代码库没有 `http.MaxBytesReader`，11 处 `json.NewDecoder(r.Body).Decode(...)` 都会把 body 完整读进内存。文档那个 200,000 字符上限（`maxDocumentChars`）**是在解码之后才检查的**——上限防住了存储，没防住内存。最直接的后果不是"超大文档被拒"，而是"超大 `name` 被接受并入库"：`name` 没有字段级上限，实测一个 5MB `name` + 2 字符 `content` 的 body 在没有上限时返回 **200**（文档已存）。
+  **改动**：`maxRequestBytes = 4 << 20`（4MB）+ `limitRequestBody` 中间件**包住整个 mux**，因此同时覆盖受保护路由与唯一无需会话的 `/api/auth/login`。数值由最大合法 body 推导：文档上限 200k 字符约 600KB（UTF-8），若客户端对每个字符用 `\uXXXX` 转义则约 1.2MB；4MB 留出字段与信封余量。新增 `decodeBody(w, r, dst)` 统一解码，并把**超大与畸形区分开**：超限返回 413（客户端该减数据重试），畸形返回 400（重试无意义）——原来两者都是 400。
+  顺带修掉一处**忽略解码错误**的地方：`CreateThread` 直接 `Decode(&req)` 不看错误，畸形 body 会静默走到"生成随机 threadId"分支，创建一个没人要的线程。
+  **测试**：`TestLimitRequestBody`（中间件单元，含"超限 body 不会被静默截断成一个更短但合法的文档"）、`TestMaxRequestBytesAccommodatesTheDocumentCap`（推导守卫：上限必须高于文档上限的最坏编码，否则合法上传会被拒）、`TestIntegration_RequestBodyBound`（走真实路由，因为中间件的单元测试**发现不了"router 不再装它"**）。
+  三处注入验证：router 不再包装 → 受保护路由返回 **200**（5MB name 入库）、登录路由 401 而非 413；去掉 413 分支 → 变成 400；上限调到 4KB → 推导守卫报 `the body limit (4096) is not above the worst-case encoding of a document at maxDocumentChars (1200000)`。
+  过程中修正了自己测试的一个弱点：第一版集成测试用 5MB 的 `content`，而字段级上限也会返回 413，所以它**无法区分"上限生效"与"字段检查生效"**——注入"去掉上限"时受保护路由那条照样通过（只有登录路由抓到）。改成"body 超限但每个字段都合法"（超大 `name` + 合法 `content`）后才成为真正的判别性测试。
+  未做（评估为低价值）：入站 `Content-Type` 校验（`json.Decode` 本就不看它，不解决实际问题）、chat 消息长度上限（token 预算已处理）、路径参数的 URL 解码（一致性而非安全）。
+
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
