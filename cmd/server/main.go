@@ -11,13 +11,7 @@ func main() {
 	cfg := app.LoadConfig()
 
 	application := app.NewApp(cfg)
-
-	// Create default threads for demo (threads are namespaced per user)
-	for _, uid := range []string{"u_admin", "u_visitor"} {
-		application.Runner.CreateThread(uid, "t_default")
-		application.Runner.CreateThread(uid, "t_demo_1")
-		application.Runner.CreateThread(uid, "t_demo_2")
-	}
+	defer application.Close()
 
 	port := os.Getenv("PORT")
 	if port != "" {

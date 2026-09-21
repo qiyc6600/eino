@@ -24,6 +24,7 @@ type Router struct {
 	memoryHandler   *MemoryHandler
 	userHandler     *UserHandler
 	modelHandler    *ModelHandler
+	healthHandler   *HealthHandler
 	authMiddleware  func(http.Handler) http.Handler
 }
 
@@ -35,6 +36,7 @@ func NewRouter(
 	memSvc *memory.Service,
 	registry *tools.ToolRegistry,
 	modelSwitcher ModelSwitcher,
+	readinessChecker ReadinessChecker,
 ) *Router {
 	return &Router{
 		authHandler:     NewAuthHandler(authSvc),
@@ -43,6 +45,7 @@ func NewRouter(
 		memoryHandler:   NewMemoryHandler(memSvc),
 		userHandler:     NewUserHandler(registry),
 		modelHandler:    NewModelHandler(modelSwitcher),
+		healthHandler:   NewHealthHandler(readinessChecker),
 		authMiddleware:  auth.AuthMiddleware(authSvc),
 	}
 }
@@ -60,10 +63,16 @@ func (r *Router) Handler() http.Handler {
 			http.NotFound(w, req)
 			return
 		}
+		// Never let the browser heuristically cache the UI: a stale app.js
+		// after a server upgrade silently disables new frontend features.
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		fileServer.ServeHTTP(w, req)
 	})
 
 	// Public routes (no auth required)
+	mux.HandleFunc("/healthz", r.healthHandler.Live)
+	mux.HandleFunc("/readyz", r.healthHandler.Ready)
 	mux.HandleFunc("/api/auth/login", r.authHandler.Login)
 
 	// Protected routes (auth required) — register directly on main mux with auth middleware
@@ -145,6 +154,11 @@ func (r *Router) handleChatThreadSub(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.Method == http.MethodGet {
+		if strings.HasSuffix(req.URL.Path, "/tokens") {
+			// GET /api/chat/{threadId}/tokens
+			r.agentHandler.GetThreadTokens(w, req)
+			return
+		}
 		// GET /api/chat/{threadId}/messages
 		r.agentHandler.GetThreadMessages(w, req)
 		return

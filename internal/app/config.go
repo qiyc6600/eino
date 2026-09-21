@@ -15,15 +15,32 @@ type Config struct {
 
 	// Session configuration
 	SessionTTL time.Duration // sliding session lifetime, default 30m
+	// Initial administrator. Both values are required only while no admin
+	// exists in the selected user store.
+	BootstrapAdminUsername string
+	BootstrapAdminPassword string
+	LoginMaxFailures       int
+	LoginFailureWindow     time.Duration
+	LoginLockout           time.Duration
 
-	// Storage backends: "memory" (default, zero dependency) or "file" (JSON
-	// persistence, survives process restarts). Paths default under data/.
-	SessionStoreKind    string
-	SessionStorePath    string
-	CheckpointStoreKind string
-	CheckpointStorePath string
-	MemoryStoreKind     string
-	MemoryStorePath     string
+	// Storage backends: memory by default, single-process JSON file persistence,
+	// or PostgreSQL for shared multi-instance state. Paths default under data/.
+	UserStoreKind        string
+	SessionStoreKind     string
+	SessionStorePath     string
+	CheckpointStoreKind  string
+	CheckpointStorePath  string
+	MemoryStoreKind      string
+	MemoryStorePath      string
+	ThreadStoreKind      string
+	ThreadStorePath      string
+	ApprovalStoreKind    string
+	BusinessStoreKind    string
+	DatabaseURL          string
+	DatabaseMaxOpen      int
+	DatabaseMaxIdle      int
+	DatabaseConnLifetime time.Duration
+	RunEventRetention    time.Duration
 
 	// Model configuration
 	ModelProvider string // mock | openai | ark
@@ -32,20 +49,20 @@ type Config struct {
 	OpenAIAPIKey  string
 	OpenAIModel   string
 	// Ark (ByteDance Volcano Engine)
-	ArkAPIKey string
-	ArkModel  string
-	ArkBaseURL string
+	ArkAPIKey         string
+	ArkModel          string
+	ArkBaseURL        string
 	EmbeddingProvider string // hash | openai | ollama
-	EmbeddingModel  string // model name for embedding provider
+	EmbeddingModel    string // model name for embedding provider
 
 	// Context management
-	MaxMessages              int
-	MaxTokens                int
-	SummarizeThresholdRatio  float64
-	SummaryTargetTokens      int
+	MaxMessages             int
+	MaxTokens               int
+	SummarizeThresholdRatio float64
+	SummaryTargetTokens     int
 
 	// Memory retrieval & lifecycle
-	MemoryBudgetTokens       int // token budget for memory injection per turn
+	MemoryBudgetTokens         int // token budget for memory injection per turn
 	MemoryConsolidateThreshold int // active entries before consolidation pays off
 }
 
@@ -96,8 +113,8 @@ var PresetModelProfiles = []ModelProfile{
 
 // ModelRegistry manages available model profiles and their API keys at runtime.
 type ModelRegistry struct {
-	mu       sync.RWMutex
-	apiKeys  map[string]string // profileID -> API key
+	mu      sync.RWMutex
+	apiKeys map[string]string // profileID -> API key
 }
 
 // NewModelRegistry creates a new registry with initial keys from config.
@@ -126,28 +143,43 @@ func LoadConfig() *Config {
 	_ = godotenv.Load()
 
 	return &Config{
-		Addr:                   getEnv("ADDR", ":8080"),
-		SessionTTL:             getEnvDuration("SESSION_TTL", 30*time.Minute),
-		SessionStoreKind:       getEnv("SESSION_STORE", "memory"),
-		SessionStorePath:       getEnv("SESSION_STORE_PATH", "data/sessions.json"),
-		CheckpointStoreKind:    getEnv("CHECKPOINT_STORE", "memory"),
-		CheckpointStorePath:    getEnv("CHECKPOINT_STORE_PATH", "data/checkpoints.json"),
-		MemoryStoreKind:        getEnv("MEMORY_STORE", "memory"),
-		MemoryStorePath:        getEnv("MEMORY_STORE_PATH", "data/memory.json"),
-		ModelProvider:          getEnv("MODEL_PROVIDER", "mock"),
-		OpenAIBaseURL:          getEnv("OPENAI_BASE_URL", ""),
-		OpenAIAPIKey:           getEnv("OPENAI_API_KEY", ""),
-		OpenAIModel:            getEnv("OPENAI_MODEL", ""),
-		ArkAPIKey:              getEnv("ARK_API_KEY", ""),
-		ArkModel:               getEnv("ARK_MODEL", ""),
-		ArkBaseURL:             getEnv("ARK_BASE_URL", ""),
-		EmbeddingProvider:      getEnv("EMBEDDING_PROVIDER", "hash"),
-		EmbeddingModel:         getEnv("EMBEDDING_MODEL", ""),
-		MaxMessages:             getEnvInt("MAX_MESSAGES", 30),
-		MaxTokens:               getEnvInt("MAX_TOKENS", 8000),
-		SummarizeThresholdRatio: getEnvFloat("SUMMARIZE_THRESHOLD_RATIO", 0.8),
-		SummaryTargetTokens:     getEnvInt("SUMMARY_TARGET_TOKENS", 800),
-		MemoryBudgetTokens:      getEnvInt("MEMORY_BUDGET_TOKENS", 400),
+		Addr:                       getEnv("ADDR", ":8080"),
+		SessionTTL:                 getEnvDuration("SESSION_TTL", 30*time.Minute),
+		BootstrapAdminUsername:     getEnv("BOOTSTRAP_ADMIN_USERNAME", ""),
+		BootstrapAdminPassword:     getEnv("BOOTSTRAP_ADMIN_PASSWORD", ""),
+		LoginMaxFailures:           getEnvInt("LOGIN_MAX_FAILURES", 5),
+		LoginFailureWindow:         getEnvDuration("LOGIN_FAILURE_WINDOW", 15*time.Minute),
+		LoginLockout:               getEnvDuration("LOGIN_LOCKOUT", 15*time.Minute),
+		UserStoreKind:              getEnv("USER_STORE", "memory"),
+		SessionStoreKind:           getEnv("SESSION_STORE", "memory"),
+		SessionStorePath:           getEnv("SESSION_STORE_PATH", "data/sessions.json"),
+		CheckpointStoreKind:        getEnv("CHECKPOINT_STORE", "memory"),
+		CheckpointStorePath:        getEnv("CHECKPOINT_STORE_PATH", "data/checkpoints.json"),
+		MemoryStoreKind:            getEnv("MEMORY_STORE", "memory"),
+		MemoryStorePath:            getEnv("MEMORY_STORE_PATH", "data/memory.json"),
+		ThreadStoreKind:            getEnv("THREAD_STORE", "memory"),
+		ThreadStorePath:            getEnv("THREAD_STORE_PATH", "data/threads.json"),
+		ApprovalStoreKind:          getEnv("APPROVAL_STORE", getEnv("CHECKPOINT_STORE", "memory")),
+		BusinessStoreKind:          getEnv("BUSINESS_STORE", "memory"),
+		DatabaseURL:                getEnv("DATABASE_URL", ""),
+		DatabaseMaxOpen:            getEnvInt("DATABASE_MAX_OPEN_CONNS", 25),
+		DatabaseMaxIdle:            getEnvInt("DATABASE_MAX_IDLE_CONNS", 5),
+		DatabaseConnLifetime:       getEnvDuration("DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
+		RunEventRetention:          getEnvDuration("RUN_EVENT_RETENTION", 7*24*time.Hour),
+		ModelProvider:              getEnv("MODEL_PROVIDER", "mock"),
+		OpenAIBaseURL:              getEnv("OPENAI_BASE_URL", ""),
+		OpenAIAPIKey:               getEnv("OPENAI_API_KEY", ""),
+		OpenAIModel:                getEnv("OPENAI_MODEL", ""),
+		ArkAPIKey:                  getEnv("ARK_API_KEY", ""),
+		ArkModel:                   getEnv("ARK_MODEL", ""),
+		ArkBaseURL:                 getEnv("ARK_BASE_URL", ""),
+		EmbeddingProvider:          getEnv("EMBEDDING_PROVIDER", "hash"),
+		EmbeddingModel:             getEnv("EMBEDDING_MODEL", ""),
+		MaxMessages:                getEnvInt("MAX_MESSAGES", 30),
+		MaxTokens:                  getEnvInt("MAX_TOKENS", 8000),
+		SummarizeThresholdRatio:    getEnvFloat("SUMMARIZE_THRESHOLD_RATIO", 0.8),
+		SummaryTargetTokens:        getEnvInt("SUMMARY_TARGET_TOKENS", 800),
+		MemoryBudgetTokens:         getEnvInt("MEMORY_BUDGET_TOKENS", 400),
 		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
 	}
 }

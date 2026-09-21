@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/example/agent-eino-demo/internal/agent"
@@ -13,6 +14,7 @@ import (
 	"github.com/example/agent-eino-demo/internal/hitl"
 	"github.com/example/agent-eino-demo/internal/httpapi"
 	"github.com/example/agent-eino-demo/internal/memory"
+	pgstore "github.com/example/agent-eino-demo/internal/postgres"
 	"github.com/example/agent-eino-demo/internal/tools"
 )
 
@@ -27,6 +29,7 @@ type App struct {
 	Runner     *agent.Runner
 	Router     *httpapi.Router
 	HITLSvc    *hitl.Service
+	Postgres   *pgstore.Backend
 
 	// Model switching
 	registry     *ModelRegistry
@@ -37,20 +40,52 @@ type App struct {
 // NewApp creates and wires all application components.
 func NewApp(cfg *Config) *App {
 	ctx := context.Background()
+	var pg *pgstore.Backend
+	if usesPostgres(cfg) {
+		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		var err error
+		pg, err = pgstore.Open(connectCtx, cfg.DatabaseURL, cfg.DatabaseMaxOpen, cfg.DatabaseMaxIdle, cfg.DatabaseConnLifetime)
+		if err != nil {
+			panic(fmt.Errorf("initialize postgres: %w", err))
+		}
+	}
 
 	// 1. Auth — SessionStore backend is switchable via SESSION_STORE
-	sessionStore, err := newSessionStore(cfg)
+	sessionStore, err := newSessionStore(cfg, pg)
 	if err != nil {
-		log.Printf("Warning: %v, falling back to in-memory session store", err)
-		sessionStore = auth.NewInMemorySessionStore()
+		panic(fmt.Errorf("initialize session store: %w", err))
+	}
+	userStore, err := newUserStore(cfg, pg)
+	if err != nil {
+		panic(fmt.Errorf("initialize user store: %w", err))
 	}
 	rbac := auth.NewRBACManager()
-	authSvc := auth.NewService(sessionStore, rbac, cfg.SessionTTL)
+	authSvc, err := auth.NewServiceWithUserStore(sessionStore, userStore, rbac, cfg.SessionTTL)
+	if err != nil {
+		panic(fmt.Errorf("initialize auth service: %w", err))
+	}
+	if err := authSvc.EnsureBootstrapAdmin(ctx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminPassword); err != nil {
+		panic(fmt.Errorf("initialize administrator: %w", err))
+	}
+	var loginLimitStore auth.LoginLimitStore = auth.NewInMemoryLoginLimitStore()
+	if pg != nil {
+		loginLimitStore = pg.LoginLimits
+	}
+	limiter, err := auth.NewLoginLimiter(loginLimitStore, auth.LoginRatePolicy{
+		MaxFailures: cfg.LoginMaxFailures, Window: cfg.LoginFailureWindow, Lockout: cfg.LoginLockout,
+	})
+	if err != nil {
+		panic(fmt.Errorf("initialize login limiter: %w", err))
+	}
+	authSvc.SetLoginLimiter(limiter)
 
 	// 2. Tools
 	toolRegistry := tools.NewToolRegistry()
-	orderStore := tools.NewOrderStore()
-	emailStore := tools.NewEmailStore()
+	orderStore, emailStore, err := newBusinessStores(ctx, cfg, pg)
+	if err != nil {
+		panic(fmt.Errorf("initialize business stores: %w", err))
+	}
 	toolRegistry.Register(tools.NewCalculatorTool())
 	toolRegistry.Register(tools.NewWeatherTool())
 	toolRegistry.Register(tools.NewGrepTool())
@@ -63,12 +98,23 @@ func NewApp(cfg *Config) *App {
 	aclMiddleware.WrapAllTools(toolRegistry)
 
 	// 4. HITL — CheckpointStore backend is switchable via CHECKPOINT_STORE
-	checkpointStore, err := newCheckpointStore(cfg)
+	checkpointStore, err := newCheckpointStore(cfg, pg)
 	if err != nil {
-		log.Printf("Warning: %v, falling back to in-memory checkpoint store", err)
-		checkpointStore = memory.NewInMemoryCheckpointStore()
+		panic(fmt.Errorf("initialize checkpoint store: %w", err))
 	}
 	interruptMgr := hitl.NewInterruptManager(checkpointStore)
+	if cfg.ApprovalStoreKind == "postgres" {
+		if pg == nil {
+			panic("approval store is postgres but postgres backend is unavailable")
+		}
+		interruptMgr.UseStore(pg.Approvals)
+	} else if cfg.ApprovalStoreKind == "file" {
+		if err := interruptMgr.UseFile(cfg.CheckpointStorePath + ".approvals.json"); err != nil {
+			panic(fmt.Errorf("load approvals: %w", err))
+		}
+	} else if cfg.ApprovalStoreKind != "memory" {
+		panic(fmt.Errorf("invalid APPROVAL_STORE %q: must be memory, file or postgres", cfg.ApprovalStoreKind))
+	}
 	hitlSvc := hitl.NewService(interruptMgr, checkpointStore, rbac)
 
 	// 5. Memory — create chatModel first so memory service can use it for LLM extraction
@@ -89,10 +135,9 @@ func NewApp(cfg *Config) *App {
 
 	// Memory (long-term KV + short-term checkpoint + vector retrieval)
 	// MemoryStore backend is switchable via MEMORY_STORE
-	memoryStore, err := newMemoryStore(cfg)
+	memoryStore, err := newMemoryStore(cfg, pg)
 	if err != nil {
-		log.Printf("Warning: %v, falling back to in-memory memory store", err)
-		memoryStore = memory.NewInMemoryMemoryStore()
+		panic(fmt.Errorf("initialize memory store: %w", err))
 	}
 	var vectorStore memory.VectorStore
 	switch cfg.EmbeddingProvider {
@@ -146,10 +191,28 @@ func NewApp(cfg *Config) *App {
 	steppedRunner := agent.NewSteppedRunner(chatModel, toolRegistry, hitlSvc, 20,
 		buildDispatchEntries(supervisor, toolRegistry, chatModel, hitlSvc, rbac, ctx), rbac)
 	// Node-level interrupt is available but not enabled by default.
-	// It is activated per-request when the user's message signals a "review before execute"
-	// intent (e.g., "先生成执行计划，确认后再执行").
-	// The Runner.Chat method checks for this intent and enables node interrupts for that run.
+	// It is activated by the explicit per-request confirmBeforeExecute flag.
 	runner := agent.NewRunner(supervisor, steppedRunner, hitlSvc, toolRegistry, rbac, memorySvc, summarizer, cfg.MaxTokens)
+	if pg != nil {
+		runner.UseRunStore(pg.Runs, cfg.RunEventRetention)
+	}
+
+	// Conversation threads are switchable via THREAD_STORE. File survives
+	// restarts in one process; PostgreSQL coordinates multiple instances.
+	if cfg.ThreadStoreKind == "postgres" {
+		if pg == nil {
+			panic("thread store is postgres but postgres backend is unavailable")
+		}
+		runner.UseThreadStore(pg.Threads)
+	} else if cfg.ThreadStoreKind == "file" {
+		if err := runner.UseFileThreads(cfg.ThreadStorePath); err != nil {
+			panic(fmt.Errorf("initialize thread store: %w", err))
+		}
+	}
+	if cfg.CheckpointStoreKind == "postgres" && cfg.ThreadStoreKind == "postgres" && cfg.ApprovalStoreKind == "postgres" {
+		runner.UseInterruptPublisher(pg)
+		runner.UseResumePublisher(pg)
+	}
 
 	// Build App first so the router can reference it for model switching
 	a := &App{
@@ -161,15 +224,32 @@ func NewApp(cfg *Config) *App {
 		Summarizer:   summarizer,
 		Runner:       runner,
 		HITLSvc:      hitlSvc,
+		Postgres:     pg,
 		registry:     modelReg,
 		chatModel:    chatModel,
 		currentModel: currentModel,
 	}
 
 	// 8. Router (needs App for model switching)
-	a.Router = httpapi.NewRouter(authSvc, runner, hitlSvc, memorySvc, toolRegistry, a)
+	a.Router = httpapi.NewRouter(authSvc, runner, hitlSvc, memorySvc, toolRegistry, a, a)
 
 	return a
+}
+
+// Close releases external storage pools. It is safe to call on memory/file deployments.
+func (a *App) Close() error {
+	if a.Postgres != nil {
+		return a.Postgres.Close()
+	}
+	return nil
+}
+
+// Ready reports whether dependencies required to accept traffic are available.
+func (a *App) Ready(ctx context.Context) error {
+	if a.Postgres != nil {
+		return a.Postgres.Ready(ctx)
+	}
+	return nil
 }
 
 // SwitchModel switches the active model to the specified profile.
@@ -278,8 +358,6 @@ func (a *App) Start() error {
 
 	log.Printf("Starting server on %s", a.Config.Addr)
 	log.Printf("Model provider: %s (Eino react.Agent)", a.currentModel)
-	log.Printf("Default accounts: admin/admin123, visitor/visitor123")
-
 	return http.ListenAndServe(a.Config.Addr, handler)
 }
 
@@ -362,37 +440,91 @@ func buildDispatchEntries(
 }
 
 // newSessionStore builds the SessionStore backend selected by SESSION_STORE.
-func newSessionStore(cfg *Config) (auth.SessionStore, error) {
+func newSessionStore(cfg *Config, pg *pgstore.Backend) (auth.SessionStore, error) {
 	switch cfg.SessionStoreKind {
 	case "file":
 		return auth.NewFileSessionStore(cfg.SessionStorePath)
 	case "memory":
 		return auth.NewInMemorySessionStore(), nil
+	case "postgres":
+		if pg == nil {
+			return nil, fmt.Errorf("postgres backend is unavailable")
+		}
+		return pg.Sessions, nil
 	default:
-		return nil, fmt.Errorf("invalid SESSION_STORE %q: must be memory or file", cfg.SessionStoreKind)
+		return nil, fmt.Errorf("invalid SESSION_STORE %q: must be memory, file or postgres", cfg.SessionStoreKind)
+	}
+}
+
+func newUserStore(cfg *Config, pg *pgstore.Backend) (auth.UserStore, error) {
+	switch cfg.UserStoreKind {
+	case "memory":
+		return auth.NewInMemoryUserStore(), nil
+	case "postgres":
+		if pg == nil {
+			return nil, fmt.Errorf("postgres backend is unavailable")
+		}
+		return pg.Users, nil
+	default:
+		return nil, fmt.Errorf("invalid USER_STORE %q: must be memory or postgres", cfg.UserStoreKind)
 	}
 }
 
 // newCheckpointStore builds the CheckpointStore backend selected by CHECKPOINT_STORE.
-func newCheckpointStore(cfg *Config) (memory.CheckpointStore, error) {
+func newCheckpointStore(cfg *Config, pg *pgstore.Backend) (memory.CheckpointStore, error) {
 	switch cfg.CheckpointStoreKind {
 	case "file":
 		return memory.NewFileCheckpointStore(cfg.CheckpointStorePath)
 	case "memory":
 		return memory.NewInMemoryCheckpointStore(), nil
+	case "postgres":
+		if pg == nil {
+			return nil, fmt.Errorf("postgres backend is unavailable")
+		}
+		return pg.Checkpoints, nil
 	default:
-		return nil, fmt.Errorf("invalid CHECKPOINT_STORE %q: must be memory or file", cfg.CheckpointStoreKind)
+		return nil, fmt.Errorf("invalid CHECKPOINT_STORE %q: must be memory, file or postgres", cfg.CheckpointStoreKind)
 	}
 }
 
 // newMemoryStore builds the MemoryStore backend selected by MEMORY_STORE.
-func newMemoryStore(cfg *Config) (memory.MemoryStore, error) {
+func newMemoryStore(cfg *Config, pg *pgstore.Backend) (memory.MemoryStore, error) {
 	switch cfg.MemoryStoreKind {
 	case "file":
 		return memory.NewFileMemoryStore(cfg.MemoryStorePath)
 	case "memory":
 		return memory.NewInMemoryMemoryStore(), nil
+	case "postgres":
+		if pg == nil {
+			return nil, fmt.Errorf("postgres backend is unavailable")
+		}
+		return pg.Memories, nil
 	default:
-		return nil, fmt.Errorf("invalid MEMORY_STORE %q: must be memory or file", cfg.MemoryStoreKind)
+		return nil, fmt.Errorf("invalid MEMORY_STORE %q: must be memory, file or postgres", cfg.MemoryStoreKind)
 	}
+}
+
+func newBusinessStores(ctx context.Context, cfg *Config, pg *pgstore.Backend) (tools.OrderRepository, tools.EmailRepository, error) {
+	switch cfg.BusinessStoreKind {
+	case "memory":
+		return tools.NewOrderStore(), tools.NewEmailStore(), nil
+	case "postgres":
+		if pg == nil {
+			return nil, nil, fmt.Errorf("postgres backend is unavailable")
+		}
+		seedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err := pg.Orders.Seed(seedCtx, tools.DefaultOrders()); err != nil {
+			return nil, nil, err
+		}
+		return pg.Orders, pg.Emails, nil
+	default:
+		return nil, nil, fmt.Errorf("invalid BUSINESS_STORE %q: must be memory or postgres", cfg.BusinessStoreKind)
+	}
+}
+
+func usesPostgres(cfg *Config) bool {
+	return cfg.UserStoreKind == "postgres" || cfg.SessionStoreKind == "postgres" || cfg.CheckpointStoreKind == "postgres" ||
+		cfg.MemoryStoreKind == "postgres" || cfg.ThreadStoreKind == "postgres" || cfg.ApprovalStoreKind == "postgres" ||
+		cfg.BusinessStoreKind == "postgres"
 }

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cloudwego/eino/components/model"
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/components/model"
 )
 
 // newOpenAIChatModelImpl creates an OpenAI-compatible ChatModel using eino-ext.
@@ -26,7 +26,7 @@ func newOpenAIChatModelImpl(ctx context.Context, cfg *Config) (model.ToolCalling
 	// into every request. This is required by some API gateways.
 	httpClient := &http.Client{
 		Transport: &headerInjectTransport{
-			base:    http.DefaultTransport,
+			base: http.DefaultTransport,
 			headers: map[string]string{
 				"ksyun-code-type": "eino-agent",
 			},
