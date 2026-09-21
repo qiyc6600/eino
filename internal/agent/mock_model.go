@@ -120,9 +120,6 @@ func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 	runes := []rune(msg.Content)
 	chunks := make([]*schema.Message, 0, len(runes)/mockStreamChunkRunes+1)
 	for start := 0; start < len(runes); start += mockStreamChunkRunes {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		end := start + mockStreamChunkRunes
 		if end > len(runes) {
 			end = len(runes)
@@ -133,15 +130,29 @@ func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 			chunk.ResponseMeta = &schema.ResponseMeta{Usage: usage}
 		}
 		chunks = append(chunks, chunk)
-		if mockStreamChunkDelay > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(mockStreamChunkDelay):
+	}
+
+	// A real piped stream, not a pre-built array: the pacing has to happen while
+	// the consumer reads, otherwise every chunk is delivered in one burst and the
+	// UI never shows a typing effect.
+	reader, writer := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer writer.Close()
+		for _, chunk := range chunks {
+			if mockStreamChunkDelay > 0 {
+				select {
+				case <-ctx.Done():
+					writer.Send(nil, ctx.Err())
+					return
+				case <-time.After(mockStreamChunkDelay):
+				}
+			}
+			if writer.Send(chunk, nil) {
+				return // consumer went away
 			}
 		}
-	}
-	return schema.StreamReaderFromArray(chunks), nil
+	}()
+	return reader, nil
 }
 
 // mockUsageFor reports a plausible token count so the provider-usage path is

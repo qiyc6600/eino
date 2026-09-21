@@ -118,7 +118,9 @@ func (h *MemoryHandler) MemorySettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, settings)
+		// The HTTP surface uses "enabled" in both directions; the stored entry
+		// keeps its own "memory_enabled" field name.
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": settings.Enabled})
 	case http.MethodPut:
 		var body struct {
 			Enabled *bool `json:"enabled"`
@@ -136,7 +138,7 @@ func (h *MemoryHandler) MemorySettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, settings)
+		writeJSON(w, http.StatusOK, map[string]bool{"enabled": settings.Enabled})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

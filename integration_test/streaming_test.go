@@ -134,6 +134,7 @@ func TestIntegration_StreamEmitsToolProgress(t *testing.T) {
 	frames := streamChat(t, server.URL, sessionID, "1+1等于多少")
 
 	phases := map[string]bool{}
+	names := map[string]string{}
 	doneIndex := -1
 	for i, frame := range frames {
 		if frame.event == "done" {
@@ -148,6 +149,10 @@ func TestIntegration_StreamEmitsToolProgress(t *testing.T) {
 		}
 		phase, _ := frame.data["phase"].(string)
 		phases[phase] = true
+		// The UI renders "<phase> <tool>", so the subject must be present.
+		if name, _ := frame.data["tool"].(string); name != "" {
+			names[phase] = name
+		}
 	}
 	if doneIndex < 0 {
 		t.Fatal("stream ended without a done frame")
@@ -159,5 +164,13 @@ func TestIntegration_StreamEmitsToolProgress(t *testing.T) {
 	}
 	if !phases["start"] || !phases["end"] {
 		t.Errorf("expected tool start and end progress frames, got phases %v", phases)
+	}
+	for _, phase := range []string{"route", "start", "end"} {
+		if names[phase] == "" {
+			t.Errorf("progress frame %q carries no tool/agent name: %v", phase, frames)
+		}
+	}
+	if names["end"] != "calculator" {
+		t.Errorf("expected the calculator tool to be named in the end frame, got %q", names["end"])
 	}
 }

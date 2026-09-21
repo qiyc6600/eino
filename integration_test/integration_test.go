@@ -257,8 +257,8 @@ func TestIntegration_MemorySettings(t *testing.T) {
 	var settings map[string]any
 	json.NewDecoder(resp.Body).Decode(&settings)
 	resp.Body.Close()
-	if settings["memory_enabled"] != true {
-		t.Fatalf("expected memory enabled by default, got %v", settings)
+	if settings["enabled"] != true {
+		t.Fatalf("expected enabled=true by default, got %v", settings)
 	}
 
 	// Turn it off.
@@ -278,8 +278,8 @@ func TestIntegration_MemorySettings(t *testing.T) {
 	resp = doGet(t, server.URL, "/api/memory/settings", sessionID)
 	json.NewDecoder(resp.Body).Decode(&settings)
 	resp.Body.Close()
-	if settings["memory_enabled"] != false {
-		t.Fatalf("expected memory disabled after PUT, got %v", settings)
+	if settings["enabled"] != false {
+		t.Fatalf("expected enabled=false after PUT, got %v", settings)
 	}
 
 	// The reserved settings entry must not appear as a user memory.

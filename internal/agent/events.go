@@ -88,6 +88,14 @@ func (r *EventRecorder) Record(eventType EventType, detail string, meta map[stri
 		Detail:    detail,
 		Metadata:  meta,
 	}
+	// Lift the subject out of the metadata so the event is self-describing
+	// without the reader having to know each event type's metadata keys.
+	if name, ok := meta["tool"].(string); ok {
+		event.ToolName = name
+	}
+	if name, ok := meta["agent"].(string); ok {
+		event.AgentName = name
+	}
 	r.events = append(r.events, event)
 	if r.sink != nil {
 		r.sink.OnEvent(event)

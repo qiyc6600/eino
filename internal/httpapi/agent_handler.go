@@ -180,11 +180,14 @@ func (s *progressSink) OnDelta(content string) {
 // chat area. Model-call and compression events stay in the events panel (sent
 // with the final payload) so the chat does not fill with noise.
 func sseFrameForEvent(event agent.Event) (string, map[string]any, bool) {
+	// Prefer the structured metadata, falling back to the event's own fields.
 	target := event.ToolName
-	if target == "" {
-		if agentName, ok := event.Metadata["agent"].(string); ok {
-			target = agentName
-		}
+	if name, ok := event.Metadata["tool"].(string); ok && name != "" {
+		target = name
+	} else if name, ok := event.Metadata["agent"].(string); ok && name != "" {
+		target = name
+	} else if target == "" {
+		target = event.AgentName
 	}
 
 	switch event.Type {

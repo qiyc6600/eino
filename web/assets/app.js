@@ -430,9 +430,6 @@ async function sendMessage() {
         renderChat();
     }
 
-        renderChat();
-    }
-
     isStreaming = false;
     setStreamingControls(false);
 }

@@ -126,6 +126,12 @@ Agent 调用 delete_order → 中断 → 返回审批卡片 → 人工批准/拒
 
 回归覆盖见 `internal/agent/execution_test.go` 和 `integration_test/reliability_test.go`；使用 `go test ./...` 和 `go test -race ./...` 验证。
 
+前端改动需额外做一次语法检查——`go build` 不会校验 `go:embed` 进去的 JS，一个语法错误会让整个页面失去交互（`onclick` 里的函数全部未定义）却不影响任何 Go 测试：
+
+```bash
+node --check web/assets/app.js
+```
+
 ### 恢复语义
 
 | 中断类型 | 恢复方式 | 说明 |
