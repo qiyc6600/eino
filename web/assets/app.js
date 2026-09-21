@@ -733,26 +733,113 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// decideApproval submits a decision and streams the resumed run's progress.
+//
+// A resume executes the gated tool and then continues the ReAct loop, so it can
+// take as long as a chat turn and can interrupt again — neither of which the old
+// one-shot JSON response could show.
+//
+// No stop button here on purpose: once the approval is claimed the server runs to
+// completion regardless of this connection, so offering "stop" would imply an
+// effect it does not have.
 async function decideApproval(interruptId, approved) {
     const reasonEl = document.getElementById(`rr-${interruptId}`);
     const reason = reasonEl ? reasonEl.value : '';
+
+    setStreamProgress(approved ? '✅ 已批准，正在执行…' : '🚫 已拒绝，正在重新规划…');
+
+    let answer = '';
+    let interrupted = null;
+    let failure = null;
     try {
-        const data = await api('POST', `/api/approvals/${interruptId}/decision`, { approved, reason });
-        // Flip the inline card to its resolved state.
-        const msgs = loadMessages(currentThread);
-        for (const m of msgs) {
-            if (m.role === 'approval-card' && m.interruptId === interruptId && m.status === 'pending') {
-                m.status = approved ? 'approved' : 'rejected';
+        const resp = await fetch(`/api/approvals/${interruptId}/decision`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${sessionId}`,
+            },
+            body: JSON.stringify({ approved, reason, stream: true }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = '';
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.startsWith('event: ')) {
+                    const eventType = line.slice(7).trim();
+                    const dataLine = lines[i + 1];
+                    if (dataLine && dataLine.startsWith('data: ')) {
+                        const dataStr = dataLine.slice(6);
+                        i++;
+                        try {
+                            const data = JSON.parse(dataStr);
+                            if (eventType === 'chunk' && data.content) {
+                                answer += data.content;
+                                setStreamProgress('正在生成回复…');
+                            } else if (eventType === 'tool_call') {
+                                setStreamProgress(progressTextForToolFrame(data));
+                            } else if (eventType === 'done') {
+                                if (data.answer) answer = data.answer;
+                                if (data.interrupt) interrupted = data.interrupt;
+                                if (data.status === 'error' || data.status === 'cancelled') {
+                                    failure = data.answer || data.status;
+                                }
+                            }
+                        } catch (e) {
+                            // Ignore parse errors for individual frames
+                        }
+                    }
+                } else if (line && !line.startsWith(':') && i === lines.length - 1) {
+                    buffer = line;
+                }
             }
         }
-        saveMessages(currentThread, msgs);
-        pushMessage(currentThread, 'approval',
-            `${approved ? '✅' : '🚫'} 审批结果：${data.answer || (approved ? '已批准' : '已拒绝')}`);
-        renderChat();
-        await refreshApprovals();
     } catch (e) {
-        alert('审批操作失败：' + e.message);
+        failure = e.message || String(e);
+    } finally {
+        setStreamProgress('');
     }
+
+    // Flip the card: it is resolved when the run moved on, failed otherwise.
+    const msgs = loadMessages(currentThread);
+    for (const m of msgs) {
+        if (m.role === 'approval-card' && m.interruptId === interruptId && m.status === 'pending') {
+            m.status = failure ? 'resolved' : (approved ? 'approved' : 'rejected');
+        }
+    }
+    saveMessages(currentThread, msgs);
+    if (failure) {
+        pushMessage(currentThread, 'approval', `⚠️ 审批已提交，但恢复过程出现问题：${failure}`);
+    } else {
+        pushMessage(currentThread, 'approval',
+            `${approved ? '✅' : '🚫'} 审批结果：${answer || (approved ? '已批准' : '已拒绝')}`);
+    }
+    renderChat();
+
+    // A resumed run can interrupt again: surface the new card the same way the
+    // chat stream does.
+    if (interrupted) {
+        pushApprovalCard(currentThread, {
+            interruptId: interrupted.interrupt_id,
+            toolName: interrupted.tool_name,
+            nodeName: interrupted.node_name,
+            message: interrupted.message,
+            args: interrupted.arguments,
+            plan: interrupted.plan,
+        });
+    }
+    await refreshApprovals();
 }
 
 // ========== Tools ==========

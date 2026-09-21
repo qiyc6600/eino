@@ -200,6 +200,10 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | 事件级进度 | Supervisor 路由、工具开始/结束、ACL 拒绝、等待审批 | `tool_call`（带 `phase` 与 `tool`） |
 | token 级片段 | 模型输出的增量文字 | `chunk`（带 `content`） |
 
+审批恢复走同一条通道：`POST /api/approvals/{id}/decision` 加 `stream: true` 后，被批准工具的执行与后续推理进度同样实时推送，再次中断时终止帧携带新的审批请求。默认仍是原有的一次性 JSON 响应。
+
+**审批一旦被 claim，恢复就与客户端连接解耦**：断连不会取消已获授权的操作，服务端执行到完成或 2 分钟超时。claim 是不可回退点——此时取消会消耗掉这次审批（无法重试）并把可能已发生的副作用记录为取消。claim 之前的断连仍会中止恢复。
+
 实现要点：
 
 - 出口挂在 `EventRecorder` 上（`ProgressSink`），它本来就穿透了 `RunStep → executePendingTools → 子 Agent` 全链路；整个 run 在 HTTP handler 的 goroutine 内同步执行，因此 sink 直接写响应、无需加锁。
@@ -525,7 +529,6 @@ go test ./...
 | 线程历史默认无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长。**可通过 `THREAD_HISTORY_MAX_MESSAGES` 与 `THREAD_RETENTION` 显式开启上限或清理**（默认保持完整保留：静默丢弃用户对话属于产品决策）。写入成本已通过追加式写入解决 |
 | 文件后端写入为全量重写 | 单文件 JSON 无法原地追加，成本为 O(全部会话)；写入成本敏感的场景应使用 PostgreSQL |
 | 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
-| 审批恢复路径不流式 | 审批决策接口返回一次性 JSON，恢复期间界面无进度 |
 | 刷新页面需重新登录 | sessionId 仅存页面内存，未写入 localStorage/sessionStorage |
 
 > 多用户隔离为框架强制：类型化工具身份（不可伪造）、线程/运行事件/审批属主校验、存储层 `CheckUserScope` 上下文校验，详见 `docs/design.md` 5.3 节。节点级中断由请求显式 `confirmBeforeExecute` 标志触发，不依赖消息关键词。

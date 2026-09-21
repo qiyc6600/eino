@@ -546,6 +546,7 @@ data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","t
 |------|------|------|------|
 | approved | bool | 是 | 是否批准 |
 | reason | string | 否 | 决定原因 |
+| stream | bool | 否 | 是否用 SSE 返回恢复进度，默认 `false`（保持一次性 JSON 响应） |
 
 **批准成功响应** (200)：
 
@@ -568,6 +569,32 @@ data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","t
   "approved": false
 }
 ```
+
+#### 流式模式 (stream=true)
+
+恢复会执行被批准的工具并继续 ReAct 循环，耗时可能与一次聊天相当，且**可能再次中断**，因此可以改为流式返回。帧格式与聊天接口一致（`chunk` / `tool_call`），终止帧为 `done`：
+
+```json
+{
+  "status": "completed",
+  "answer": "操作已批准并执行。",
+  "runId": "r_e5f6g7h8",
+  "approved": true,
+  "interrupt": null,
+  "events": [],
+  "streamed": true
+}
+```
+
+- 再次中断时 `status` 为 `interrupted`，`interrupt` 携带新的审批请求（与聊天接口的处理方式相同）。
+- 失败与取消同样通过 `status` 表达（`error` / `cancelled`），`answer` 承载原因。注意：**一旦开始流式输出，HTTP 状态码固定为 200**，错误只能从 `done` 帧读取；需要 HTTP 状态码的调用方应使用默认的非流式模式。
+- 被批准的工具执行会产生 `tool_call` 进度帧（`phase` 为 `start` / `end`）。
+
+#### 关于客户端断连
+
+审批被 claim 之后，恢复执行会与本次连接**解耦**：断连不会取消已获授权的操作，服务端仍会执行到完成（上限仍为 2 分钟）。原因是 claim 是不可回退点——决定已持久化、工具可能已经执行，此时取消会消耗掉这次审批（无法重试）并把已发生的副作用记录为取消。
+
+claim 之前断连仍会中止本次恢复，因为那时还没有任何不可逆操作。
 
 ---
 

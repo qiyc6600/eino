@@ -36,7 +36,7 @@
 | 2.1 | 任意节点能中断存状态 | ✅ | SteppedRunner 节点级中断门：请求显式 `confirmBeforeExecute` 标志（前端开关/API 字段）触发，中断后暂停执行，PendingToolCalls 保留在状态中等待审批；标志按请求传递，不依赖消息关键词，也无共享状态污染 |
 | 2.2 | 危险操作 yes/no | ✅ | `delete_order` / `send_email` 触发审批，`ApprovalDecision{Approved, Reason}` |
 | 2.3 | 同 run ID 恢复续跑 | ⚠️ | `Runner.Resume()` 优先从 Checkpoint 加载完整 `SteppedRunState`（含对话历史+中间步骤），Resume 时从中断点继续执行 ReAct 循环。若 Checkpoint 不可用则降级为线程重建模式 |
-| 2.4 | Web 承载中断-审批-恢复 | ✅ | 前端审批卡片 + approve/reject 按钮 + API 调用；执行过程实时推送 `tool_call` 进度帧（路由/工具开始结束/权限拒绝/审批等待），答案按 token 片段流式输出，支持中途停止并保留已收到的内容 |
+| 2.4 | Web 承载中断-审批-恢复 | ✅ | 前端审批卡片 + approve/reject 按钮 + API 调用；执行过程实时推送 `tool_call` 进度帧（路由/工具开始结束/权限拒绝/审批等待），答案按 token 片段流式输出，支持中途停止并保留已收到的内容；审批恢复同样可流式（决策接口 `stream=true`），被批准工具的执行也会产生进度帧 |
 | 2.5 | CheckpointStore 接口（save/load/delete） | ✅ | `CheckpointStore` 接口 + `InMemoryCheckpointStore` 实现 |
 
 ### 模块 02 技术约束
@@ -138,7 +138,7 @@
 
 ### 已知限制（非阻塞，详见 dev-todo.md）
 
-线程历史默认无保留上限（已提供两个开关）、文件后端写入为全量重写、压缩后 checkpoint 体积上升、审批恢复路径不流式、刷新页面需重新登录。
+线程历史默认无保留上限（已提供两个开关）、文件后端写入为全量重写、压缩后 checkpoint 体积上升、刷新页面需重新登录。
 
 ### 工程交付
 

@@ -463,6 +463,12 @@ Runner.ChatContext(ctx, ac, thread, msg, WithProgressSink(sink))
 
 **取消**：客户端断开 SSE 连接即取消本次 run（net/http 取消 `r.Context()`，执行链各层均有 `ctx.Err()` 检查）。前端停止按钮用 `AbortController` 中断 fetch 实现，无需单独的取消接口；已收到的片段会被保留并标注"已停止"。
 
+**审批恢复路径同样流式**：`ResumeContext` 接受与聊天相同的 `WithProgressSink`，决策接口的 `stream=true` 复用它。恢复会执行被批准的工具并继续 ReAct 循环，还可能再次中断，这些进度过去完全不可见。
+
+**被批准的工具执行也会记录事件**：`HandleApproval` 直接调用 `executeTool`，而 `tool_call_start/end` 原本只在 `executePendingTools` 中记录，因此审批恢复执行的工具在实时流和运行事件里都是空白。现在 `HandleApproval` 接受 recorder 并在执行前后记录。
+
+**claim 之后与客户端连接解耦**：`ResumeContext` 在 claim 成功之后把执行 context 换成 `context.WithoutCancel(parent)` 并重新施加 2 分钟超时。位置是关键——**claim 之前**客户端仍在场（尚无不可逆操作，断连应当中止）；**claim 之后**决定已持久化、被批准的工具可能已经执行，此时断连若取消运行会造成两个后果：这次审批被消耗且无法重试（凭据已存在，重试只会返回该凭据），以及把已经发生的副作用记录为 `cancelled`。因此恢复一旦开始就跑到完成或超时，与浏览器是否还在无关。
+
 **事件补全**：`model_call_start` / `model_call_end` / `tool_call_start` / `acl_denied` / `hitl_interrupt` 此前只有常量声明而无记录点，本次补齐；`Record` 会从 metadata 中提取 `tool` / `agent` 填充 `Event.ToolName` / `AgentName`，使事件自描述。
 
 ---

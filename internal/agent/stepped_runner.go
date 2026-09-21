@@ -588,7 +588,11 @@ func (r *SteppedRunner) executeTool(ctx context.Context, tc ToolCallInfo) (strin
 // HandleApproval processes an approval decision and continues execution.
 // For tool-level: if approved, execute the tool; if rejected, feed rejection back to LLM.
 // For node-level: if approved, continue from the next node; if rejected, feed rejection back to LLM.
-func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunState, interrupt *InterruptRequest, approved bool, reason string) (*SteppedRunState, error) {
+//
+// The recorder is threaded through because the tool executed here is a real side
+// effect that ran under human authorisation: without it, that execution would be
+// absent from both the live progress stream and the run's event history.
+func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunState, interrupt *InterruptRequest, approved bool, reason string, recorder *EventRecorder) (*SteppedRunState, error) {
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
@@ -607,7 +611,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 			if entry == nil || entry.AgentWrapper == nil || entry.AgentWrapper.steppedRunner == nil {
 				return state, fmt.Errorf("missing child runner %s", tc.Name)
 			}
-			_, err := entry.AgentWrapper.steppedRunner.HandleApproval(ctx, child, interrupt, approved, reason)
+			_, err := entry.AgentWrapper.steppedRunner.HandleApproval(ctx, child, interrupt, approved, reason, recorder)
 			return state, err
 		}
 	}
@@ -617,6 +621,13 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 		}
 		content := "用户拒绝执行该操作：" + reason
 		if approved {
+			if recorder != nil {
+				recorder.Record(EventToolCallStart, fmt.Sprintf("Calling approved tool %s", tc.Name), map[string]any{
+					"tool":     tc.Name,
+					"step":     state.Step,
+					"approved": true,
+				})
+			}
 			var err error
 			content, err = r.executeTool(ctx, tc)
 			if err != nil {
@@ -624,6 +635,13 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 			}
 		}
 		state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: r.capToolResult(content)})
+		if approved && recorder != nil {
+			recorder.Record(EventToolCallEnd, fmt.Sprintf("Tool %s executed after approval", tc.Name), map[string]any{
+				"tool":   tc.Name,
+				"step":   state.Step,
+				"result": truncate(content, 200),
+			})
+		}
 		state.PendingToolCalls = append(state.PendingToolCalls[:i], state.PendingToolCalls[i+1:]...)
 		return state, nil
 	}

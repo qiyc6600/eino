@@ -384,7 +384,11 @@ func (r *Runner) publishInterrupt(ctx context.Context, publication *InterruptPub
 // A crash in between has an unknown outcome: refuse automatic replay rather than
 // possibly sending an email/deleting an order twice. External transactional tools
 // can later reconcile this with their own idempotency keys.
-func (r *Runner) ResumeContext(parent context.Context, ac *auth.AuthContext, id string, decision hitl.ApprovalDecision) ChatRunResult {
+func (r *Runner) ResumeContext(parent context.Context, ac *auth.AuthContext, id string, decision hitl.ApprovalDecision, opts ...ChatOption) ChatRunResult {
+	options := &chatOptions{}
+	for _, option := range opts {
+		option(options)
+	}
 	ctx, cancel := context.WithTimeout(parent, runTimeout)
 	defer cancel()
 	req, ok, err := r.hitlSvc.GetApprovalContext(ctx, id)
@@ -454,14 +458,30 @@ func (r *Runner) ResumeContext(parent context.Context, ac *auth.AuthContext, id 
 		}
 		return runFailure(req.RunID, fmt.Errorf("审批已被其他实例领取或上次执行结果未确认，需要核对业务结果后恢复"))
 	}
-	_, err = r.steppedRunner.HandleApproval(ctx, state, &InterruptRequest{Type: req.Type, ToolCallID: req.ToolCallID, ToolName: req.ToolName, Arguments: req.Arguments, NodeName: req.NodeName}, decision.Approved, decision.Reason)
+	// Past the claim the decision is durable and the gated tool is about to run,
+	// so the caller's connection must no longer be able to cancel the work: a
+	// browser tab closing would otherwise burn the approval and could record a
+	// side effect that already happened as cancelled. Before the claim the client
+	// is still free to walk away — nothing irreversible has occurred yet.
+	runCtx, cancelRun := context.WithTimeout(context.WithoutCancel(parent), runTimeout)
+	defer cancelRun()
+	ctx = injectAuthContext(runCtx, ac, req.ThreadID, req.RunID)
+
+	// The recorder exists before the approval is handled so the gated tool's
+	// execution is recorded too, not just the ReAct steps that follow it.
+	recorder := ContinueEventRecorder(req.RunID, earlier)
+	if options.sink != nil {
+		recorder.SetSink(options.sink)
+	}
+
+	_, err = r.steppedRunner.HandleApproval(ctx, state, &InterruptRequest{Type: req.Type, ToolCallID: req.ToolCallID, ToolName: req.ToolName, Arguments: req.Arguments, NodeName: req.NodeName}, decision.Approved, decision.Reason, recorder)
 	var result ChatRunResult
 	var next *InterruptPublication
 	if err != nil {
 		result = runFailure(req.RunID, err)
 		result.Events = earlier
 	} else {
-		result, next = r.advance(ctx, ac, state, ContinueEventRecorder(req.RunID, earlier), false, r.resumePublisher != nil)
+		result, next = r.advance(ctx, ac, state, recorder, false, r.resumePublisher != nil)
 		result.ActualTokens = state.Usage
 	}
 	req.State, err = state.Serialize()

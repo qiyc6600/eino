@@ -101,7 +101,7 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 	// Progress is written to the response while the run executes. The sink runs
 	// on this same goroutine (ChatContext is synchronous), so no locking is
 	// needed around the ResponseWriter.
-	sink := &progressSink{w: w, flusher: flusher}
+	sink := &progressSink{w: w, flusher: flusher, clientGone: r.Context().Done()}
 
 	// Always use Chat() — it goes through SteppedRunner which records events,
 	// handles interrupts, and provides complete results.
@@ -158,10 +158,30 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 type progressSink struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
-	deltas  int // content fragments already sent, to avoid resending the answer
+	// clientGone is closed when the caller's connection drops. Writes after that
+	// are pointless — and on the resume path the run deliberately keeps going, so
+	// the sink must not keep writing to a dead connection.
+	clientGone <-chan struct{}
+	deltas     int // content fragments already sent, to avoid resending the answer
+}
+
+// disconnected reports whether the client has already gone away.
+func (s *progressSink) disconnected() bool {
+	if s.clientGone == nil {
+		return false
+	}
+	select {
+	case <-s.clientGone:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *progressSink) OnEvent(event agent.Event) {
+	if s.disconnected() {
+		return
+	}
 	name, payload, ok := sseFrameForEvent(event)
 	if !ok {
 		return
@@ -171,6 +191,9 @@ func (s *progressSink) OnEvent(event agent.Event) {
 }
 
 func (s *progressSink) OnDelta(content string) {
+	if s.disconnected() {
+		return
+	}
 	s.deltas++
 	fmt.Fprintf(s.w, "event: chunk\ndata: %s\n\n", jsonEncode(map[string]string{"content": content}))
 	s.flusher.Flush()
