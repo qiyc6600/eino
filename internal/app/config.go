@@ -60,6 +60,10 @@ type Config struct {
 	MaxTokens               int
 	SummarizeThresholdRatio float64
 	SummaryTargetTokens     int
+	// ReserveOutputTokens is held back from the window for the model's answer.
+	ReserveOutputTokens int
+	// MaxToolResultChars caps a single tool result before it enters the history.
+	MaxToolResultChars int
 
 	// Memory retrieval & lifecycle
 	MemoryBudgetTokens         int // token budget for memory injection per turn
@@ -179,6 +183,8 @@ func LoadConfig() *Config {
 		MaxTokens:                  getEnvInt("MAX_TOKENS", 8000),
 		SummarizeThresholdRatio:    getEnvFloat("SUMMARIZE_THRESHOLD_RATIO", 0.8),
 		SummaryTargetTokens:        getEnvInt("SUMMARY_TARGET_TOKENS", 800),
+		ReserveOutputTokens:        getEnvInt("RESERVE_OUTPUT_TOKENS", 1024),
+		MaxToolResultChars:         getEnvInt("MAX_TOOL_RESULT_CHARS", 8000),
 		MemoryBudgetTokens:         getEnvInt("MEMORY_BUDGET_TOKENS", 400),
 		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
 	}

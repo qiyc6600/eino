@@ -125,6 +125,7 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	}
 	result, _ := r.advance(ctx, ac, state, recorder, options.confirmBeforeExecute, false)
 	result.ContextTokens = tokens
+	result.ActualTokens = state.Usage
 	if result.Status == StatusCompleted {
 		_ = r.memorySvc.ExtractAndSave(ctx, ac.UserID, thread, message)
 	}
@@ -359,6 +360,7 @@ func (r *Runner) ResumeContext(parent context.Context, ac *auth.AuthContext, id 
 		result.Events = earlier
 	} else {
 		result, next = r.advance(ctx, ac, state, ContinueEventRecorder(req.RunID, earlier), false, r.resumePublisher != nil)
+		result.ActualTokens = state.Usage
 	}
 	req.State, err = state.Serialize()
 	if err != nil {

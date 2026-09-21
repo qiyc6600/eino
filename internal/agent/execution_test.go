@@ -127,6 +127,99 @@ func mustInterrupt(t *testing.T, result ChatRunResult) string {
 	return result.Interrupt.InterruptID
 }
 
+// TestExecution_CapsToolResults asserts one oversized tool result cannot flood
+// the conversation history.
+func TestExecution_CapsToolResults(t *testing.T) {
+	huge := strings.Repeat("x", 5000)
+	registry := tools.NewToolRegistry()
+	if err := registry.Register(tools.RegisteredTool{
+		Meta: tools.ToolMeta{Name: "big"},
+		Fn: func(*auth.ToolIdentity, string) tools.ToolResult {
+			return tools.SuccessResult("big", huge)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entry := &DispatchEntry{Info: &schema.ToolInfo{Name: "big", Desc: "returns a lot"}, ToolName: "big"}
+
+	r := testRuntime(t, sequence("big"), registry, []*DispatchEntry{entry}, "")
+	r.steppedRunner.SetMaxToolResultChars(200)
+
+	result := r.Chat(testIdentity(), "thread", "run the big tool")
+	if result.Status != StatusCompleted {
+		t.Fatalf("run failed: %+v", result)
+	}
+
+	var toolContent string
+	for _, msg := range r.GetThreadMessages("u_admin", "thread") {
+		if msg.Role == schema.Tool {
+			toolContent = msg.Content
+		}
+	}
+	if toolContent == "" {
+		t.Fatal("no tool message was recorded")
+	}
+	if len(toolContent) > 400 {
+		t.Fatalf("tool result was not capped: %d chars", len(toolContent))
+	}
+	if !strings.Contains(toolContent, "截断") {
+		t.Fatalf("capped result should say it was truncated: %q", toolContent)
+	}
+}
+
+// TestExecution_ReportsProviderUsage asserts the provider's own token counts
+// reach the caller instead of being discarded.
+func TestExecution_ReportsProviderUsage(t *testing.T) {
+	r := testRuntime(t, NewMockChatModel(), tools.NewToolRegistry(), nil, "")
+
+	result := r.Chat(testIdentity(), "thread", "你好")
+	if result.Status != StatusCompleted {
+		t.Fatalf("run failed: %+v", result)
+	}
+	if result.ActualTokens == nil {
+		t.Fatal("expected provider-reported usage to be surfaced")
+	}
+	if result.ActualTokens.Calls == 0 || result.ActualTokens.LastPromptTokens <= 0 {
+		t.Fatalf("unexpected usage: %+v", result.ActualTokens)
+	}
+	if result.ActualTokens.TotalTokens < result.ActualTokens.LastPromptTokens {
+		t.Fatalf("total should cover the prompt: %+v", result.ActualTokens)
+	}
+}
+
+// TestExecution_ContextBudgetAccountsForToolSchemas asserts the reported context
+// size includes the tool definitions, which are resent on every call.
+func TestExecution_ContextBudgetAccountsForToolSchemas(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	if err := registry.Register(tools.RegisteredTool{
+		Meta: tools.ToolMeta{Name: "noop", Description: strings.Repeat("a tool that does nothing ", 20)},
+		Fn:   func(*auth.ToolIdentity, string) tools.ToolResult { return tools.SuccessResult("noop", "ok") },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entry := &DispatchEntry{
+		Info:     &schema.ToolInfo{Name: "noop", Desc: strings.Repeat("a tool that does nothing ", 20)},
+		ToolName: "noop",
+	}
+	r := testRuntime(t, NewMockChatModel(), registry, []*DispatchEntry{entry}, "")
+	// Token info is only produced when a summarizer is configured.
+	r.summarizer = contextmgr.NewSummarizer(contextmgr.NewSimpleTokenCounter(), 0.8, 200, NewMockChatModel())
+	if r.steppedRunner.ToolSchemaTokens() <= 0 {
+		t.Fatal("expected bound tool definitions to carry a token cost")
+	}
+
+	result := r.Chat(testIdentity(), "thread", "你好")
+	if result.ContextTokens == nil {
+		t.Fatal("expected context token info")
+	}
+	// Without the tool schemas this number would be lower; the point is that the
+	// reported size is not just the message text.
+	if result.ContextTokens.Current <= r.steppedRunner.ToolSchemaTokens() {
+		t.Fatalf("context %d does not account for tool schemas %d",
+			result.ContextTokens.Current, r.steppedRunner.ToolSchemaTokens())
+	}
+}
+
 // TestExecution_CompactionKeepsFullHistory asserts that compaction only changes
 // what the model sees: the thread store must keep the original turns so a later
 // summary never replaces the conversation it summarizes.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 )
 
 // MockChatModel implements model.ToolCallingChatModel for demo purposes.
@@ -108,7 +109,11 @@ func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 	if err != nil {
 		return nil, err
 	}
+	usage := mockUsageFor(input, msg)
 	if msg == nil || msg.Content == "" {
+		if msg != nil {
+			msg.ResponseMeta = &schema.ResponseMeta{Usage: usage}
+		}
 		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 	}
 
@@ -122,7 +127,12 @@ func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 		if end > len(runes) {
 			end = len(runes)
 		}
-		chunks = append(chunks, schema.AssistantMessage(string(runes[start:end]), nil))
+		chunk := schema.AssistantMessage(string(runes[start:end]), nil)
+		if len(chunks) == 0 {
+			// ConcatMessages merges usage across chunks, so one carrier suffices.
+			chunk.ResponseMeta = &schema.ResponseMeta{Usage: usage}
+		}
+		chunks = append(chunks, chunk)
 		if mockStreamChunkDelay > 0 {
 			select {
 			case <-ctx.Done():
@@ -132,6 +142,23 @@ func (m *MockChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 		}
 	}
 	return schema.StreamReaderFromArray(chunks), nil
+}
+
+// mockUsageFor reports a plausible token count so the provider-usage path is
+// exercised without a real provider. It uses the same heuristic as the local
+// counter, which is what a demo needs: numbers that look right and move.
+func mockUsageFor(input []*schema.Message, output *schema.Message) *schema.TokenUsage {
+	counter := contextmgr.NewSimpleTokenCounter()
+	prompt := counter.CountMessages(einoToContextMessages(input))
+	completion := 0
+	if output != nil {
+		completion = counter.CountMessages(einoToContextMessages([]*schema.Message{output}))
+	}
+	return &schema.TokenUsage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      prompt + completion,
+	}
 }
 
 // WithTools implements model.ToolCallingChatModel.WithTools.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
@@ -34,6 +35,9 @@ type ChatRunResult struct {
 	Events        []Event    `json:"events,omitempty"`
 	RoutedAgent   string     `json:"routed_agent,omitempty"`
 	ContextTokens *TokenInfo `json:"context_tokens,omitempty"`
+	// ActualTokens carries provider-reported usage when the model supplies it,
+	// so the UI can show the estimate next to the real count.
+	ActualTokens *UsageInfo `json:"actual_tokens,omitempty"`
 }
 
 // TokenInfo shows the context window usage for the current turn.
@@ -42,6 +46,29 @@ type TokenInfo struct {
 	Threshold  int  `json:"threshold"`            // compression trigger threshold
 	Max        int  `json:"max"`                  // context window limit
 	Compressed bool `json:"compressed,omitempty"` // true if compression was applied
+}
+
+// UsageInfo records provider-reported token usage for a run. TokenInfo.Current is
+// a local estimate; this is what the provider actually counted and billed.
+type UsageInfo struct {
+	// LastPromptTokens is the prompt size reported by the most recent model call
+	// — the current context occupancy as the provider sees it.
+	LastPromptTokens int `json:"last_prompt_tokens"`
+	// CompletionTokens and TotalTokens accumulate across every call in the run.
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	Calls            int `json:"calls"`
+}
+
+// recordUsage accumulates provider-reported usage from one model response.
+func (u *UsageInfo) recordUsage(usage *schema.TokenUsage) {
+	if usage == nil {
+		return
+	}
+	u.LastPromptTokens = usage.PromptTokens
+	u.CompletionTokens += usage.CompletionTokens
+	u.TotalTokens += usage.TotalTokens
+	u.Calls++
 }
 
 // InterruptPlanStep is one planned action shown on node-level approval cards.
@@ -137,6 +164,44 @@ type Runner struct {
 	resumePublisher    ResumePublisher
 	threads            ThreadStore // per-user conversation threads
 	maxTokens          int
+	// toolSchemaTokens is the request overhead of the tool definitions bound to
+	// the model. It is resent on every call, so it is counted once per runner and
+	// refreshed when the model (and therefore the binding) is swapped. Atomic so
+	// budget reads stay lock-free on the request path.
+	toolSchemaTokens atomic.Int64
+	// reserveOutputTokens is the slice of the window held back for the answer.
+	reserveOutputTokens atomic.Int64
+}
+
+// minUsableContextTokens keeps a pathological configuration — reserve plus tool
+// schemas exceeding the window — from starving the model of any context.
+const minUsableContextTokens = 256
+
+// baseContextTokens is what every request carries before its messages: the bound
+// tool schemas plus the space reserved for the answer. Both are invisible to a
+// counter that only walks messages.
+func (r *Runner) baseContextTokens() int {
+	return int(r.toolSchemaTokens.Load() + r.reserveOutputTokens.Load())
+}
+
+// usableContextTokens is the share of the window available to messages, and the
+// budget trimming and compaction are measured against.
+func (r *Runner) usableContextTokens() int {
+	usable := r.maxTokens - r.baseContextTokens()
+	if usable < minUsableContextTokens {
+		usable = minUsableContextTokens
+	}
+	return usable
+}
+
+// SetReserveOutputTokens sets how much of the window is held back for the model's
+// answer, so a request never fills the window so completely that there is no room
+// to reply.
+func (r *Runner) SetReserveOutputTokens(n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.reserveOutputTokens.Store(int64(n))
 }
 
 // NewRunner creates a new Runner.
@@ -150,7 +215,7 @@ func NewRunner(
 	summarizer *contextmgr.Summarizer,
 	maxTokens int,
 ) *Runner {
-	return &Runner{
+	r := &Runner{
 		supervisor:    supervisor,
 		steppedRunner: steppedRunner,
 		hitlSvc:       hitlSvc,
@@ -166,6 +231,17 @@ func NewRunner(
 		threads:       newThreadStore(),
 		maxTokens:     maxTokens,
 	}
+	r.refreshToolSchemaTokens()
+	return r
+}
+
+// refreshToolSchemaTokens re-reads the bound tool definitions' request overhead.
+func (r *Runner) refreshToolSchemaTokens() {
+	if r.steppedRunner == nil {
+		r.toolSchemaTokens.Store(0)
+		return
+	}
+	r.toolSchemaTokens.Store(int64(r.steppedRunner.ToolSchemaTokens()))
 }
 
 // SetSupervisor replaces the supervisor agent (used for model switching).
@@ -184,6 +260,7 @@ func (r *Runner) SetSteppedRunner(sr *SteppedRunner) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.steppedRunner = sr
+	r.refreshToolSchemaTokens()
 }
 
 // UseFileThreads swaps in a file-persisted thread store so conversation
@@ -413,8 +490,21 @@ func (r *Runner) ThreadTokenInfo(userID string, roles []string, threadID string)
 
 	ctxMsgs := einoToContextMessages(messages)
 	tokens := r.summarizer.CountTokens(ctxMsgs)
-	threshold := int(float64(r.maxTokens) * r.summarizer.ThresholdRatio())
-	return &TokenInfo{Current: tokens, Threshold: threshold, Max: r.maxTokens}
+	return r.tokenInfo(tokens, false)
+}
+
+// tokenInfo builds the reported context snapshot. Current and Threshold include
+// the base overhead (tool schemas plus the reserved answer space) so the UI
+// shows what the provider actually receives, while the compaction budget is
+// measured against the message share alone.
+func (r *Runner) tokenInfo(messageTokens int, compressed bool) *TokenInfo {
+	base := r.baseContextTokens()
+	return &TokenInfo{
+		Current:    messageTokens + base,
+		Threshold:  base + int(float64(r.usableContextTokens())*r.summarizer.ThresholdRatio()),
+		Max:        r.maxTokens,
+		Compressed: compressed,
+	}
 }
 
 // isRateLimitError checks if the error message indicates a 429 rate limit.
@@ -435,25 +525,26 @@ func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Messag
 		// Still compute token info for display even when skipping compression
 		if r.summarizer != nil {
 			ctxMsgs := einoToContextMessages(messages)
-			tokens := r.summarizer.CountTokens(ctxMsgs)
-			threshold := int(float64(r.maxTokens) * r.summarizer.ThresholdRatio())
-			return messages, &TokenInfo{Current: tokens, Threshold: threshold, Max: r.maxTokens}
+			return messages, r.tokenInfo(r.summarizer.CountTokens(ctxMsgs), false)
 		}
 		return messages, nil
 	}
 
+	// Compaction is measured against the message share of the window: the tool
+	// schemas and the reserved answer space are not something trimming can free.
+	usable := r.usableContextTokens()
+
 	// Convert Eino schema.Message -> contextmgr.Message
 	ctxMsgs := einoToContextMessages(messages)
 	currentTokens := r.summarizer.CountTokens(ctxMsgs)
-	threshold := int(float64(r.maxTokens) * r.summarizer.ThresholdRatio())
 
 	// Check if compression is needed
-	if !r.summarizer.ShouldSummarize(ctxMsgs, r.maxTokens) {
-		return messages, &TokenInfo{Current: currentTokens, Threshold: threshold, Max: r.maxTokens}
+	if !r.summarizer.ShouldSummarize(ctxMsgs, usable) {
+		return messages, r.tokenInfo(currentTokens, false)
 	}
 
 	// Compress using LLM-based summarization (with rule-based fallback)
-	compressed := r.summarizer.Compress(ctx, ctxMsgs, r.maxTokens)
+	compressed := r.summarizer.Compress(ctx, ctxMsgs, usable)
 	compressedTokens := r.summarizer.CountTokens(compressed)
 
 	// Record the compression event
@@ -467,7 +558,7 @@ func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Messag
 	}
 
 	// Convert back: contextmgr.Message -> Eino schema.Message
-	return contextToEinoMessages(compressed), &TokenInfo{Current: compressedTokens, Threshold: threshold, Max: r.maxTokens, Compressed: true}
+	return contextToEinoMessages(compressed), r.tokenInfo(compressedTokens, true)
 }
 
 // einoToContextMessages converts Eino schema.Message slice to contextmgr.Message slice.

@@ -62,6 +62,37 @@ func TestSimpleTokenCounter_MixedContent(t *testing.T) {
 	}
 }
 
+// Tool call arguments are part of every request that carries a tool call, and
+// are usually the largest part of it.
+func TestSimpleTokenCounter_CountsToolCallArguments(t *testing.T) {
+	counter := NewSimpleTokenCounter()
+	plain := Message{Role: "assistant", Content: "ok"}
+	withCall := Message{
+		Role:    "assistant",
+		Content: "ok",
+		ToolCalls: []ToolCallRef{{
+			ID:        "call_1",
+			Name:      "query_order",
+			Arguments: `{"order_id":"A-1001","include_history":true,"note":"请一并返回最近三个月的物流轨迹"}`,
+		}},
+	}
+	if counter.CountMessage(withCall) <= counter.CountMessage(plain) {
+		t.Fatalf("tool call arguments must add to the count: with=%d plain=%d",
+			counter.CountMessage(withCall), counter.CountMessage(plain))
+	}
+}
+
+// A tool result message carries the tool name alongside its payload.
+func TestSimpleTokenCounter_CountsToolName(t *testing.T) {
+	counter := NewSimpleTokenCounter()
+	unnamed := Message{Role: "tool", Content: "done"}
+	named := Message{Role: "tool", Content: "done", Name: "query_order"}
+	if counter.CountMessage(named) <= counter.CountMessage(unnamed) {
+		t.Fatalf("tool name must add to the count: named=%d unnamed=%d",
+			counter.CountMessage(named), counter.CountMessage(unnamed))
+	}
+}
+
 func TestCountText(t *testing.T) {
 	count := CountText("Hello world")
 	if count <= 0 {

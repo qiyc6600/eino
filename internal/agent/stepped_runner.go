@@ -12,11 +12,16 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/example/agent-eino-demo/internal/auth"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 	"github.com/example/agent-eino-demo/internal/hitl"
 	"github.com/example/agent-eino-demo/internal/memory"
 	"github.com/example/agent-eino-demo/internal/tools"
 	"github.com/google/uuid"
 )
+
+// defaultMaxToolResultChars caps a single tool result before it enters the
+// conversation, so one verbose response cannot crowd out the rest of the window.
+const defaultMaxToolResultChars = 8000
 
 // DispatchEntry represents a single entry in the SteppedRunner's dispatch table.
 // It abstracts over "real tool" and "sub-agent tool" uniformly.
@@ -68,6 +73,9 @@ type SteppedRunState struct {
 	Answer           string          `json:"answer"`             // final answer when done
 	RunID            string          `json:"run_id"`             // run identifier
 	ThreadID         string          `json:"thread_id"`          // thread identifier
+	// Usage accumulates provider-reported token counts across the run's model
+	// calls, when the provider reports them.
+	Usage *UsageInfo `json:"usage,omitempty"`
 }
 
 // appendMessage records a message in the complete history and, when this run
@@ -130,11 +138,35 @@ type SteppedRunner struct {
 	maxSteps    int
 	dispatchMap map[string]*DispatchEntry // name -> entry for O(1) dispatch
 	toolInfos   []*schema.ToolInfo        // ordered list for LLM binding
+	// toolSchemaTokens is what toolInfos add to every request; computed once
+	// because the same definitions are resent on each model call.
+	toolSchemaTokens int
+	// maxToolResultChars caps a single tool result before it enters the history.
+	maxToolResultChars int
+}
+
+// ToolSchemaTokens reports the request overhead of the bound tool definitions.
+func (r *SteppedRunner) ToolSchemaTokens() int {
+	return r.toolSchemaTokens
+}
+
+// SetMaxToolResultChars caps how much of a single tool result enters the
+// conversation. A non-positive value disables the cap.
+func (r *SteppedRunner) SetMaxToolResultChars(n int) {
+	r.maxToolResultChars = n
+}
+
+// capToolResult truncates an oversized tool result so one verbose response
+// cannot crowd out the rest of the window.
+func (r *SteppedRunner) capToolResult(content string) string {
+	if r.maxToolResultChars <= 0 || len(content) <= r.maxToolResultChars {
+		return content
+	}
+	return content[:r.maxToolResultChars] + fmt.Sprintf("\n…（结果已截断，原始长度 %d 字符）", len(content))
 }
 
 // NewSteppedRunner creates a new stepped ReAct runner.
-func NewSteppedRunner(
-	chatModel model.ToolCallingChatModel,
+func NewSteppedRunner(chatModel model.ToolCallingChatModel,
 	registry *tools.ToolRegistry,
 	hitlSvc *hitl.Service,
 	maxSteps int,
@@ -158,15 +190,17 @@ func NewSteppedRunner(
 	}
 
 	return &SteppedRunner{
-		chatModel:   chatModel,
-		toolModel:   toolModel,
-		registry:    registry,
-		hitlSvc:     hitlSvc,
-		rbac:        rbac,
-		maxSteps:    maxSteps,
-		retryDelay:  250 * time.Millisecond,
-		dispatchMap: dispatchMap,
-		toolInfos:   toolInfos,
+		chatModel:          chatModel,
+		toolModel:          toolModel,
+		registry:           registry,
+		hitlSvc:            hitlSvc,
+		rbac:               rbac,
+		maxSteps:           maxSteps,
+		retryDelay:         250 * time.Millisecond,
+		dispatchMap:        dispatchMap,
+		toolInfos:          toolInfos,
+		toolSchemaTokens:   estimateToolSchemaTokens(toolInfos),
+		maxToolResultChars: defaultMaxToolResultChars,
 	}
 }
 
@@ -238,6 +272,15 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 	}
 
 	state.Step++
+
+	// Provider-reported usage is the only authoritative measure of what the
+	// request cost; the local counter is a heuristic.
+	if usage := messageUsage(resp); usage != nil {
+		if state.Usage == nil {
+			state.Usage = &UsageInfo{}
+		}
+		state.Usage.recordUsage(usage)
+	}
 
 	// Convert LLM response to our format
 	respMsg := SchemaMessage{
@@ -439,7 +482,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		// Append tool result as a tool message
 		toolMsg := SchemaMessage{
 			Role:       "tool",
-			Content:    toolResult,
+			Content:    r.capToolResult(toolResult),
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 		}
@@ -490,7 +533,7 @@ func (r *SteppedRunner) executeSubAgentTool(ctx context.Context, state *SteppedR
 			return state, interrupt, err
 		}
 	}
-	state.appendMessage(SchemaMessage{Role: "tool", Content: child.Answer, ToolCallID: tc.ID, Name: tc.Name})
+	state.appendMessage(SchemaMessage{Role: "tool", Content: r.capToolResult(child.Answer), ToolCallID: tc.ID, Name: tc.Name})
 	state.PendingToolCalls = state.PendingToolCalls[1:]
 	delete(state.Children, tc.ID)
 	return state, nil, nil
@@ -564,7 +607,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 				return state, err
 			}
 		}
-		state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: content})
+		state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: r.capToolResult(content)})
 		state.PendingToolCalls = append(state.PendingToolCalls[:i], state.PendingToolCalls[i+1:]...)
 		return state, nil
 	}
@@ -776,4 +819,34 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// estimateToolSchemaTokens approximates what the bound tool definitions add to
+// every request. Providers bill for them on each call, and they are invisible to
+// a counter that only walks messages.
+func estimateToolSchemaTokens(infos []*schema.ToolInfo) int {
+	if len(infos) == 0 {
+		return 0
+	}
+	counter := contextmgr.NewSimpleTokenCounter()
+	total := 0
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		total += counter.CountMessage(contextmgr.Message{Role: "system", Content: info.Name + " " + info.Desc})
+		if info.ParamsOneOf == nil {
+			continue
+		}
+		params, err := info.ParamsOneOf.ToJSONSchema()
+		if err != nil || params == nil {
+			continue
+		}
+		raw, err := json.Marshal(params)
+		if err != nil {
+			continue
+		}
+		total += counter.CountMessage(contextmgr.Message{Role: "system", Content: string(raw)})
+	}
+	return total
 }

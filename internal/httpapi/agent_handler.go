@@ -122,6 +122,7 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 			"runId":         result.RunID,
 			"events":        result.Events,
 			"contextTokens": result.ContextTokens,
+			"actualTokens":  result.ActualTokens,
 		}))
 		flusher.Flush()
 		return
@@ -146,6 +147,7 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 		"runId":         result.RunID,
 		"events":        result.Events,
 		"contextTokens": result.ContextTokens,
+		"actualTokens":  result.ActualTokens,
 		"streamed":      sink.deltas > 0,
 	}))
 	flusher.Flush()

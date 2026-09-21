@@ -24,9 +24,24 @@ func NewSimpleTokenCounter() *SimpleTokenCounter {
 	}
 }
 
+// toolCallOverhead approximates the JSON scaffolding around one tool call
+// (id, type, function wrapper) beyond its name and arguments.
+const toolCallOverhead = 6
+
 // CountMessage estimates the token count for a single message.
 func (c *SimpleTokenCounter) CountMessage(msg Message) int {
-	return c.estimateTokens(msg.Content) + c.RoleOverhead
+	total := c.estimateTokens(msg.Content) + c.RoleOverhead
+	// Tool call names and arguments are part of the request the provider bills
+	// for. Counting only Content understates every assistant turn that calls a
+	// tool, which is exactly the turn that grows fastest in a ReAct loop.
+	for _, tc := range msg.ToolCalls {
+		total += c.estimateTokens(tc.Name) + c.estimateTokens(tc.Arguments) + toolCallOverhead
+	}
+	// Tool result messages carry the tool name alongside the payload.
+	if msg.Name != "" {
+		total += c.estimateTokens(msg.Name)
+	}
+	return total
 }
 
 // CountMessages estimates the total token count for multiple messages.

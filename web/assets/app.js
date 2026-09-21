@@ -594,7 +594,7 @@ async function chatStream(threadId, message) {
 
                                 // Update context token bar
                                 if (data.contextTokens) {
-                                    updateTokenBar(data.contextTokens);
+                                    updateTokenBar(data.contextTokens, data.actualTokens);
                                 }
                             } else if (eventType === 'error') {
                                 finalizeStreamingMessage(threadId, `❌ ${data.error}`);
@@ -1171,7 +1171,7 @@ async function refreshTokenBar(threadId = currentThread) {
     }
 }
 
-function updateTokenBar(info) {
+function updateTokenBar(info, actualUsage) {
     const fill = document.getElementById('tokenBarFill');
     const text = document.getElementById('tokenBarText');
     const thresholdMark = document.getElementById('tokenBarThreshold');
@@ -1200,5 +1200,11 @@ function updateTokenBar(info) {
     }
 
     const compressedBadge = info.compressed ? ' <span class="compressed-badge">📦 已压缩</span>' : '';
-    text.innerHTML = `上下文: ${current} / ${max} tokens（阈值 ${threshold}）${compressedBadge}`;
+    // The bar shows a local estimate; the provider's own count is the authority
+    // when it reports one.
+    let actualNote = '';
+    if (actualUsage && actualUsage.last_prompt_tokens) {
+        actualNote = ` ｜ 实际 ${actualUsage.last_prompt_tokens}（${actualUsage.calls} 次调用，输出 ${actualUsage.completion_tokens}）`;
+    }
+    text.innerHTML = `上下文: ${current} / ${max} tokens（阈值 ${threshold}）${compressedBadge}${actualNote}`;
 }

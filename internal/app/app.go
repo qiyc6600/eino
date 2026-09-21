@@ -189,10 +189,12 @@ func NewApp(cfg *Config) *App {
 	}
 
 	steppedRunner := agent.NewSteppedRunner(chatModel, toolRegistry, hitlSvc, 20,
-		buildDispatchEntries(supervisor, toolRegistry, chatModel, hitlSvc, rbac, ctx), rbac)
+		buildDispatchEntries(supervisor, toolRegistry, chatModel, hitlSvc, rbac, ctx, cfg.MaxToolResultChars), rbac)
+	steppedRunner.SetMaxToolResultChars(cfg.MaxToolResultChars)
 	// Node-level interrupt is available but not enabled by default.
 	// It is activated by the explicit per-request confirmBeforeExecute flag.
 	runner := agent.NewRunner(supervisor, steppedRunner, hitlSvc, toolRegistry, rbac, memorySvc, summarizer, cfg.MaxTokens)
+	runner.SetReserveOutputTokens(cfg.ReserveOutputTokens)
 	if pg != nil {
 		runner.UseRunStore(pg.Runs, cfg.RunEventRetention)
 	}
@@ -303,7 +305,8 @@ func (a *App) SwitchModel(profileID, apiKey string) error {
 
 	// Rebuild SteppedRunner with new dispatch entries
 	newSteppedRunner := agent.NewSteppedRunner(newModel, a.Registry, a.HITLSvc, 20,
-		buildDispatchEntries(supervisor, a.Registry, newModel, a.HITLSvc, a.RBAC, ctx), a.RBAC)
+		buildDispatchEntries(supervisor, a.Registry, newModel, a.HITLSvc, a.RBAC, ctx, a.Config.MaxToolResultChars), a.RBAC)
+	newSteppedRunner.SetMaxToolResultChars(a.Config.MaxToolResultChars)
 	a.Runner.SetSteppedRunner(newSteppedRunner)
 
 	// Update summarizer
@@ -384,6 +387,7 @@ func buildDispatchEntries(
 	hitlSvc *hitl.Service,
 	rbac *auth.RBACManager,
 	ctx context.Context,
+	maxToolResultChars int,
 ) []*agent.DispatchEntry {
 	wrappers := supervisor.AgentToolWrappers()
 	if len(wrappers) > 0 {
@@ -412,7 +416,9 @@ func buildDispatchEntries(
 
 			// Create a SteppedRunner for this sub-agent
 			if len(subEntries) > 0 {
-				wrapper.SetSteppedRunner(agent.NewSteppedRunner(chatModel, registry, hitlSvc, 20, subEntries, rbac))
+				subRunner := agent.NewSteppedRunner(chatModel, registry, hitlSvc, 20, subEntries, rbac)
+				subRunner.SetMaxToolResultChars(maxToolResultChars)
+				wrapper.SetSteppedRunner(subRunner)
 			}
 
 			entries = append(entries, &agent.DispatchEntry{
