@@ -113,8 +113,16 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	if options.sink != nil {
 		recorder.SetSink(options.sink)
 	}
-	messages, tokens := r.compressMessages(ctx, sanitizeMessages(messages), recorder)
-	state := &SteppedRunState{RunID: id, ThreadID: thread, Messages: toSchemaMessages(messages)}
+	// Compact only what is sent to the model. The complete exchange is kept in
+	// Messages so persisting this run never replaces the conversation with its
+	// summary — and so the next turn compacts the original text, not a summary
+	// of a summary.
+	full := sanitizeMessages(messages)
+	compacted, tokens := r.compressMessages(ctx, full, recorder)
+	state := &SteppedRunState{RunID: id, ThreadID: thread, Messages: toSchemaMessages(full)}
+	if tokens != nil && tokens.Compressed {
+		state.ModelContext = toSchemaMessages(compacted)
+	}
 	result, _ := r.advance(ctx, ac, state, recorder, options.confirmBeforeExecute, false)
 	result.ContextTokens = tokens
 	if result.Status == StatusCompleted {

@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/example/agent-eino-demo/internal/auth"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 	"github.com/example/agent-eino-demo/internal/hitl"
 	"github.com/example/agent-eino-demo/internal/memory"
 	"github.com/example/agent-eino-demo/internal/tools"
@@ -124,6 +125,68 @@ func mustInterrupt(t *testing.T, result ChatRunResult) string {
 		t.Fatalf("expected actionable interrupt: %+v", result)
 	}
 	return result.Interrupt.InterruptID
+}
+
+// TestExecution_CompactionKeepsFullHistory asserts that compaction only changes
+// what the model sees: the thread store must keep the original turns so a later
+// summary never replaces the conversation it summarizes.
+func TestExecution_CompactionKeepsFullHistory(t *testing.T) {
+	const marker = "ALPHA-MARKER-001"
+
+	var mu sync.Mutex
+	sawSummary := false
+	m := scripted(func(_ context.Context, msgs []*schema.Message) (*schema.Message, error) {
+		mu.Lock()
+		for _, msg := range msgs {
+			if strings.Contains(msg.Content, "历史摘要") {
+				sawSummary = true
+			}
+		}
+		mu.Unlock()
+		return schema.AssistantMessage("好的", nil), nil
+	})
+
+	r := testRuntime(t, m, tools.NewToolRegistry(), nil, "")
+	// A very low trigger ratio forces compaction on the third turn; the window
+	// itself stays generous so the summary survives the final token trim and
+	// actually reaches the model.
+	r.maxTokens = 500
+	r.summarizer = contextmgr.NewSummarizer(contextmgr.NewSimpleTokenCounter(), 0.05, 20, m)
+
+	turns := []string{
+		"第一轮：请记住暗号 " + marker,
+		"第二轮：再聊一点别的内容，让对话变长一些",
+		"第三轮：继续补充，直到上下文需要压缩为止",
+	}
+	for i, turn := range turns {
+		result := r.Chat(testIdentity(), "thread", turn)
+		if result.Status != StatusCompleted {
+			t.Fatalf("turn %d failed: %+v", i+1, result)
+		}
+	}
+
+	mu.Lock()
+	compacted := sawSummary
+	mu.Unlock()
+	if !compacted {
+		t.Fatal("expected the model to receive a summary once the context exceeded the threshold")
+	}
+
+	// The complete exchange must survive in the thread store.
+	var joined strings.Builder
+	for _, msg := range r.GetThreadMessages("u_admin", "thread") {
+		joined.WriteString(msg.Content)
+		joined.WriteString("\n")
+	}
+	history := joined.String()
+	if !strings.Contains(history, marker) {
+		t.Fatalf("thread history lost the original turn after compaction:\n%s", history)
+	}
+	for _, turn := range turns {
+		if !strings.Contains(history, turn) {
+			t.Fatalf("thread history is missing %q:\n%s", turn, history)
+		}
+	}
 }
 
 func TestExecution_RateLimitBoundedAndErrorsReported(t *testing.T) {

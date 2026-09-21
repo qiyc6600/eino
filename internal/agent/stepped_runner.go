@@ -51,14 +51,41 @@ func isSubAgentInterrupt(err error) bool {
 // SteppedRunState holds the execution state of a stepped ReAct loop.
 // This state can be serialized to a Checkpoint for interrupt/resume.
 type SteppedRunState struct {
-	Children         map[string]*SteppedRunState `json:"children,omitempty"`
-	Step             int                         `json:"step"`               // current iteration (0-based)
-	Messages         []SchemaMessage             `json:"messages"`           // full conversation history
-	PendingToolCalls []ToolCallInfo              `json:"pending_tool_calls"` // tool calls awaiting execution
-	Done             bool                        `json:"done"`               // whether the loop has completed
-	Answer           string                      `json:"answer"`             // final answer when done
-	RunID            string                      `json:"run_id"`             // run identifier
-	ThreadID         string                      `json:"thread_id"`          // thread identifier
+	Children map[string]*SteppedRunState `json:"children,omitempty"`
+	Step     int                         `json:"step"` // current iteration (0-based)
+	// Messages is the authoritative, complete conversation history. It is what
+	// gets persisted to the thread store, so compaction never destroys the
+	// original exchange.
+	Messages []SchemaMessage `json:"messages"`
+	// ModelContext is the compacted view of Messages that was sent to the model
+	// for this run (summary plus recent turns). It is nil when the run was not
+	// compacted, in which case Messages is sent as-is. It is never persisted to
+	// the thread store — only carried through checkpoints so a resume continues
+	// against the same context.
+	ModelContext     []SchemaMessage `json:"model_context,omitempty"`
+	PendingToolCalls []ToolCallInfo  `json:"pending_tool_calls"` // tool calls awaiting execution
+	Done             bool            `json:"done"`               // whether the loop has completed
+	Answer           string          `json:"answer"`             // final answer when done
+	RunID            string          `json:"run_id"`             // run identifier
+	ThreadID         string          `json:"thread_id"`          // thread identifier
+}
+
+// appendMessage records a message in the complete history and, when this run
+// was compacted, in the model-facing context as well — keeping the two in step.
+func (s *SteppedRunState) appendMessage(msg SchemaMessage) {
+	s.Messages = append(s.Messages, msg)
+	if s.ModelContext != nil {
+		s.ModelContext = append(s.ModelContext, msg)
+	}
+}
+
+// modelMessages returns the context to send to the model: the compacted view
+// when this run was compacted, otherwise the complete history.
+func (s *SteppedRunState) modelMessages() []SchemaMessage {
+	if len(s.ModelContext) > 0 {
+		return s.ModelContext
+	}
+	return s.Messages
 }
 
 // SchemaMessage is a serializable version of schema.Message.
@@ -202,7 +229,7 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 		return state, nil, fmt.Errorf("达到最大迭代次数限制")
 	}
 
-	einoMsgs := fromSchemaMessages(state.Messages)
+	einoMsgs := fromSchemaMessages(state.modelMessages())
 
 	// Step 1: Call LLM (with tools bound)
 	resp, err := r.generate(ctx, einoMsgs, recorder)
@@ -224,7 +251,7 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 			Arguments: tc.Function.Arguments,
 		})
 	}
-	state.Messages = append(state.Messages, respMsg)
+	state.appendMessage(respMsg)
 
 	// Step 2: Check if LLM wants to call tools
 	if len(resp.ToolCalls) == 0 {
@@ -308,7 +335,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 				ToolCallID: tc.ID,
 				Name:       tc.Name,
 			}
-			state.Messages = append(state.Messages, toolMsg)
+			state.appendMessage(toolMsg)
 			state.PendingToolCalls = state.PendingToolCalls[1:]
 			continue
 		}
@@ -337,7 +364,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 						ToolCallID: tc.ID,
 						Name:       tc.Name,
 					}
-					state.Messages = append(state.Messages, toolMsg)
+					state.appendMessage(toolMsg)
 					if recorder != nil {
 						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied sub-agent %s", tc.Name), map[string]any{
 							"agent":  tc.Name,
@@ -357,7 +384,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 						ToolCallID: tc.ID,
 						Name:       tc.Name,
 					}
-					state.Messages = append(state.Messages, toolMsg)
+					state.appendMessage(toolMsg)
 					if recorder != nil {
 						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied tool %s", toolName), map[string]any{
 							"tool":   toolName,
@@ -416,7 +443,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
 		}
-		state.Messages = append(state.Messages, toolMsg)
+		state.appendMessage(toolMsg)
 
 		if recorder != nil {
 			recorder.Record(EventToolCallEnd, fmt.Sprintf("Tool %s executed", tc.Name), map[string]any{
@@ -463,7 +490,7 @@ func (r *SteppedRunner) executeSubAgentTool(ctx context.Context, state *SteppedR
 			return state, interrupt, err
 		}
 	}
-	state.Messages = append(state.Messages, SchemaMessage{Role: "tool", Content: child.Answer, ToolCallID: tc.ID, Name: tc.Name})
+	state.appendMessage(SchemaMessage{Role: "tool", Content: child.Answer, ToolCallID: tc.ID, Name: tc.Name})
 	state.PendingToolCalls = state.PendingToolCalls[1:]
 	delete(state.Children, tc.ID)
 	return state, nil, nil
@@ -509,7 +536,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 	if interrupt.Type == hitl.InterruptTypeNode {
 		if !approved {
 			for _, tc := range state.PendingToolCalls {
-				state.Messages = append(state.Messages, SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: "用户拒绝执行计划：" + reason})
+				state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: "用户拒绝执行计划：" + reason})
 			}
 			state.PendingToolCalls = nil
 		}
@@ -537,7 +564,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 				return state, err
 			}
 		}
-		state.Messages = append(state.Messages, SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: content})
+		state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: content})
 		state.PendingToolCalls = append(state.PendingToolCalls[:i], state.PendingToolCalls[i+1:]...)
 		return state, nil
 	}
