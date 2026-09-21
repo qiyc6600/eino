@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestAuthMiddleware_ValidBearer(t *testing.T) {
@@ -28,7 +29,7 @@ func TestAuthMiddleware_ValidBearer(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := AuthMiddleware(svc)(protected)
+	handler := AuthMiddleware(svc, SessionCookieConfig{TTL: time.Minute})(protected)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.Header.Set("Authorization", "Bearer "+resp.SessionID)
@@ -50,7 +51,7 @@ func TestAuthMiddleware_MissingSession(t *testing.T) {
 		t.Error("protected handler should not be called without session")
 	})
 
-	handler := AuthMiddleware(svc)(protected)
+	handler := AuthMiddleware(svc, SessionCookieConfig{TTL: time.Minute})(protected)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	w := httptest.NewRecorder()
@@ -71,7 +72,7 @@ func TestAuthMiddleware_InvalidSession(t *testing.T) {
 		t.Error("protected handler should not be called with invalid session")
 	})
 
-	handler := AuthMiddleware(svc)(protected)
+	handler := AuthMiddleware(svc, SessionCookieConfig{TTL: time.Minute})(protected)
 
 	req := httptest.NewRequest("GET", "/api/test", nil)
 	req.Header.Set("Authorization", "Bearer fake_session_id")
@@ -99,7 +100,7 @@ func TestAuthMiddleware_QueryParamRejected(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := AuthMiddleware(svc)(protected)
+	handler := AuthMiddleware(svc, SessionCookieConfig{TTL: time.Minute})(protected)
 
 	req := httptest.NewRequest("GET", "/api/test?sessionId="+resp.SessionID, nil)
 	w := httptest.NewRecorder()

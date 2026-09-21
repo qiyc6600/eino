@@ -39,6 +39,15 @@ body {
     font-size: 14px;
 }
 
+/* Login-page notice. Empty by default, so it takes no space until a session
+   expires and the page returns here with a reason. */
+.login-notice {
+    margin-bottom: 12px;
+    font-size: 14px;
+    color: #b45309;
+}
+.login-notice:empty { display: none; }
+
 /* Buttons */
 .btn {
     padding: 8px 16px;

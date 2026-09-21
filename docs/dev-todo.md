@@ -180,5 +180,12 @@
   过程中修正了自己测试的一个弱点：第一版集成测试用 5MB 的 `content`，而字段级上限也会返回 413，所以它**无法区分"上限生效"与"字段检查生效"**——注入"去掉上限"时受保护路由那条照样通过（只有登录路由抓到）。改成"body 超限但每个字段都合法"（超大 `name` + 合法 `content`）后才成为真正的判别性测试。
   未做（评估为低价值）：入站 `Content-Type` 校验（`json.Decode` 本就不看它，不解决实际问题）、chat 消息长度上限（token 预算已处理）、路径参数的 URL 解码（一致性而非安全）。
 
+- 2026-09-22：修会话在固定时刻失效（用户实机报 `unauthorized: missing session`）。
+  **症状分辨**：这条消息来自 `extractSessionID` 返回空——**请求里根本没有凭证**；若是凭证无效，消息会是 `unauthorized: invalid session`。所以不是服务重启（那会是 invalid），而是浏览器没带 Cookie。
+  **根因**：服务器端会话每次校验成功都滑动续期（`SESSION_TTL`，默认 30m），但 `SetSessionCookie` **只在登录时调用一次**，Cookie 的 `MaxAge` 在浏览器侧是绝对时间。于是浏览器在**登录后固定 30 分钟**无条件删掉 Cookie，与用户是否一直在用无关——文档里写的"滑动续期"在浏览器路径上被这个固定 Cookie 寿命完全架空，活跃用户照样被登出。
+  **修复**：`AuthMiddleware` 在每次校验成功后重发 Cookie（在 `next.ServeHTTP` 之前写头，否则 handler 已经写出 body 就太晚）。只对 Cookie 携带的会话重发——用 `Authorization` 头的客户端没有 Cookie 可滑动，给它发一个会凭空造出浏览器凭证。`SessionCookieConfig` 从 `httpapi` 移到 `auth`（中间件在 auth 包里需要它），`httpapi` 保留**类型别名**，因此现有引用与测试零改动。
+  **前端**：401 此前被当作聊天里的错误文本显示（`❌ 请求失败：unauthorized: ...`），用户只能自己猜要重新登录。新增 `handleSessionExpired()`：隐藏主界面、显示登录页、提示"会话已过期，请重新登录"；`api()` 与两个流式路径（`chatStream`/`decideApproval` 直接 fetch、读流，绕不过 `api()`）都接上；`deleteThread` 此前**完全忽略响应**，会话失效时本地删除看着成功而服务端线程还在，也一并修掉。登录成功时清空提示并重置"已处理"标志，否则第二次过期不会再提示。登录接口本身豁免——密码错误也是 401，不该被说成会话过期。
+  **验证**：`TestAuthMiddleware_SlidesTheSessionCookie`（单元：Cookie 会话拿到全额 TTL 的新 Cookie、保留 HttpOnly/Secure/SameSite、Authorization 头不拿 Cookie、被拒请求不拿 Cookie）。实机三项：curl 确认带 Cookie 的认证请求返回 `Set-Cookie ... Max-Age=120` 而用 Authorization 头的不返回；**时序验证**——TTL 设 120 秒，持续活动下 160 秒后仍认证成功（修复前会在第 120 秒被浏览器丢 Cookie）；浏览器里会话失效后发消息 → 主界面隐藏、登录页出现、提示文案正确，重新登录后提示清空且界面恢复。
+
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

@@ -79,9 +79,36 @@ async function api(method, path, body) {
     const resp = await fetch(path, opts);
     const data = await resp.json();
     if (!resp.ok) {
+        // A 401 is not a failed request to report in place — the credential is
+        // gone and every later call will fail the same way. Return to the login
+        // page instead. The login call itself is exempt: a wrong password is also
+        // a 401, and it must not be dressed up as an expired session.
+        if (resp.status === 401 && !path.startsWith('/api/auth/login')) {
+            handleSessionExpired();
+        }
         throw new Error(data.error || `HTTP ${resp.status}`);
     }
     return data;
+}
+
+// handleSessionExpired returns the page to login after a 401.
+//
+// It runs once per expiry: several requests can be in flight when the session
+// dies, and each would otherwise re-show the notice and re-render.
+let sessionExpiredHandled = false;
+function handleSessionExpired() {
+    if (sessionExpiredHandled) return;
+    sessionExpiredHandled = true;
+    currentUser = null;
+    isStreaming = false;
+    setStreamingControls(false);
+    setStreamProgress('');
+    document.getElementById('mainApp').classList.remove('active');
+    document.getElementById('loginPage').classList.add('active');
+    const notice = document.getElementById('loginNotice');
+    if (notice) {
+        notice.textContent = '会话已过期，请重新登录';
+    }
 }
 
 // ========== Login ==========
@@ -91,6 +118,11 @@ async function doLogin() {
     try {
         const data = await api('POST', '/api/auth/login', { username, password });
         currentUser = data.user;
+        // A fresh session clears both the notice and the once-per-expiry flag, so
+        // the next expiry reports itself too.
+        sessionExpiredHandled = false;
+        const notice = document.getElementById('loginNotice');
+        if (notice) notice.textContent = '';
         showMainApp();
     } catch (e) {
         alert('登录失败：' + e.message);
@@ -209,7 +241,12 @@ async function deleteThread(threadId) {
     localStorage.removeItem(cacheKey(threadId));
 
     // Remove from backend
-    try { await fetch(`/api/chat/${threadId}/delete`, { method: 'DELETE', credentials: 'same-origin' }); } catch (e) {}
+    try {
+        const resp = await fetch(`/api/chat/${threadId}/delete`, { method: 'DELETE', credentials: 'same-origin' });
+        // The response used to be ignored, so an expired session made the local
+        // delete look successful while the server kept the thread.
+        if (resp.status === 401) handleSessionExpired();
+    } catch (e) {}
 
     // If deleting current thread, switch to the first one
     if (threadId === currentThread) {
@@ -529,6 +566,12 @@ async function chatStream(threadId, message) {
 
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+            // These two paths read the body as a stream, so they cannot go through
+            // api(); an expired session still has to return the page to login
+            // rather than surface as a chat error.
+            if (resp.status === 401) {
+                handleSessionExpired();
+            }
             throw new Error(err.error || `HTTP ${resp.status}`);
         }
 
@@ -795,6 +838,12 @@ async function decideApproval(interruptId, approved) {
         });
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+            // These two paths read the body as a stream, so they cannot go through
+            // api(); an expired session still has to return the page to login
+            // rather than surface as a chat error.
+            if (resp.status === 401) {
+                handleSessionExpired();
+            }
             throw new Error(err.error || `HTTP ${resp.status}`);
         }
 

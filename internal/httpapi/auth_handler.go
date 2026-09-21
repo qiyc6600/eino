@@ -17,14 +17,10 @@ type AuthHandler struct {
 	cookie  SessionCookieConfig
 }
 
-// SessionCookieConfig configures the browser session cookie.
-type SessionCookieConfig struct {
-	// TTL mirrors the session lifetime so the cookie expires with the session.
-	TTL time.Duration
-	// Secure must be false when serving plain HTTP on a non-localhost address,
-	// where browsers drop Secure cookies and every request looks unauthenticated.
-	Secure bool
-}
+// SessionCookieConfig is auth's cookie configuration. Aliased rather than
+// redeclared because the middleware that re-issues the cookie lives in auth and
+// needs the same type; the handlers and their tests refer to it by this name.
+type SessionCookieConfig = auth.SessionCookieConfig
 
 // NewAuthHandler creates a new AuthHandler.
 func NewAuthHandler(authSvc *auth.Service, cookie SessionCookieConfig) *AuthHandler {

@@ -12,8 +12,23 @@ import (
 // the SPA survive a reload without keeping the token in JS-reachable storage.
 const SessionCookieName = "agent_session"
 
+// SessionCookieConfig configures the browser session cookie.
+type SessionCookieConfig struct {
+	// TTL mirrors the session lifetime so the cookie expires with the session.
+	TTL time.Duration
+	// Secure must be false when serving plain HTTP on a non-localhost address,
+	// where browsers drop Secure cookies and every request looks unauthenticated.
+	Secure bool
+}
+
 // AuthMiddleware validates the session on every request and injects AuthContext.
-func AuthMiddleware(svc *Service) func(http.Handler) http.Handler {
+//
+// On success it re-issues the session cookie. The session's expiry slides in the
+// store, but a cookie's MaxAge is absolute in the browser: issued once at login,
+// it makes the browser drop the credential at a fixed moment regardless of
+// activity — which silently overrides the sliding lifetime and logs out a user
+// who has been active the whole time. Re-issuing keeps the two in step.
+func AuthMiddleware(svc *Service, cookie SessionCookieConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			sessionID := extractSessionID(r)
@@ -26,6 +41,13 @@ func AuthMiddleware(svc *Service) func(http.Handler) http.Handler {
 			if err != nil {
 				http.Error(w, `{"error":"unauthorized: invalid session"}`, http.StatusUnauthorized)
 				return
+			}
+
+			// Header first: once the handler writes its body the cookie is too late.
+			// Only for cookie-borne sessions — a client using the Authorization
+			// header has no cookie to slide.
+			if cookie.TTL > 0 && r.Header.Get("Authorization") == "" {
+				SetSessionCookie(w, session.ID, cookie.TTL, cookie.Secure)
 			}
 
 			authCtx := &AuthContext{

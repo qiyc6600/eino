@@ -78,7 +78,7 @@ func TestLoginSetsHttpOnlySessionCookie(t *testing.T) {
 // Authorization header at all, the cookie alone must identify the caller.
 func TestSessionCookieAuthenticatesRequests(t *testing.T) {
 	_, service := cookieTestHandler(t, true)
-	middleware := auth.AuthMiddleware(service)
+	middleware := auth.AuthMiddleware(service, auth.SessionCookieConfig{TTL: time.Minute, Secure: true})
 
 	cookie := loginForCookie(t, &AuthHandler{authSvc: service, cookie: SessionCookieConfig{TTL: time.Minute}})
 

@@ -51,7 +51,7 @@ func NewRouter(
 		userHandler:     NewUserHandler(registry),
 		modelHandler:    NewModelHandler(modelSwitcher),
 		healthHandler:   NewHealthHandler(readinessChecker),
-		authMiddleware:  auth.AuthMiddleware(authSvc),
+		authMiddleware:  auth.AuthMiddleware(authSvc, cookie),
 	}
 }
 
