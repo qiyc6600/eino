@@ -10,5 +10,6 @@ type SessionStore interface {
 	// Update replaces a stored session (used for sliding TTL renewal).
 	Update(ctx context.Context, session Session) error
 	Delete(ctx context.Context, sessionID string) error
+	DeleteByUser(ctx context.Context, userID string) error
 	ListByUser(ctx context.Context, userID string) ([]Session, error)
 }

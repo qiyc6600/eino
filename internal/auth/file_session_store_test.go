@@ -83,7 +83,7 @@ func TestFileSessionStore_ValidationAndTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create file session store: %v", err)
 	}
-	svc := NewService(store, NewRBACManager(), 40*time.Millisecond)
+	svc := newTestService(t, store, NewRBACManager(), 40*time.Millisecond)
 
 	resp, err := svc.Login(context.Background(), "admin", "admin123")
 	if err != nil {
@@ -92,5 +92,36 @@ func TestFileSessionStore_ValidationAndTTL(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if _, err := svc.ValidateSession(context.Background(), resp.SessionID); err == nil {
 		t.Error("expired session must be rejected even with the file backend")
+	}
+}
+
+func TestFileSessionStoreDeleteByUserPersists(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions_revoke.json")
+	store, err := NewFileSessionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []Session{
+		{ID: "s_1", UserID: "u_admin"},
+		{ID: "s_2", UserID: "u_admin"},
+		{ID: "s_3", UserID: "u_visitor"},
+	} {
+		if err := store.Create(ctx, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.DeleteByUser(ctx, "u_admin"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewFileSessionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions, _ := reopened.ListByUser(ctx, "u_admin"); len(sessions) != 0 {
+		t.Fatalf("revoked sessions returned after restart: %+v", sessions)
+	}
+	if _, ok, _ := reopened.Get(ctx, "s_3"); !ok {
+		t.Fatal("another user's session was not preserved")
 	}
 }

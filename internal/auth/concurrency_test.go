@@ -11,7 +11,7 @@ import (
 // listing, and role updates from many goroutines at once. Run with -race
 // to verify the users map is properly synchronized.
 func TestService_ConcurrentUserManagement(t *testing.T) {
-	svc := NewService(NewInMemorySessionStore(), NewRBACManager())
+	svc := newTestService(t, NewInMemorySessionStore(), NewRBACManager())
 	ctx := context.Background()
 
 	const workers = 8

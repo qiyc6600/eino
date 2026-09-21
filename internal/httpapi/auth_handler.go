@@ -2,8 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/example/agent-eino-demo/internal/auth"
 )
@@ -26,9 +30,22 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.authSvc.Login(r.Context(), req.Username, req.Password)
+	source, _, _ := net.SplitHostPort(r.RemoteAddr)
+	resp, err := h.authSvc.LoginWithSource(r.Context(), req.Username, req.Password, source)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
+		var limited *auth.LoginRateLimitError
+		if errors.As(err, &limited) {
+			seconds := int64((limited.RetryAfter + time.Second - 1) / time.Second)
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+			writeError(w, http.StatusTooManyRequests, auth.ErrLoginRateLimited.Error())
+		} else if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, auth.ErrInvalidCredentials.Error())
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "login temporarily unavailable")
+		}
 		return
 	}
 
@@ -73,7 +90,11 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // ListUsers handles GET /api/users
 func (h *AuthHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users := h.authSvc.ListUsers(r.Context())
+	users, err := h.authSvc.ListUsersE(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
 	writeJSON(w, http.StatusOK, users)
 }
 
@@ -90,7 +111,11 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := h.authSvc.CreateUser(r.Context(), req.Username, req.Password, req.Roles)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+		if errors.Is(err, auth.ErrUserExists) {
+			writeError(w, http.StatusConflict, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to create user")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, user)
@@ -100,8 +125,8 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	roles := h.authSvc.RBAC().ListRoles()
 	type rolePublic struct {
-		Name        string              `json:"name"`
-		Permissions []auth.Permission   `json:"permissions"`
+		Name        string            `json:"name"`
+		Permissions []auth.Permission `json:"permissions"`
 	}
 	result := make([]rolePublic, 0, len(roles))
 	for _, r := range roles {
@@ -124,7 +149,11 @@ func (h *AuthHandler) UpdateUserRoles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.authSvc.UpdateUserRoles(r.Context(), userID, req.Roles); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		if errors.Is(err, auth.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to update user roles")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

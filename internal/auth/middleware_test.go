@@ -9,7 +9,7 @@ import (
 func TestAuthMiddleware_ValidBearer(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	// Login to get a valid session
 	resp, _ := svc.Login(nil, "admin", "admin123")
@@ -44,7 +44,7 @@ func TestAuthMiddleware_ValidBearer(t *testing.T) {
 func TestAuthMiddleware_MissingSession(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("protected handler should not be called without session")
@@ -65,7 +65,7 @@ func TestAuthMiddleware_MissingSession(t *testing.T) {
 func TestAuthMiddleware_InvalidSession(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("protected handler should not be called with invalid session")
@@ -84,22 +84,18 @@ func TestAuthMiddleware_InvalidSession(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_QueryParamSession(t *testing.T) {
+// TestAuthMiddleware_QueryParamRejected verifies the security policy: a
+// session ID passed as a URL query parameter must NOT authenticate the
+// request — credentials in URLs leak via history, logs and Referer.
+func TestAuthMiddleware_QueryParamRejected(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	resp, _ := svc.Login(nil, "visitor", "visitor123")
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ac := FromContext(r.Context())
-		if ac == nil {
-			t.Error("expected AuthContext in request context")
-			return
-		}
-		if ac.Username != "visitor" {
-			t.Errorf("expected username=visitor, got %s", ac.Username)
-		}
+		t.Error("handler must not be reached with a query-param session")
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -110,7 +106,7 @@ func TestAuthMiddleware_QueryParamSession(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for query-param session, got %d", w.Code)
 	}
 }

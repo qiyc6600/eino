@@ -20,11 +20,11 @@ func NewUserHandler(registry *tools.ToolRegistry) *UserHandler {
 func (h *UserHandler) ListTools(w http.ResponseWriter, r *http.Request) {
 	toolList := h.registry.List()
 	type toolInfo struct {
-		Name             string            `json:"name"`
-		Description      string            `json:"description"`
-		RiskLevel        string            `json:"risk_level"`
-		RequiresApproval bool              `json:"requires_approval"`
-		ParamSchema      string            `json:"param_schema,omitempty"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		RiskLevel        string `json:"risk_level"`
+		RequiresApproval bool   `json:"requires_approval"`
+		ParamSchema      string `json:"param_schema,omitempty"`
 	}
 
 	result := make([]toolInfo, 0, len(toolList))

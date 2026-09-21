@@ -36,17 +36,13 @@ func AuthMiddleware(svc *Service) func(http.Handler) http.Handler {
 	}
 }
 
-// extractSessionID reads the session ID from Authorization header or query parameter.
+// extractSessionID reads the session ID from the Authorization header.
+// Query parameters are deliberately NOT accepted: credentials in URLs leak
+// into browser history, access logs and Referer headers.
 func extractSessionID(r *http.Request) string {
-	// Try Authorization: Bearer <sessionId>
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
-	}
-
-	// Try query parameter
-	if sid := r.URL.Query().Get("sessionId"); sid != "" {
-		return sid
 	}
 
 	return ""

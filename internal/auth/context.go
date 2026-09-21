@@ -65,10 +65,12 @@ func (ac *AuthContext) WithRun(runID string) *AuthContext {
 // LLM arguments or request bodies, and there is no untyped map channel
 // that could be constructed with a forged user ID.
 type ToolIdentity struct {
-	UserID   string
-	Roles    []string
-	ThreadID string
-	RunID    string
+	Context    context.Context `json:"-"`
+	UserID     string
+	Roles      []string
+	ThreadID   string
+	RunID      string
+	ToolCallID string
 }
 
 // ToolIdentityFromContext derives the tool identity from the AuthContext
@@ -80,6 +82,7 @@ func ToolIdentityFromContext(ctx context.Context) *ToolIdentity {
 		return nil
 	}
 	return &ToolIdentity{
+		Context:  ctx,
 		UserID:   ac.UserID,
 		Roles:    ac.Roles,
 		ThreadID: ac.ThreadID,

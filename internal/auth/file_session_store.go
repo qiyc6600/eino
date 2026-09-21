@@ -56,6 +56,13 @@ func (f *FileSessionStore) Delete(ctx context.Context, sessionID string) error {
 	return f.persist()
 }
 
+func (f *FileSessionStore) DeleteByUser(ctx context.Context, userID string) error {
+	if err := f.InMemorySessionStore.DeleteByUser(ctx, userID); err != nil {
+		return err
+	}
+	return f.persist()
+}
+
 // persist atomically writes the full session snapshot to disk.
 func (f *FileSessionStore) persist() error {
 	f.persistMu.Lock()

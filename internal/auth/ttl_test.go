@@ -11,7 +11,7 @@ import (
 func TestSessionTTL_Expiry(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac, 60*time.Millisecond)
+	svc := newTestService(t, store, rbac, 60*time.Millisecond)
 
 	resp, err := svc.Login(context.Background(), "admin", "admin123")
 	if err != nil {
@@ -43,7 +43,7 @@ func TestSessionTTL_SlidingRenewal(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
 	ttl := 150 * time.Millisecond
-	svc := NewService(store, rbac, ttl)
+	svc := newTestService(t, store, rbac, ttl)
 
 	resp, err := svc.Login(context.Background(), "admin", "admin123")
 	if err != nil {
@@ -71,7 +71,7 @@ func TestSessionTTL_SlidingRenewal(t *testing.T) {
 // exposes the expiration deadline to the client.
 func TestSessionTTL_LoginResponseCarriesExpiry(t *testing.T) {
 	ttl := 5 * time.Minute
-	svc := NewService(NewInMemorySessionStore(), NewRBACManager(), ttl)
+	svc := newTestService(t, NewInMemorySessionStore(), NewRBACManager(), ttl)
 
 	resp, err := svc.Login(context.Background(), "admin", "admin123")
 	if err != nil {
@@ -129,7 +129,7 @@ func TestSessionStore_Update(t *testing.T) {
 func TestSessionTTL_ZeroExpiresAtBackwardCompat(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac, 1*time.Millisecond)
+	svc := newTestService(t, store, rbac, 1*time.Millisecond)
 
 	// Seed a session directly with zero ExpiresAt.
 	session := Session{ID: "s_legacy", UserID: "u_admin", Username: "admin", Roles: []string{"admin"}}

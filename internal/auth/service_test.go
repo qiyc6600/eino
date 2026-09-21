@@ -8,7 +8,7 @@ import (
 func TestLogin_Success(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	resp, err := svc.Login(context.Background(), "admin", "admin123")
 	if err != nil {
@@ -28,7 +28,7 @@ func TestLogin_Success(t *testing.T) {
 func TestLogin_Visitor(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	resp, err := svc.Login(context.Background(), "visitor", "visitor123")
 	if err != nil {
@@ -45,7 +45,7 @@ func TestLogin_Visitor(t *testing.T) {
 func TestLogin_WrongPassword(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	_, err := svc.Login(context.Background(), "admin", "wrong")
 	if err == nil {
@@ -56,7 +56,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 func TestLogin_UserNotFound(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	_, err := svc.Login(context.Background(), "nonexistent", "pass")
 	if err == nil {
@@ -67,7 +67,7 @@ func TestLogin_UserNotFound(t *testing.T) {
 func TestValidateSession_Valid(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	resp, _ := svc.Login(context.Background(), "admin", "admin123")
 	session, err := svc.ValidateSession(context.Background(), resp.SessionID)
@@ -85,7 +85,7 @@ func TestValidateSession_Valid(t *testing.T) {
 func TestValidateSession_Invalid(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	_, err := svc.ValidateSession(context.Background(), "fake_session_id")
 	if err == nil {
@@ -96,7 +96,7 @@ func TestValidateSession_Invalid(t *testing.T) {
 func TestLogout(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	resp, _ := svc.Login(context.Background(), "admin", "admin123")
 	svc.Logout(context.Background(), resp.SessionID)
@@ -110,7 +110,7 @@ func TestLogout(t *testing.T) {
 func TestCreateUser(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	user, err := svc.CreateUser(context.Background(), "testuser", "password", []string{"visitor"})
 	if err != nil {
@@ -133,7 +133,7 @@ func TestCreateUser(t *testing.T) {
 func TestCreateUser_Duplicate(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	_, err := svc.CreateUser(context.Background(), "admin", "password", []string{"admin"})
 	if err == nil {
@@ -144,7 +144,7 @@ func TestCreateUser_Duplicate(t *testing.T) {
 func TestUpdateUserRoles(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	err := svc.UpdateUserRoles(context.Background(), "u_admin", []string{"visitor"})
 	if err != nil {
@@ -157,10 +157,53 @@ func TestUpdateUserRoles(t *testing.T) {
 	}
 }
 
+func TestUpdateUserRolesRevokesEveryUserSession(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	svc := newTestService(t, store, NewRBACManager())
+	first, err := svc.Login(ctx, "admin", "admin123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.Login(ctx, "admin", "admin123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	visitor, err := svc.Login(ctx, "visitor", "visitor123")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.UpdateUserRoles(ctx, "u_admin", []string{"visitor"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sessionID := range []string{first.SessionID, second.SessionID} {
+		if _, err := svc.ValidateSession(ctx, sessionID); err == nil {
+			t.Fatalf("role update did not revoke session %s", sessionID)
+		}
+	}
+	if _, err := svc.ValidateSession(ctx, visitor.SessionID); err != nil {
+		t.Fatalf("another user's session was revoked: %v", err)
+	}
+
+	// A stale session written concurrently by another instance is rejected by
+	// the role comparison even if it appears after the bulk delete.
+	stale := Session{ID: "s_stale", UserID: "u_admin", Username: "admin", Roles: []string{"admin"}}
+	if err := store.Create(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ValidateSession(ctx, stale.ID); err == nil {
+		t.Fatal("stale-role session should be rejected")
+	}
+	if _, ok, _ := store.Get(ctx, stale.ID); ok {
+		t.Fatal("stale-role session should be deleted")
+	}
+}
+
 func TestListUsers(t *testing.T) {
 	store := NewInMemorySessionStore()
 	rbac := NewRBACManager()
-	svc := NewService(store, rbac)
+	svc := newTestService(t, store, rbac)
 
 	users := svc.ListUsers(context.Background())
 	if len(users) < 2 {

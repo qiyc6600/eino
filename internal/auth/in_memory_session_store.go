@@ -9,8 +9,8 @@ import (
 // InMemorySessionStore is the default in-memory implementation of SessionStore.
 type InMemorySessionStore struct {
 	mu       sync.RWMutex
-	sessions map[string]Session     // sessionID -> Session
-	byUser   map[string][]Session   // userID -> sessions
+	sessions map[string]Session   // sessionID -> Session
+	byUser   map[string][]Session // userID -> sessions
 }
 
 // NewInMemorySessionStore creates a new InMemorySessionStore.
@@ -75,6 +75,16 @@ func (s *InMemorySessionStore) Delete(ctx context.Context, sessionID string) err
 			break
 		}
 	}
+	return nil
+}
+
+func (s *InMemorySessionStore) DeleteByUser(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, session := range s.byUser[userID] {
+		delete(s.sessions, session.ID)
+	}
+	delete(s.byUser, userID)
 	return nil
 }
 

@@ -87,3 +87,22 @@ func TestInMemorySessionStore_ListByUser_Empty(t *testing.T) {
 		t.Errorf("expected 0 sessions for unknown user, got %d", len(sessions))
 	}
 }
+
+func TestInMemorySessionStore_DeleteByUser(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemorySessionStore()
+	_ = store.Create(ctx, Session{ID: "s_1", UserID: "u_admin"})
+	_ = store.Create(ctx, Session{ID: "s_2", UserID: "u_admin"})
+	_ = store.Create(ctx, Session{ID: "s_3", UserID: "u_visitor"})
+	if err := store.DeleteByUser(ctx, "u_admin"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"s_1", "s_2"} {
+		if _, ok, _ := store.Get(ctx, id); ok {
+			t.Fatalf("session %s was not deleted", id)
+		}
+	}
+	if _, ok, _ := store.Get(ctx, "s_3"); !ok {
+		t.Fatal("another user's session was deleted")
+	}
+}
