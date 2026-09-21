@@ -283,11 +283,23 @@ function renderChat() {
                     msg.role === 'system' ? 'msg-system' : 'msg-assistant';
         // Use data-streaming attribute to mark the streaming message
         const streaming = msg._streaming ? ' data-streaming="true"' : '';
-        html += `<div class="msg ${cls}" style="white-space:pre-wrap"${streaming}>${escaped}</div>`;
+        // A tool that draws a table pads its columns to line up, which only works
+        // in a fixed-width font: in the proportional font the chat uses, the
+        // borders come out ragged however carefully they were padded. The presence
+        // of box-drawing characters is the signal — nothing else in a message
+        // draws them — and the decision belongs here, in the renderer, rather than
+        // in the tool that produced the text.
+        const pre = isPreformatted(msg.content) ? ' msg-pre' : '';
+        html += `<div class="msg ${cls}${pre}" style="white-space:pre-wrap"${streaming}>${escaped}</div>`;
     }
 
     container.innerHTML = html;
     container.scrollTop = container.scrollHeight;
+}
+
+// isPreformatted reports whether a message contains a drawn table.
+function isPreformatted(text) {
+    return /[\u2500-\u257F]/.test(text || '');
 }
 
 // Render an interactive approval card as a chat message.

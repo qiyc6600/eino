@@ -218,6 +218,15 @@ body {
     animation: fadeIn 0.3s;
 }
 
+/* A message that contains a drawn table needs a fixed-width font, or its columns
+   cannot line up however the producer padded them. Slightly smaller so a table
+   that was sized for a terminal still fits the bubble. */
+.msg-pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    overflow-x: auto;
+}
+
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
 .msg-user {

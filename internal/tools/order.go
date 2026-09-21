@@ -262,16 +262,34 @@ func formatOrderList(orders []Order) string {
 	if len(orders) == 0 {
 		return "当前用户暂无订单"
 	}
+
+	headers := []string{"订单号", "状态", "金额", "商品描述"}
+	rows := make([][]string, 0, len(orders))
+	for _, o := range orders {
+		rows = append(rows, []string{o.ID, formatStatus(o.Status), o.Amount, o.Desc})
+	}
+
+	// The widths are measured from the content, and the rules are drawn from the
+	// same numbers, so the borders line up by construction rather than by hand.
+	// The previous version padded with %-8s and hand-wrote the rules: the borders
+	// came out 58 columns, the header 60 and the data rows 61, because fmt pads by
+	// bytes while a CJK rune is three bytes and two columns.
+	widths := columnWidths(headers, rows)
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📋 共 %d 笔订单：\n", len(orders)))
-	sb.WriteString("┌──────────┬──────────┬────────────┬─────────────────────┐\n")
-	sb.WriteString("│  订单号   │   状态   │    金额    │       商品描述       │\n")
-	sb.WriteString("├──────────┼──────────┼────────────┼─────────────────────┤\n")
-	for _, o := range orders {
-		status := formatStatus(o.Status)
-		sb.WriteString(fmt.Sprintf("│ %-8s │ %s │ %-10s │ %-19s │\n", o.ID, status, o.Amount, o.Desc))
+	sb.WriteString(renderTableBorder(widths, "┌", "┬", "┐"))
+	sb.WriteString("\n")
+	sb.WriteString(renderTableRow(headers, widths, true))
+	sb.WriteString("\n")
+	sb.WriteString(renderTableBorder(widths, "├", "┼", "┤"))
+	sb.WriteString("\n")
+	for _, row := range rows {
+		sb.WriteString(renderTableRow(row, widths, false))
+		sb.WriteString("\n")
 	}
-	sb.WriteString("└──────────┴──────────┴────────────┴─────────────────────┘\n")
+	sb.WriteString(renderTableBorder(widths, "└", "┴", "┘"))
+	sb.WriteString("\n")
 	sb.WriteString("\n💡 提示：删除订单为高危操作，需要管理员审批。高金额订单请谨慎操作。")
 	return sb.String()
 }
