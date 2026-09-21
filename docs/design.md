@@ -294,15 +294,30 @@ type Message struct {
 
 | 策略 | 实现 | 说明 |
 |------|------|------|
-| 按消息数裁剪 | `TrimByCount(msgs, maxN)` | 保留最近 N 条非 system 消息 |
-| 按 token 裁剪 | `TrimByToken(msgs, maxTokens, counter)` | 保留最近 N token 的消息 |
+| 按消息数裁剪 | `TrimByCount(msgs, maxN)` | 保留最近 N 条非 system 消息。**当前执行路径未接入**，见下方说明 |
+| 按 token 裁剪 | `TrimByToken(msgs, maxTokens, counter)` | 保留最近 N token 的消息，压缩流程的最后一步会调用 |
 | tool 配对保护 | `GuardToolPairs(msgs)` | 确保 assistant+tool_call 和 tool+result 不被拆散 |
 | system 永久保留 | TrimByCount/TrimByToken 内置 | system 消息不纳入裁剪预算 |
 
-#### 3.4.3 LLM 摘要压缩
+> **`TrimByCount` 的现状**：函数已实现并有单元测试，但没有任何生产调用方——`MAX_MESSAGES` 配置项目前是只读不用的死配置，实际执行路径只走 token 裁剪与摘要压缩。如果需要"按消息数兜底"生效，应在 `Runner.compressMessages` 中于 token 裁剪前调用它；如果不需要，应把该配置项移除以免误导。
+
+#### 3.4.3 可用预算的构成
+
+上下文预算不是 `MAX_TOKENS` 的全部。每次请求真正可用的消息预算为：
 
 ```
-消息历史超过阈值(80% maxTokens)
+可用预算 = MAX_TOKENS - 工具定义开销 - RESERVE_OUTPUT_TOKENS
+           （下限 256，防止极端配置把上下文饿死）
+```
+
+- **工具定义开销**：`WithTools` 绑定的 JSON schema 每次请求都会重发，但只统计消息内容的计数器看不见它。`estimateToolSchemaTokens` 按 name/desc/参数 schema 估算，在 `NewSteppedRunner` 时算一次，模型切换时随 `SetSteppedRunner` 刷新。
+- **预留回答空间**：`RESERVE_OUTPUT_TOKENS` 保证窗口不会被历史填满到模型无法作答。
+- 压缩判定与裁剪都以**可用预算**为准；而 `TokenInfo.Current` / `Threshold` 报告的是**含基础开销**的请求真实大小，界面据此显示。
+
+#### 3.4.4 LLM 摘要压缩
+
+```
+消息历史超过阈值(阈值比例 × 可用预算)
   → 分离 system 消息
   → 保留最近 1/3 非系统消息
   → 旧 2/3 调用 LLM 生成语义摘要（Summarizer.summarizeWithLLM）
@@ -311,6 +326,24 @@ type Message struct {
   → 重组：system + summary + recent
   → 最终 TrimByToken 裁剪
 ```
+
+#### 3.4.5 完整历史与模型上下文分离
+
+压缩只改变**送给模型的内容**，不改变**保存的对话**：
+
+| 字段 | 内容 | 是否落盘 |
+|------|------|----------|
+| `SteppedRunState.Messages` | 权威的完整对话历史 | 是（线程存储） |
+| `SteppedRunState.ModelContext` | 压缩后的模型视图（摘要 + 最近若干轮） | 否，仅随 checkpoint 传递以支持恢复 |
+
+- 未触发压缩时 `ModelContext` 为 `nil`，此时直接发送 `Messages`，行为与体积和未引入该机制时一致；只有真正压缩的 run 才同时保留两份。
+- 新消息通过 `SteppedRunState.appendMessage` 同时写入两个列表；读取时 `modelMessages()` 优先 `ModelContext`、为空则回退 `Messages`（兼容旧 checkpoint）。
+- **动机**：若把压缩结果直接写回 `Messages`，线程存储里保存的就是压缩版——原始对话被摘要永久覆盖，且下一轮摘要会被当作普通 assistant 消息再次参与压缩，形成"摘要的摘要"。
+- **代价**：线程存储会持续增长（完整历史永不丢弃），且压缩过的 run 其 checkpoint 会同时序列化两份。线程历史的保留上限/归档策略尚未实现，属于已知限制。
+
+#### 3.4.6 工具结果长度上限
+
+单个工具结果在进入历史前经 `capToolResult` 截断（`MAX_TOOL_RESULT_CHARS`，默认 8000 字符），超出部分截断并标注原始长度。真实工具、子 Agent 结果与审批恢复三条路径都经过该上限，避免一条冗长结果挤占整个窗口。
 
 ### 3.5 记忆管理（memory）
 
@@ -345,9 +378,57 @@ type MemoryStore interface {
   → 规则匹配（"我喜欢用Python" → preferred_language=Python）
   → 写入 MemoryStore（userId 命名空间）
 
-下次对话 → Runner.Chat() → memory.Service.BuildMemoryContext()
-  → 读取用户所有偏好 → 格式化为文本 → 注入 system prompt
+下次对话 → Runner.ChatContext()
+  → memory.Service.RetrieveRelevant(ctx, userID, 本轮消息, 预算, reinforce=true)
+  → 打分排序后按预算渲染 → 追加到 system prompt
 ```
+
+注入的唯一入口是 `RetrieveRelevant`（打分与预算见 9.3）。界面刷新 token 条时以 `reinforce=false` 调用同一入口，避免只读重算污染"使用强化记忆"的访问统计。
+
+> `Service.BuildMemoryContext` 是早期实现，**当前没有任何生产调用方**（只有单元测试引用）。注入逻辑已统一到 `RetrieveRelevant`，保留它是为了兼容既有测试；后续可删除。
+
+#### 3.5.4 记忆开关（禁止记忆）
+
+用户可关闭长期记忆，语义是**既不提取也不注入**：
+
+| 路径 | 拦截点 | 关闭后行为 |
+|------|--------|-----------|
+| 写入 | `Service.ExtractAndSave` 开头查 `MemoryEnabled` | 直接返回，不提取、不沉淀情景 |
+| 读取 | `Service.RetrieveRelevant` 开头查 `MemoryEnabled` | 返回空串，不注入任何记忆 |
+| 整合 | `Service.Consolidate` 开头查 `MemoryEnabled` | 返回 `skipped: "记忆已关闭"`，不做归档与画像 |
+
+- **强制点在服务内部**，不在调用点：任何调用方（聊天、恢复、界面刷新）都无法绕过。
+- 设置项以保留键 `__settings` 存在同一 `MemoryStore` 中，因此自动继承用户隔离（`CheckUserScope`）与三种后端（内存 / 文件 / PostgreSQL），不需要新表或迁移。
+- 保留键对用户不可见：`ListPreferences`、`RetrieveRelevant`、`Consolidate` 的遗忘环节都过滤它；`UpsertPreference` / `DeletePreference` 拒绝保留键，记忆接口无法改写框架状态。
+- 读取失败或条目损坏时回退默认值（fail open），不静默关闭记忆。
+- **关闭不等于删除**：已有条目保留并仍可在界面查看，重新开启即恢复原有行为。
+
+### 3.6 流式输出与进度通道
+
+流式分两层，共用一条出口：**事件级进度**（路由、工具开始/结束、权限拒绝、审批等待）与 **token 级答案片段**。
+
+```
+Runner.ChatContext(ctx, ac, thread, msg, WithProgressSink(sink))
+  → EventRecorder.SetSink(sink)            // 出口挂在 recorder 上
+  → advance → RunStep → executePendingTools
+        ├─ recorder.Record(...)            → sink.OnEvent(Event)
+        └─ generate → toolModel.Stream()   → sink.OnDelta(fragment)
+  → HTTP handler 把两者写成 SSE 帧（tool_call / chunk）
+```
+
+**为什么出口挂在 `EventRecorder` 上**：它本来就被穿透到 `RunStep → executePendingTools → 子 Agent RunStep` 全链路，是唯一的公共节点；`generate` 是唯一例外，为它补了一个参数。这样不必给每个执行函数增加进度参数。
+
+**并发模型**：整个 run 在 HTTP handler 的 goroutine 内同步执行，`Record` 与 `OnDelta` 都在该 goroutine 上被调用，因此 sink 可以直接写 `ResponseWriter` 并 `Flush()`，不需要额外加锁。
+
+**模型调用改为 `Stream`**：`generate` 用 `StreamReader.Recv()` 逐块读取，content 片段转发给 sink，同时用 `schema.ConcatMessages` 合并成完整消息交给 ReAct 循环——OpenAI 兼容接口的 `tool_call` 参数是分片下发的，必须合并后再用。
+
+**重试语义**：限流重试仅在**尚未向前端发出任何片段**时进行。一旦已经吐出内容就不再重试，直接把错误上报——否则前端会看到半句话之后又收到重放或成功状态。
+
+**答案不重复下发**：答案已通过 `chunk` 逐段下发时，服务端不再发送整段 `chunk`（否则客户端会把答案拼接两次），`done` 帧用 `streamed: true` 标明这一点。失败与取消时不下发 `chunk`，错误文本只出现在 `done` 的 `answer` 中，避免被当作正文渲染。
+
+**取消**：客户端断开 SSE 连接即取消本次 run（net/http 取消 `r.Context()`，执行链各层均有 `ctx.Err()` 检查）。前端停止按钮用 `AbortController` 中断 fetch 实现，无需单独的取消接口；已收到的片段会被保留并标注"已停止"。
+
+**事件补全**：`model_call_start` / `model_call_end` / `tool_call_start` / `acl_denied` / `hitl_interrupt` 此前只有常量声明而无记录点，本次补齐；`Record` 会从 metadata 中提取 `tool` / `agent` 填充 `Event.ToolName` / `AgentName`，使事件自描述。
 
 ---
 
@@ -505,10 +586,15 @@ PostgreSQL 版在启动时执行编译进程序的版本化 SQL 迁移。`agent_
 | `DATABASE_MAX_OPEN_CONNS` | `25` | PostgreSQL 最大打开连接数 |
 | `DATABASE_MAX_IDLE_CONNS` | `5` | PostgreSQL 最大空闲连接数 |
 | `DATABASE_CONN_MAX_LIFETIME` | `30m` | PostgreSQL 连接最长复用时间 |
-| `MAX_TOKENS` | `8000` | 上下文 token 上限 |
-| `MAX_MESSAGES` | `30` | 最大消息数 |
-| `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例 |
+| `MAX_TOKENS` | `8000` | 上下文 token 上限（进度条满刻度） |
+| `MAX_MESSAGES` | `30` | 最大消息数。**当前未接入执行路径**，见 3.4.2 |
+| `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例（阈值 = 可用预算 × 此值） |
 | `SUMMARY_TARGET_TOKENS` | `800` | 摘要目标 token 数 |
+| `RESERVE_OUTPUT_TOKENS` | `1024` | 为模型回答预留的空间：可用预算 = `MAX_TOKENS` − 本项 − 工具定义开销 |
+| `MAX_TOOL_RESULT_CHARS` | `8000` | 单个工具结果的字符上限，超出截断并标注原始长度 |
+| `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
+| `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
+| `RUN_EVENT_RETENTION` | `168h` | 运行事件保留期，到期后接口返回 404 |
 
 ---
 

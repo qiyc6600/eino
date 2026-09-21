@@ -269,7 +269,8 @@ Authorization: Bearer <sessionId>
 {
   "message": "1+1等于多少",
   "threadId": "t_default",
-  "stream": false
+  "stream": false,
+  "confirmBeforeExecute": false
 }
 ```
 
@@ -278,6 +279,7 @@ Authorization: Bearer <sessionId>
 | message | string | 是 | 用户消息 |
 | threadId | string | 否 | 会话线程 ID，默认 `t_default` |
 | stream | bool | 否 | 是否使用 SSE 流式响应，默认 `false` |
+| confirmBeforeExecute | bool | 否 | 开启节点级中断：LLM 生成执行计划后先暂停等待审批，再执行工具。按请求传递，不影响并发请求 |
 
 #### 同步模式 (stream=false)
 
@@ -285,18 +287,20 @@ Authorization: Bearer <sessionId>
 
 ```json
 {
-  "run_id": "r_a1b2c3d4",
+  "run_id": "r_ca24550c-3e1c-417d-bcb0-10c3fbb2e337",
   "status": "completed",
   "answer": "1+1=2",
-  "thread_id": "t_default",
+  "routed_agent": "assistant",
   "events": [
-    {"id": "e_1", "run_id": "r_a1b2c3d4", "type": "model_call_start", "detail": "...", "timestamp": "..."},
-    {"id": "e_2", "run_id": "r_a1b2c3d4", "type": "tool_call_start", "detail": "calculator", "timestamp": "..."},
-    {"id": "e_3", "run_id": "r_a1b2c3d4", "type": "tool_call_end", "detail": "1+1 = 2", "timestamp": "..."},
-    {"id": "e_4", "run_id": "r_a1b2c3d4", "type": "model_call_end", "detail": "1+1=2", "timestamp": "..."}
-  ]
+    {"id": "e_1", "run_id": "r_...", "type": "model_call_start", "timestamp": "...", "detail": "Model call (attempt 1)", "metadata": {"attempt": 1}},
+    {"id": "e_2", "run_id": "r_...", "type": "model_call_end", "timestamp": "...", "detail": "Model call finished", "metadata": {"attempt": 1, "failed": false, "prompt_tokens": 192, "completion_tokens": 68}}
+  ],
+  "context_tokens": {"current": 1430, "threshold": 1733, "max": 2000},
+  "actual_tokens": {"last_prompt_tokens": 192, "completion_tokens": 68, "total_tokens": 260, "calls": 1}
 }
 ```
+
+`context_tokens` 是本地估算（含工具定义开销与为回答预留的空间）；`actual_tokens` 是模型服务商实际返回的用量，仅在服务商提供时出现。`status` 取值为 `completed` / `interrupted` / `error` / `cancelled`，失败与取消时 `answer` 承载错误说明。
 
 **中断响应** (200, status=interrupted)：
 
@@ -304,14 +308,22 @@ Authorization: Bearer <sessionId>
 {
   "run_id": "r_e5f6g7h8",
   "status": "interrupted",
-  "answer": "该操作需要审批才能执行，已创建审批请求，请在审批中心处理。",
-  "thread_id": "t_default",
-  "interrupt_id": "i_9a0b1c2d",
+  "answer": "",
+  "interrupt": {
+    "interrupt_id": "i_9a0b1c2d",
+    "type": "tool",
+    "tool_name": "delete_order",
+    "arguments": "{\"order_id\":\"A-1001\"}",
+    "message": "高危工具 delete_order 需要审批",
+    "plan": [{"name": "delete_order", "arguments": "{\"order_id\":\"A-1001\"}"}]
+  },
   "events": [
-    {"id": "e_1", "type": "hitl_interrupt", "detail": "delete_order requires approval", ...}
+    {"id": "e_1", "type": "hitl_interrupt", "tool_name": "delete_order", "detail": "Tool delete_order requires approval", "metadata": {"reason": "high_risk_tool"}}
   ]
 }
 ```
+
+`interrupt.type` 为 `tool`（高危工具审批）或 `node`（执行计划审批）；`plan` 仅在节点级中断时出现。中断后本次 run 结束，需通过审批接口恢复。
 
 #### SSE 流式模式 (stream=true)
 
@@ -325,12 +337,59 @@ Connection: keep-alive
 
 **事件类型**：
 
-| 事件 | 格式 | 说明 |
-|------|------|------|
-| `chunk` | `event: chunk\ndata: {"content":"..."}\n\n` | 模型输出片段 |
-| `tool_call` | `event: tool_call\ndata: {"name":"calculator","arguments":"..."}\n\n` | 工具调用通知 |
-| `done` | `event: done\ndata: {"status":"completed","answer":"...","threadId":"..."}\n\n` | 完成事件 |
-| `error` | `event: error\ndata: {"error":"..."}\n\n` | 错误事件 |
+| 事件 | 数据字段 | 说明 |
+|------|----------|------|
+| `chunk` | `content` | 模型输出的增量片段，需按到达顺序拼接 |
+| `tool_call` | `phase`、`tool`、`detail`，`end` 阶段另有 `result` | 执行进度，见下表 |
+| `done` | 见下 | 结束事件，**必须**以它为准判定结果 |
+
+`tool_call` 的 `phase` 取值：
+
+| phase | 含义 |
+|-------|------|
+| `route` | Supervisor 路由到某个子 Agent（`tool` 为子 Agent 名） |
+| `start` | 开始调用工具 |
+| `end` | 工具执行完成，`result` 为截断后的结果摘要 |
+| `denied` | 被 ACL 拦截 |
+| `approval` | 命中高危工具，等待人工审批 |
+
+实际帧示例：
+
+```
+event: chunk
+data: {"content":"我可以帮您完"}
+
+event: tool_call
+data: {"detail":"Routing to sub-agent math_agent","phase":"route","tool":"math_agent"}
+
+event: tool_call
+data: {"detail":"Calling tool calculator","phase":"start","tool":"calculator"}
+
+event: tool_call
+data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","tool":"calculator"}
+```
+
+`done` 帧字段：
+
+```json
+{
+  "status": "completed",
+  "answer": "1+1=2",
+  "threadId": "t_default",
+  "runId": "r_...",
+  "interrupt": null,
+  "memory": [],
+  "events": [],
+  "contextTokens": {"current": 1430, "threshold": 1733, "max": 2000},
+  "actualTokens": {"last_prompt_tokens": 192, "completion_tokens": 68, "total_tokens": 260, "calls": 1},
+  "streamed": true
+}
+```
+
+- 服务端不发送 `error` 事件：失败与取消统一通过 `done` 的 `status` 表达（`error` / `cancelled`），`answer` 承载原因。
+- `streamed=true` 表示答案已经通过 `chunk` 逐段下发，客户端不应再把 `answer` 追加到已拼接的内容之后（会重复）。
+- 失败或取消时不会下发 `chunk`，避免把错误文本当作正文渲染。
+- 客户端断开连接即取消本次 run（服务端通过请求 context 感知），无需单独的取消接口。
 
 ---
 
@@ -629,22 +688,62 @@ Connection: keep-alive
 {"status": "ok"}
 ```
 
+保留键（以 `__` 开头）属于框架内部状态，删除请求返回 400，不允许通过记忆接口改写。
+
+---
+
+### GET /api/memory/settings
+
+读取当前用户的记忆开关。
+
+**请求头**：`Authorization: Bearer <sessionId>`
+
+**成功响应** (200)：
+
+```json
+{"enabled": true}
+```
+
+---
+
+### PUT /api/memory/settings
+
+设置当前用户的记忆开关。关闭后**既不从新对话中提取记忆，也不把已有记忆注入提示词**；已有条目保留，重新开启即恢复。
+
+**请求头**：`Authorization: Bearer <sessionId>`
+
+**请求体**：
+
+```json
+{"enabled": false}
+```
+
+**成功响应** (200)：
+
+```json
+{"enabled": false}
+```
+
+`enabled` 为必填；缺失返回 400。开关在记忆服务内部强制执行（`ExtractAndSave` 与 `RetrieveRelevant` 各自先查开关），不依赖调用点自觉，因此任何调用路径都无法绕过。该设置以保留键 `__settings` 存放在同一存储后端中，自动继承用户隔离与后端可替换；它不会出现在 `GET /api/memory` 的列表里。
+
 ---
 
 ## 附录：事件类型
 
 Agent 运行过程中记录的事件类型：
 
-| 事件类型 | 说明 |
-|----------|------|
-| `model_call_start` | LLM 推理开始 |
-| `model_call_end` | LLM 推理结束 |
-| `tool_call_start` | 工具调用开始 |
-| `tool_call_end` | 工具调用结束 |
-| `acl_denied` | ACL 权限拒绝 |
-| `hitl_interrupt` | HITL 中断 |
-| `hitl_resume` | HITL 恢复 |
-| `summary_compress` | 上下文摘要压缩 |
-| `agent_start` | Agent 开始执行 |
-| `agent_end` | Agent 执行结束 |
-| `supervisor_route` | Supervisor 路由决策 |
+| 事件类型 | 说明 | 触发点 |
+|----------|------|--------|
+| `model_call_start` | LLM 推理开始 | 每次模型调用前（含重试） |
+| `model_call_end` | LLM 推理结束 | 调用返回或失败，`metadata` 带 `attempt`、`failed`，服务商提供用量时带 `prompt_tokens` / `completion_tokens` |
+| `tool_call_start` | 工具调用开始 | ACL 通过、真正执行工具前 |
+| `tool_call_end` | 工具调用结束 | 工具执行完成，`metadata.result` 为截断后的结果摘要 |
+| `acl_denied` | ACL 权限拒绝 | 工具或子 Agent 被 RBAC 拦截 |
+| `hitl_interrupt` | HITL 中断 | 高危工具拦截、或节点级计划审批 |
+| `hitl_resume` | HITL 恢复 | 审批通过后继续执行 |
+| `summary_compress` | 上下文摘要压缩 | 超过阈值触发压缩 |
+| `agent_start` | Agent 开始执行 | — |
+| `agent_end` | Agent 执行结束 | — |
+| `supervisor_route` | Supervisor 路由决策 | 派发到子 Agent |
+
+事件同时通过两条路径可见：随 `done` 帧的 `events` 字段一次性返回（用于事件面板），以及执行过程中以 `tool_call` 帧实时下发（用于聊天区的进度行）。`tool_call_start` / `tool_call_end` / `acl_denied` / `hitl_interrupt` 只记录一次，两条路径共享同一份事件。

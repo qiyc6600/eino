@@ -36,14 +36,14 @@
 | 2.1 | 任意节点能中断存状态 | ✅ | SteppedRunner 节点级中断门：请求显式 `confirmBeforeExecute` 标志（前端开关/API 字段）触发，中断后暂停执行，PendingToolCalls 保留在状态中等待审批；标志按请求传递，不依赖消息关键词，也无共享状态污染 |
 | 2.2 | 危险操作 yes/no | ✅ | `delete_order` / `send_email` 触发审批，`ApprovalDecision{Approved, Reason}` |
 | 2.3 | 同 run ID 恢复续跑 | ⚠️ | `Runner.Resume()` 优先从 Checkpoint 加载完整 `SteppedRunState`（含对话历史+中间步骤），Resume 时从中断点继续执行 ReAct 循环。若 Checkpoint 不可用则降级为线程重建模式 |
-| 2.4 | Web 承载中断-审批-恢复 | ✅ | 前端审批卡片 + approve/reject 按钮 + API 调用 |
+| 2.4 | Web 承载中断-审批-恢复 | ✅ | 前端审批卡片 + approve/reject 按钮 + API 调用；执行过程实时推送 `tool_call` 进度帧（路由/工具开始结束/权限拒绝/审批等待），答案按 token 片段流式输出，支持中途停止并保留已收到的内容 |
 | 2.5 | CheckpointStore 接口（save/load/delete） | ✅ | `CheckpointStore` 接口 + `InMemoryCheckpointStore` 实现 |
 
 ### 模块 02 技术约束
 
 | # | 约束 | 状态 | 说明 |
 |---|------|------|------|
-| T1 | Web 动态页面承载 HITL | ✅ | SPA 前端 |
+| T1 | Web 动态页面承载 HITL | ✅ | SPA 前端；SSE 流式 + 进度行 + 停止按钮 |
 | T2 | 语言选择 | ✅ | Go |
 | T3 | CheckpointStore 接口为必交付项 | ✅ | 接口 + 内存实现 |
 | T4 | 恢复语义须明确 | ✅ | 文档明确：工具级"重新执行"，节点级"从中断点继续" |
@@ -73,10 +73,11 @@
 
 | # | 任务要求 | 状态 | 说明 |
 |---|----------|------|------|
-| 4.1 | 按消息数裁剪（system 永久保留 + tool 配对不拆散） | ✅ | `TrimByCount` + `GuardToolPairs` |
-| 4.2 | 按 Token 数裁剪 + TokenCounter | ✅ | `TrimByToken` + `SimpleTokenCounter` |
-| 4.3 | 摘要压缩（超过阈值触发，可配置） | ✅ | `Summarizer.Compress()` + LLM 摘要 + 规则降级 |
+| 4.1 | 按消息数裁剪（system 永久保留 + tool 配对不拆散） | ⚠️ | `TrimByCount` 与 `GuardToolPairs` 已实现并有单元测试，system 永久保留与 tool 配对保护均满足；但 **`TrimByCount` 当前没有生产调用方**，`MAX_MESSAGES` 是只读不用的配置，实际执行路径只走 token 裁剪与摘要压缩。作为能力已交付，作为运行策略尚未生效，详见 design.md 3.4.2 |
+| 4.2 | 按 Token 数裁剪 + TokenCounter | ✅ | `TrimByToken` + `SimpleTokenCounter`；计数覆盖消息正文、角色开销、工具调用参数与工具名，并按工具定义 schema 与回答预留空间计算可用预算 |
+| 4.3 | 摘要压缩（超过阈值触发，可配置） | ✅ | `Summarizer.Compress()` + LLM 摘要 + 规则降级；阈值基于可用预算（`MAX_TOKENS` − 工具定义 − 预留回答空间） |
 | 4.4 | 长对话演示（不超窗口、不报错） | ✅ | 前端"长对话裁剪"演示按钮 + 自动压缩 |
+| 4.5 | 压缩不破坏完整历史 | ✅ | 压缩结果只进 `SteppedRunState.ModelContext`，`Messages` 作为权威完整历史落盘；消除"摘要的摘要"与原始对话被覆盖 |
 
 ### 模块 04 技术约束
 
@@ -96,6 +97,7 @@
 | 5.3 | 内存版存储后端（无外部依赖） | ✅ | 两种 InMemory 实现 |
 | 5.4 | 跨会话偏好记忆演示 | ✅ | 会话 A 写入偏好 → 会话 B 读取偏好 |
 | 5.5 | 记忆系统 v2（结构化/冲突消解/统一检索/生命周期） | ✅ | 条目带 type/importance/来源/修订历史；Upsert 消解偏好冲突；RetrieveRelevant 按相关性+重要度+衰减+频次打分并预算内注入；Consolidate 归档遗忘、LLM 整合画像、情景沉淀为事实（无 LLM 规则降级） |
+| 5.6 | 记忆开关（禁止记忆） | ✅ | 每用户开关存于保留键 `__settings`，`ExtractAndSave` / `RetrieveRelevant` / `Consolidate` 在服务内部强制拦截，任何调用方无法绕过；关闭后不提取也不注入，已有条目保留不删除；`GET`/`PUT /api/memory/settings` 与界面开关 |
 
 ### 模块 05 技术约束
 
@@ -112,20 +114,31 @@
 
 | # | 交付物 | 状态 | 文件 |
 |---|--------|------|------|
-| D1 | 设计说明文档 | ✅ | `docs/design.md`（438 行） |
-| D2 | API 文档 | ✅ | `docs/api.md`（625 行） |
-| D3 | 演示脚本 | ✅ | `docs/demo-script.md`（257 行） |
+| D1 | 设计说明文档 | ✅ | `docs/design.md` |
+| D2 | API 文档 | ✅ | `docs/api.md`（含流式帧、进度帧、记忆设置接口） |
+| D3 | 演示脚本 | ✅ | `docs/demo-script.md` |
 | D4 | 框架对比分析 | ✅ | `docs/framework-comparison.md`（381 行） |
-| D5 | README.md | ✅ | 含恢复语义章节 |
-| D6 | 单元测试 | ✅ | 14 个测试文件，110 个测试用例 |
-| D7 | 集成测试 | ✅ | 8 个集成测试用例 |
+| D5 | README.md | ✅ | 含恢复语义、执行可靠性与前端语法检查章节 |
+| D6 | 单元测试 | ✅ | 34 个测试文件，211 个测试用例 |
+| D7 | 集成测试 | ✅ | 9 个测试文件，26 个集成测试用例（含流式增量、工具进度、记忆开关） |
 
 ---
 
 ## 统计
 
-- **硬性要求**：32 项 ✅ 通过，1 项 ⚠️ 部分达标（2.3 Checkpoint 恢复有降级路径）
+- **硬性要求**：34 项 ✅ 通过，2 项 ⚠️ 部分达标
 - **技术约束**：12 项 ✅ 全部满足
 - **文档交付物**：7 项 ✅ 全部完成
 
-**结论：项目核心功能完整。多用户隔离为框架强制（design.md 5.3 节）；节点级中断由请求显式标志触发（不依赖关键词）；剩余 1 项部分达标项有合理理由（Checkpoint 恢复优先走完整状态路径并有线程重建降级）。**
+### 两项部分达标说明
+
+| 项 | 原因 | 建议 |
+|----|------|------|
+| 2.3 同 run ID 恢复续跑 | Checkpoint 优先，缺失时降级为线程重建 | 保留降级路径作为容错，属合理设计 |
+| 4.1 按消息数裁剪 | `TrimByCount` 已实现且有测试，但无生产调用方，运行时不生效 | 在 `Runner.compressMessages` 中于 token 裁剪前接入，或移除 `MAX_MESSAGES` 配置并在文档中声明仅提供 token 策略 |
+
+### 已知限制（非阻塞，详见 dev-todo.md）
+
+线程历史无保留上限、压缩后 checkpoint 体积上升、向量记忆文本无长度上限、审批恢复路径不流式、刷新页面需重新登录、前端缺少自动化语法检查（CI 缺失）。
+
+**结论：项目核心功能完整。多用户隔离为框架强制（design.md 5.3 节）；节点级中断由请求显式标志触发；流式输出覆盖事件级进度与 token 级片段；压缩不再破坏完整历史；记忆开关在服务内部强制生效。剩余两项部分达标均有明确理由或整改路径。**

@@ -9,10 +9,10 @@
 | 模块 | 能力 |
 |------|------|
 | 🔐 登录与权限 | Session 认证、TTL 滑动续期、RBAC 多角色、工具级 ACL 统一拦截、多用户数据隔离 |
-| 🤝 人机协同 | 工具级中断（高危操作审批）、节点级中断（执行计划审批）、Checkpoint 状态恢复 |
-| 🧠 多 Agent | Supervisor 三子 Agent 路由、ReAct 循环（MaxStep=20）、6 个示例工具 |
-| 📐 上下文管理 | 按消息数/Token 数裁剪、LLM 摘要压缩、Tool 配对保护 |
-| 💾 记忆系统 | 短期记忆 CheckpointStore + 长期记忆 MemoryStore、跨会话偏好提取、向量检索 |
+| 🤝 人机协同 | 工具级中断（高危操作审批）、节点级中断（执行计划审批）、Checkpoint 状态恢复、SSE 实时进度与中途停止 |
+| 🧠 多 Agent | Supervisor 三子 Agent 路由、ReAct 循环（MaxStep=20）、6 个示例工具、答案逐 token 流式输出 |
+| 📐 上下文管理 | 按消息数/Token 数裁剪、LLM 摘要压缩、Tool 配对保护、完整历史与模型上下文分离、工具结果长度上限 |
+| 💾 记忆系统 | 短期记忆 CheckpointStore + 长期记忆 MemoryStore、跨会话偏好提取、向量检索、记忆开关（禁止记忆） |
 
 ---
 
@@ -66,24 +66,28 @@ open http://localhost:8080
 │  └─────────────────────────────────────────┘  │
 │                                              │
 │  ┌─ 中断门 ───────────────────────────────┐  │
-│  │  节点级中断 → 执行计划审批 (意图触发)    │  │
+│  │  节点级中断 → 执行计划审批 (请求显式标志) │  │
 │  │  工具级中断 → 高危工具审批 (自动触发)    │  │
 │  └─────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘
-    │
-    ▼
-ChatModel (Mock / OpenAI / DeepSeek / Ark / ...)
-    │
-    ▼
+    │                              │
+    │                              ▼
+    │                    EventRecorder → ProgressSink
+    │                    （路由/工具/审批进度 + 答案片段）
+    ▼                              │
+ChatModel (Mock / OpenAI / DeepSeek / Ark / ...)   │
+    │  Stream / Generate           │              │
+    ▼                              ▼              ▼
 ┌──────────────────────────────────────────────┐
 │  上下文管理                    记忆系统       │
-│  TrimByCount / TrimByToken    CheckpointStore│
+│  TrimByToken (按 token 裁剪)  CheckpointStore│
 │  Summarizer (LLM 摘要)        MemoryStore    │
 │  GuardToolPairs               VectorStore    │
+│  完整历史 / 模型上下文分离     记忆开关        │
 └──────────────────────────────────────────────┘
 ```
 
-**执行流程**：用户消息 → 上下文压缩 → LLM 推理 → 中断门检查 → 工具执行 → 结果回灌 → 继续推理 → 最终回复
+**执行流程**：用户消息 → 上下文压缩（仅作用于模型视图）→ LLM 流式推理 → 中断门检查 → 工具执行 → 结果回灌 → 继续推理 → 最终回复；全过程的路由、工具与审批进度实时推送到前端。
 
 ---
 
@@ -170,16 +174,39 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 ---
 
+## 🌊 流式输出
+
+聊天接口（`stream=true`）把执行过程实时推给前端，分两层：
+
+| 层 | 内容 | SSE 帧 |
+|----|------|--------|
+| 事件级进度 | Supervisor 路由、工具开始/结束、ACL 拒绝、等待审批 | `tool_call`（带 `phase` 与 `tool`） |
+| token 级片段 | 模型输出的增量文字 | `chunk`（带 `content`） |
+
+实现要点：
+
+- 出口挂在 `EventRecorder` 上（`ProgressSink`），它本来就穿透了 `RunStep → executePendingTools → 子 Agent` 全链路；整个 run 在 HTTP handler 的 goroutine 内同步执行，因此 sink 直接写响应、无需加锁。
+- 模型调用改用 Eino 的 `Stream`，片段边转发边用 `schema.ConcatMessages` 合并成完整消息交给 ReAct 循环（OpenAI 兼容接口的 `tool_call` 参数是分片下发的）。
+- 限流重试只在**尚未向前端发出任何片段**时进行——已经吐出内容就不再重试，避免前端看到半句话后又收到重放。
+- 答案已分片下发时不再发送整段 `chunk`（否则客户端会拼接两次），`done` 帧用 `streamed: true` 标明；失败与取消不下发 `chunk`，错误文本只出现在 `done.answer`。
+- 前端进度行显示实时状态，运行期间"发送"被"停止"替换；停止即断开连接，服务端通过请求 context 取消 run，已收到的片段保留并标注"⏹️ 已停止"。
+
+---
+
 ## 📐 上下文管理
 
 长对话自动裁剪，确保不超出 LLM 窗口：
 
 | 策略 | 实现 | 特点 |
 |------|------|------|
-| 按消息数裁剪 | `TrimByCount` | system 消息永久保留 |
-| 按 Token 数裁剪 | `TrimByToken` | 基于 `SimpleTokenCounter` 估算 |
+| 按消息数裁剪 | `TrimByCount` | system 消息永久保留。**已实现并有单测，但未接入执行路径**，见「已知限制」 |
+| 按 Token 数裁剪 | `TrimByToken` | 基于 `SimpleTokenCounter` 估算，压缩流程的最后一步调用 |
 | Tool 配对保护 | `GuardToolPairs` | tool_call 与 tool_result 不拆散 |
 | LLM 摘要压缩 | `Summarizer.Compress` | 超阈值触发 LLM 摘要，规则提取降级兜底 |
+| 工具结果上限 | `capToolResult` | 单个结果超 `MAX_TOOL_RESULT_CHARS` 截断并标注原始长度 |
+| 历史与上下文分离 | `SteppedRunState.ModelContext` | 压缩只改模型视图，完整对话仍完整落盘 |
+
+**可用预算** = `MAX_TOKENS` − 工具定义 schema 开销 − `RESERVE_OUTPUT_TOKENS`（为回答预留）。压缩判定与裁剪都以它为准，而界面显示的是含基础开销的请求真实大小。token 条同时展示本地估算与服务商返回的实际用量。
 
 ---
 
@@ -208,6 +235,7 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 | 遗忘 | 有效分衰减到阈值之下的旧条目被归档（可查不可注入），不再无限膨胀 |
 | 整合 | 达到条目阈值后 LLM 将碎片记忆整合为 `user_profile` 用户画像，归档过时条目，并把情景沉淀为持久事实；无 LLM 时规则降级 |
 | 记忆面板 | 前端按类型分组展示、重要度星标、来源 tooltip、归档折叠区、一键"🧹 整合记忆" |
+| 记忆开关 | 每用户"🙈 禁止记忆"开关：关闭后既不提取也不注入，已有条目保留不删除；开关在记忆服务内部强制拦截，任何调用路径无法绕过（`GET`/`PUT /api/memory/settings`） |
 
 **持久化存储后端（进阶档）**：会话、检查点、记忆和线程支持 `memory`、单进程 `file` 与多实例 `postgres`；用户账户和示例业务数据支持 `memory` / `postgres`，审批支持 `memory` / `file` / `postgres`。启用 PostgreSQL 后，运行结果与事件也写入数据库，跨实例可按用户读取。PostgreSQL 启动时执行内置的版本化迁移，线程使用 advisory lock 跨实例串行，审批使用条件更新原子认领，订单删除与邮件记录使用工具调用幂等键。file 版启用后可跨重启恢复，但不能由多个进程共同写入。
 
@@ -269,6 +297,12 @@ docker compose -f compose.postgres.yml up -d
 | `LOGIN_LOCKOUT` | `15m` | 达到阈值后的锁定时长 |
 | `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
+| `MAX_TOKENS` | `8000` | 上下文窗口上限（进度条满刻度） |
+| `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例（阈值 = 可用预算 × 此值） |
+| `SUMMARY_TARGET_TOKENS` | `800` | 摘要目标 token 数 |
+| `RESERVE_OUTPUT_TOKENS` | `1024` | 为模型回答预留的空间；可用预算 = `MAX_TOKENS` − 本项 − 工具定义开销 |
+| `MAX_TOOL_RESULT_CHARS` | `8000` | 单个工具结果的字符上限，超出截断并标注原始长度 |
+| `RUN_EVENT_RETENTION` | `168h` | 运行事件保留期，到期后接口返回 404 |
 | `USER_STORE` | `memory` | 用户账户存储：`memory` / `postgres` |
 | `SESSION_STORE` | `memory` | 会话存储：`memory` / `file` / `postgres` |
 | `CHECKPOINT_STORE` | `memory` | 检查点存储：`memory` / `file` / `postgres` |
@@ -343,7 +377,10 @@ docker compose -f compose.postgres.yml up -d
 | GET | `/api/tools` | 工具列表 |
 | GET | `/api/memory` | 用户记忆 |
 | POST | `/api/memory` | 写入记忆 |
-| DELETE | `/api/memory/{key}` | 删除记忆 |
+| DELETE | `/api/memory/{key}` | 删除记忆（保留键拒绝） |
+| GET | `/api/memory/settings` | 读取记忆开关 |
+| PUT | `/api/memory/settings` | 设置记忆开关（禁止记忆） |
+| POST | `/api/memory/consolidate` | 执行一次记忆整合（遗忘 / 画像 / 沉淀） |
 | GET | `/api/models` | 可用模型列表 |
 | POST | `/api/models/switch` | 切换模型 |
 
@@ -351,17 +388,21 @@ docker compose -f compose.postgres.yml up -d
 
 ## 🎯 演示场景
 
-前端内置 **5 个一键演示按钮**，覆盖全部核心功能：
+聊天区右上角的"🎬 演示 ▾"下拉菜单内置 **5 个一键演示项**，覆盖全部核心功能：
 
-| 按钮 | 场景 | 自动操作 |
-|------|------|----------|
+| 菜单项 | 场景 | 自动操作 |
+|--------|------|----------|
 | 🚫 Visitor 越权 | ACL 拦截 | visitor 登录 → 删除订单 → ACL 拒绝 |
 | ✅ Admin 审批 | HITL 流程 | admin 登录 → 删除订单 → 触发审批 → 批准/拒绝 |
 | 🔀 不同工具路径 | 多 Agent 路由 | 依次调用不同工具展示 Supervisor 分发 |
 | ✂️ 长对话裁剪 | 上下文管理 | 连续发送 10 条消息触发摘要压缩 |
 | 🧠 记忆管理 | 跨会话偏好 | 表达偏好 → 验证记忆保存 → 换线程读取 |
 
-**节点级中断演示**：勾选聊天框左侧的"⚠️ 执行前确认"开关后输入"查询北京天气"，触发执行计划审批流程。
+另外三个不需要脚本、手动操作即可演示的功能：
+
+- **流式输出**：发送任意消息，观察输入框上方的实时进度行（路由 / 工具 / 审批）与逐字出现的回复；运行期间"发送"变为"停止"，点击可中断并保留已收到的内容。
+- **节点级中断**：勾选输入框左侧的"⚠️ 执行前确认"开关后输入"查询北京天气"，触发执行计划审批流程。
+- **记忆开关**：勾选记忆面板底部的"🙈 禁止记忆"，验证关闭后既不提取也不注入、已有条目保留。
 
 完整演示脚本见 [`docs/demo-script.md`](docs/demo-script.md)。
 
@@ -446,6 +487,13 @@ go test ./...
 | HITL 为异步审批模式 | 中断后 run 结束，通过独立 API 恢复，非"挂起等待"语义 |
 | grep 使用示例数据 | 搜索日志为硬编码 mock，无真实文件系统访问 |
 | 凭证经 Bearer 头传递、JS 可读 | sessionId 仅存前端内存并经 Authorization 头发送（不支持 URL 查询参数，避免泄漏进日志/历史）；XSS 场景防护有限，生产应用 HttpOnly Cookie + CSRF 防护 |
+| 线程历史无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储持续增长；缺少保留期与归档策略 |
+| 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
+| 向量记忆文本无长度上限 | `FormatVectorResults` 不截断，向量文本可能单独超出记忆预算 |
+| `MAX_MESSAGES` / `TrimByCount` 未接入 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |
+| 审批恢复路径不流式 | 审批决策接口返回一次性 JSON，恢复期间界面无进度 |
+| 刷新页面需重新登录 | sessionId 仅存页面内存，未写入 localStorage/sessionStorage |
+| 前端无自动化语法检查 | `go:embed` 不校验 JS；语法错误不影响任何 Go 测试却会让页面失去交互，当前依赖手工 `node --check`，CI 缺失 |
 
 > 多用户隔离为框架强制：类型化工具身份（不可伪造）、线程/运行事件/审批属主校验、存储层 `CheckUserScope` 上下文校验，详见 `docs/design.md` 5.3 节。节点级中断由请求显式 `confirmBeforeExecute` 标志触发，不依赖消息关键词。
 
