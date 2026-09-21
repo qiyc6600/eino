@@ -283,7 +283,8 @@ func TestThreadStoreAppendHistoryGuard(t *testing.T) {
 	})
 }
 
-func TestThreadStoreUsesDedicatedLockPool(t *testing.T) {	db, dbMock, err := sqlmock.New()
+func TestThreadStoreUsesDedicatedLockPool(t *testing.T) {
+	db, dbMock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}

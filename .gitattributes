@@ -1,0 +1,23 @@
+# Working-tree line endings.
+#
+# Everything text is checked out with LF, regardless of the platform default.
+# Two concrete reasons, both of which have bitten this project:
+#
+#   * Go source: gofmt treats a CRLF file as unformatted. With core.autocrlf=true
+#     a Windows checkout writes CRLF, so `gofmt -l` flags every file and the
+#     formatting check fails locally while passing in CI (where checkout is LF).
+#   * Shell scripts: a CRLF scripts/check.sh fails on Linux runners with
+#     "bad interpreter: /usr/bin/env bash^M".
+#
+# `text=auto` lets Git decide what is text; `eol=lf` then applies only to those.
+* text=auto eol=lf
+
+# Never convert binaries.
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary

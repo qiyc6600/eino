@@ -251,6 +251,7 @@ func TestExecution_AppendWritesOnlyNewMessages(t *testing.T) {
 			store.appendBytes, replaceWouldWrite)
 	}
 }
+
 // file store embeds *threadStore, so without an explicit override it would
 // promote an append that only touches memory and never reaches disk.
 func TestFileThreadStore_AppendHistoryPersists(t *testing.T) {

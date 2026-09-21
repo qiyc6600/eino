@@ -120,9 +120,9 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	full, repaired := sanitizeMessages(messages)
 	compacted, tokens := r.compressMessages(ctx, full, recorder)
 	state := &SteppedRunState{
-		RunID:      id,
-		ThreadID:   thread,
-		Messages:   toSchemaMessages(full),
+		RunID:    id,
+		ThreadID: thread,
+		Messages: toSchemaMessages(full),
 		// len(threadMessages) is what the store holds (history excludes the system
 		// prompt), so everything past it is this run's own contribution.
 		StoredCount:     len(threadMessages),
