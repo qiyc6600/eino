@@ -129,7 +129,12 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 		StoredCount:     len(threadMessages),
 		HistoryRepaired: repaired,
 	}
-	if tokens != nil && tokens.Compressed {
+	// A shorter list means the model context differs from the full history —
+	// either the count window dropped messages or the token logic compressed
+	// them. Keying on the length rather than on TokenInfo.Compressed matters:
+	// the window can shorten the list without any compression happening, and
+	// gating on Compressed silently discarded the window.
+	if len(compacted) != len(full) {
 		state.ModelContext = toSchemaMessages(compacted)
 	}
 	result, _ := r.advance(ctx, ac, state, recorder, options.confirmBeforeExecute, false)

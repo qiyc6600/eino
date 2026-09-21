@@ -198,6 +198,8 @@ func NewApp(cfg *Config) *App {
 	// Thread history governance: both default to preserving everything.
 	runner.SetThreadHistoryLimit(cfg.ThreadHistoryMaxMessages)
 	runner.SetThreadRetention(cfg.ThreadRetention)
+	// Count-based sliding window for the model context (0 = disabled).
+	runner.SetMessageWindow(cfg.MaxMessages)
 	if pg != nil {
 		runner.UseRunStore(pg.Runs, cfg.RunEventRetention)
 	}

@@ -57,9 +57,13 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	}
 
 	entries, err := s.store.List(ctx, userID)
-	if err != nil || len(entries) == 0 {
+	if err != nil {
 		return ""
 	}
+	// Note: an empty KV store is not a reason to stop. Vector-recalled episodes
+	// are a separate source, and returning early here would silently disable
+	// recall for a user whose KV entries were removed while their episodes
+	// remained. The cost is one embedding call for a user with no memories yet.
 
 	queryTokens := tokenize(query)
 

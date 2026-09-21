@@ -216,13 +216,15 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 | 策略 | 实现 | 特点 |
 |------|------|------|
-| 按消息数裁剪 | `TrimByCount` | system 消息永久保留。**已实现并有单测，但未接入执行路径**，见「已知限制」 |
+| 按消息数裁剪 | `TrimByCount` | system 消息永久保留；经 `MAX_MESSAGES` 配置，默认关闭（见下） |
 | 按 Token 数裁剪 | `TrimByToken` | 基于 `SimpleTokenCounter` 估算，压缩流程的最后一步调用 |
 | Tool 配对保护 | `GuardToolPairs` | tool_call 与 tool_result 不拆散 |
 | LLM 摘要压缩 | `Summarizer.Compress` | 超阈值触发 LLM 摘要，规则提取降级兜底 |
 | 工具结果上限 | `capToolResult` | 单个结果超 `MAX_TOOL_RESULT_CHARS` 截断并标注原始长度 |
 | 历史与上下文分离 | `SteppedRunState.ModelContext` | 压缩只改模型视图，完整对话仍完整落盘 |
 | 追加式写入 | `ThreadHistoryAppender` | 线程历史只写新增消息，不再每轮重写整块（PostgreSQL 与内存后端；文件后端仍为全量重写） |
+
+两种裁剪按**先条数、后 token** 的顺序作用。`MAX_MESSAGES` 默认为 0（不按条数裁剪），因为窗口设得过小会让对话永远达不到摘要阈值——**开启条数窗口可能使摘要压缩永不触发**。
 
 **可用预算** = `MAX_TOKENS` − 工具定义 schema 开销 − `RESERVE_OUTPUT_TOKENS`（为回答预留）。压缩判定与裁剪都以它为准，而界面显示的是含基础开销的请求真实大小。token 条同时展示本地估算与服务商返回的实际用量。
 
@@ -328,6 +330,7 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
 | `MAX_TOKENS` | `8000` | 上下文窗口上限（进度条满刻度） |
+| `MAX_MESSAGES` | `0` | 送给模型的消息条数上限，0 = 不按条数裁剪 |
 | `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例（阈值 = 可用预算 × 此值） |
 | `SUMMARY_TARGET_TOKENS` | `800` | 摘要目标 token 数 |
 | `RESERVE_OUTPUT_TOKENS` | `1024` | 为模型回答预留的空间；可用预算 = `MAX_TOKENS` − 本项 − 工具定义开销 |
@@ -522,8 +525,6 @@ go test ./...
 | 线程历史默认无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长。**可通过 `THREAD_HISTORY_MAX_MESSAGES` 与 `THREAD_RETENTION` 显式开启上限或清理**（默认保持完整保留：静默丢弃用户对话属于产品决策）。写入成本已通过追加式写入解决 |
 | 文件后端写入为全量重写 | 单文件 JSON 无法原地追加，成本为 O(全部会话)；写入成本敏感的场景应使用 PostgreSQL |
 | 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
-| `MAX_MESSAGES` / `TrimByCount` 未接入 | 按消息数裁剪已实现并有单测，但无生产调用方，实际只走 token 裁剪与摘要压缩 |
-| 记忆检索在 KV 为空时提前返回 | 只有向量条目、没有 KV 条目的用户不会被注入任何记忆。实践中两者同时写入，因此是潜在不一致而非线上问题 |
 | 审批恢复路径不流式 | 审批决策接口返回一次性 JSON，恢复期间界面无进度 |
 | 刷新页面需重新登录 | sessionId 仅存页面内存，未写入 localStorage/sessionStorage |
 

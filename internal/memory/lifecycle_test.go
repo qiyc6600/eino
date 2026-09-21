@@ -319,16 +319,6 @@ func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
 	}
 	svc := NewService(store, nil, vec, nil)
 
-	// RetrieveRelevant returns early when the KV store is empty, so a KV entry is
-	// needed to reach the vector path at all.
-	if err := store.Put(ctx, MemoryEntry{
-		UserID: "u1", Key: "note", Value: "x",
-		Type: MemoryTypeFact, Importance: 3,
-		CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	const budget = 80
 	out := svc.RetrieveRelevant(ctx, "u1", "脚本", budget, false)
 	if !strings.Contains(out, "用户历史相关记忆") {
@@ -342,6 +332,23 @@ func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
 	if estimateTokens(all) <= budget {
 		t.Fatalf("test setup is wrong: the uncapped recall (%d tokens) fits the %d budget",
 			estimateTokens(all), budget)
+	}
+}
+
+// TestRetrieveRelevant_VectorOnlyUserStillGetsRecall is the regression guard for
+// an early return that skipped the vector store whenever the KV store was empty,
+// which silently disabled recall for a user whose KV entries had been removed
+// while their episodes remained.
+func TestRetrieveRelevant_VectorOnlyUserStillGetsRecall(t *testing.T) {
+	store := NewInMemoryMemoryStore() // deliberately empty: no KV entries at all
+	vec := &stubVectorStore{results: []VectorResult{
+		{Content: "用户之前提到过部署脚本", Score: 0.9, Metadata: map[string]any{}},
+	}}
+	svc := NewService(store, nil, vec, nil)
+
+	out := svc.RetrieveRelevant(context.Background(), "u1", "脚本", 200, false)
+	if !strings.Contains(out, "部署脚本") {
+		t.Fatalf("a user with only vector episodes must still get recall:\n%q", out)
 	}
 }
 

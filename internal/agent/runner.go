@@ -179,8 +179,23 @@ type Runner struct {
 	reserveOutputTokens atomic.Int64
 	// maxHistoryMessages caps one conversation's stored history (0 = unlimited).
 	maxHistoryMessages atomic.Int64
+	// maxMessages caps how many messages reach the model per turn (0 = no cap).
+	maxMessages atomic.Int64
 	// threadRetention deletes threads untouched for this long (0 = keep forever).
 	threadRetention atomic.Int64
+}
+
+// SetMessageWindow caps how many messages are sent to the model per turn, using
+// the count-based sliding window. 0 (the default) disables it.
+//
+// It is applied before the token budget, so a window small enough to keep the
+// conversation under the token threshold also prevents summarization from ever
+// triggering.
+func (r *Runner) SetMessageWindow(maxMessages int) {
+	if maxMessages < 0 {
+		maxMessages = 0
+	}
+	r.maxMessages.Store(int64(maxMessages))
 }
 
 // SetThreadHistoryLimit caps how many messages of one conversation are stored.
@@ -548,10 +563,28 @@ func isRateLimitError(errMsg string) bool {
 		strings.Contains(lower, "rpm")
 }
 
+// applyMessageWindow caps how many messages reach the model, using the
+// count-based sliding window (system messages always kept, tool pairs never
+// split). Disabled by default; 0 leaves the list untouched.
+func (r *Runner) applyMessageWindow(messages []*schema.Message) []*schema.Message {
+	limit := int(r.maxMessages.Load())
+	if limit <= 0 || len(messages) <= limit {
+		return messages
+	}
+	return contextToEinoMessages(contextmgr.TrimByCount(einoToContextMessages(messages), limit))
+}
+
 // compressMessages applies context compression to the message list before sending
 // to the agent. Converts between Eino schema.Message and contextmgr.Message formats.
 // Returns the (possibly compressed) messages and a TokenInfo snapshot.
+//
+// Two strategies apply, count first then tokens: the count window bounds how many
+// messages are considered at all, and the token budget bounds their size. Note
+// that enabling the count window can prevent summarization from ever triggering —
+// a conversation trimmed to N messages may never reach the token threshold.
 func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) ([]*schema.Message, *TokenInfo) {
+	messages = r.applyMessageWindow(messages)
+
 	if r.summarizer == nil || len(messages) <= 4 {
 		// Still compute token info for display even when skipping compression
 		if r.summarizer != nil {

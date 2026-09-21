@@ -189,7 +189,7 @@ func LoadConfig() *Config {
 		ArkBaseURL:                 getEnv("ARK_BASE_URL", ""),
 		EmbeddingProvider:          getEnv("EMBEDDING_PROVIDER", "hash"),
 		EmbeddingModel:             getEnv("EMBEDDING_MODEL", ""),
-		MaxMessages:                getEnvInt("MAX_MESSAGES", 30),
+		MaxMessages:                getEnvInt("MAX_MESSAGES", 0),
 		MaxTokens:                  getEnvInt("MAX_TOKENS", 8000),
 		SummarizeThresholdRatio:    getEnvFloat("SUMMARIZE_THRESHOLD_RATIO", 0.8),
 		SummaryTargetTokens:        getEnvInt("SUMMARY_TARGET_TOKENS", 800),

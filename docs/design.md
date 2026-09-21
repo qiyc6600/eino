@@ -294,12 +294,14 @@ type Message struct {
 
 | 策略 | 实现 | 说明 |
 |------|------|------|
-| 按消息数裁剪 | `TrimByCount(msgs, maxN)` | 保留最近 N 条非 system 消息。**当前执行路径未接入**，见下方说明 |
+| 按消息数裁剪 | `TrimByCount(msgs, maxN)` | 保留最近 N 条非 system 消息，经 `MAX_MESSAGES` 配置；在 token 裁剪之前应用 |
 | 按 token 裁剪 | `TrimByToken(msgs, maxTokens, counter)` | 保留最近 N token 的消息，压缩流程的最后一步会调用 |
 | tool 配对保护 | `GuardToolPairs(msgs)` | 确保 assistant+tool_call 和 tool+result 不被拆散 |
 | system 永久保留 | TrimByCount/TrimByToken 内置 | system 消息不纳入裁剪预算 |
 
-> **`TrimByCount` 的现状**：函数已实现并有单元测试，但没有任何生产调用方——`MAX_MESSAGES` 配置项目前是只读不用的死配置，实际执行路径只走 token 裁剪与摘要压缩。如果需要"按消息数兜底"生效，应在 `Runner.compressMessages` 中于 token 裁剪前调用它；如果不需要，应把该配置项移除以免误导。
+两种策略**按"先条数、后 token"的顺序**作用：条数窗口决定有多少消息进入考量，token 预算决定它们的大小。`MAX_MESSAGES` 默认为 0（不按条数裁剪），因为窗口设得过小会让对话永远达不到摘要阈值——**开启条数窗口可能使摘要压缩永不触发**，这是两个策略之间的取舍。
+
+> 实现细节：`compressMessages` 返回的列表与完整历史的**长度差**是"模型上下文不同于完整历史"的判据（无论是窗口裁掉了消息还是 token 逻辑压缩了）。早前用 `TokenInfo.Compressed` 作判据，结果是窗口生效但结果被丢弃——模型仍然拿到完整列表。
 
 #### 3.4.3 可用预算的构成
 
@@ -620,7 +622,7 @@ PostgreSQL 版在启动时执行编译进程序的版本化 SQL 迁移。`agent_
 | `DATABASE_MAX_IDLE_CONNS` | `5` | PostgreSQL 最大空闲连接数 |
 | `DATABASE_CONN_MAX_LIFETIME` | `30m` | PostgreSQL 连接最长复用时间 |
 | `MAX_TOKENS` | `8000` | 上下文 token 上限（进度条满刻度） |
-| `MAX_MESSAGES` | `30` | 最大消息数。**当前未接入执行路径**，见 3.4.2 |
+| `MAX_MESSAGES` | `0` | 送给模型的消息条数上限，0 = 不按条数裁剪（见 3.4.2） |
 | `SUMMARIZE_THRESHOLD_RATIO` | `0.8` | 摘要触发阈值比例（阈值 = 可用预算 × 此值） |
 | `SUMMARY_TARGET_TOKENS` | `800` | 摘要目标 token 数 |
 | `RESERVE_OUTPUT_TOKENS` | `1024` | 为模型回答预留的空间：可用预算 = `MAX_TOKENS` − 本项 − 工具定义开销 |
@@ -690,7 +692,7 @@ score = 关键词重叠×2 (query-aware) + importance/5 + exp(-小时/168) (一�
 - 阈值 `minVectorRelevance = 0.3` 以下的召回直接丢弃。
 - 条目按整条丢弃而非截断文本——被切成一半的历史片段会读成另一个事实。结果按相关度排序，高相关度条目先占用预算；某一条过大时跳过它继续尝试更短的条目，而不是浪费剩余预算。
 - 若不加这个上限，召回文本可能单独超过整个预算：实测中 120 token 的预算下注入了 1242 token，同时所有 KV 条目被跳过。
-- 注意 `RetrieveRelevant` 在 KV 存储为空时提前返回，因此只有向量条目、没有 KV 条目的用户不会被注入任何记忆。实践中两者同时写入（`storeEpisode` 同时写 KV 与向量），所以这是潜在不一致而非线上问题。
+- 召回是独立于 KV 的来源：KV 存储为空**不会**跳过向量检索。早前 `RetrieveRelevant` 在 KV 为空时提前返回，导致 KV 条目被清空但情景仍在的用户静默失去召回。代价是尚无任何记忆的用户会多一次 embedding 调用。
 
 - 按分数排序，在 `MEMORY_BUDGET_TOKENS` 预算内装配"确定性记忆"与"相关历史记忆"两段
 - 命中条目 `access_count++` 并刷新时间戳（使用即强化，越常用越靠前）
