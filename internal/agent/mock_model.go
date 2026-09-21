@@ -253,12 +253,18 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		}},
 	}
 
-	// Keyword mapping
+	// Keyword mapping.
+	//
+	// The single-character operator words (加/减/乘/除) are deliberately absent:
+	// they are substrings of unrelated words — "除" sits inside "删除", so
+	// "删除a1008" matched the math agent and called the calculator with no
+	// expression. An actual arithmetic expression is the precise signal, and it is
+	// checked separately below.
 	keywords := map[string][]string{
 		// Sub-agent routes (priority when bound via WithTools)
-		"math_agent":    {"计算", "等于多少", "加", "减", "乘", "除", "×", "÷", "*"},
+		"math_agent":    {"计算", "等于多少", "×", "÷", "*"},
 		"search_agent":  {"天气", "气温", "温度", "搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
-		"general_agent": {"删除订单", "删掉订单", "取消订单", "发邮件", "发送邮件", "发一封", "订单", "查我的", "查询订单", "我的订单"},
+		"general_agent": {"删除订单", "删掉订单", "取消订单", "删除", "发邮件", "发送邮件", "发一封", "订单", "查我的", "查询订单", "我的订单"},
 		// The MCP sub-agent owns whatever tools an external server exposes, so the
 		// mock cannot key on tool names it does not know. It routes on the demo
 		// server's vocabulary instead; a real model routes by the agent
@@ -270,9 +276,9 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		"read_notes":  {"笔记", "notes", "读取笔记"},
 		"delete_note": {"删除笔记", "删掉笔记"},
 		// Real tools (fallback when sub-agents not bound)
-		"delete_order": {"删除订单", "删掉订单", "取消订单"},
+		"delete_order": {"删除订单", "删掉订单", "取消订单", "删除"},
 		"send_email":   {"发邮件", "发送邮件", "发一封"},
-		"calculator":   {"计算", "等于多少", "加", "减", "乘", "除", "×", "÷", "*"},
+		"calculator":   {"计算", "等于多少", "×", "÷", "*"},
 		"weather":      {"天气", "气温", "温度"},
 		"grep":         {"搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
 		"query_order":  {"订单", "查我的", "查询订单", "我的订单", "查一下"},
@@ -303,6 +309,26 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 					matchLen: len(kw),
 				}
 			}
+		}
+	}
+
+	// An arithmetic expression is the precise math signal. It competes on the same
+	// length scale as the keywords, so a real expression is not overruled by a
+	// short keyword — while "删除订单 A-1008" stays a delete request, because
+	// "A-1008" parses to no expression (an operator with no operand before it).
+	if expr := extractMathExpr(raw); expr != "" {
+		for _, m := range matches {
+			if m.toolName != "math_agent" && m.toolName != "calculator" {
+				continue
+			}
+			if !available[m.toolName] {
+				continue
+			}
+			if len(expr) > best.matchLen {
+				best = scoredMatch{toolName: m.toolName, argFunc: m.argFunc, matchLen: len(expr)}
+			}
+			// The sub-agent route wins over the bare tool when both are bound.
+			break
 		}
 	}
 
@@ -549,16 +575,31 @@ func extractNoteID(s string) string {
 	return "n1"
 }
 
+// extractOrderID finds an order id in a message.
+//
+// It scans for the id instead of requiring a whitespace-separated field that is
+// exactly one, because the id is usually glued to the verb: "删除a1008" is a single
+// field, and the previous version looked at w[1] for a hyphen, so it saw nothing.
+// The hyphen is optional and the letter is case-insensitive — that is how people
+// type it — and both forms normalise to the stored "A-1008".
 func extractOrderID(s string) string {
-	words := splitFields(s)
-	for _, w := range words {
-		w = trimRightPunct(w)
-		if len(w) > 2 && w[0] >= 'A' && w[0] <= 'B' && w[1] == '-' {
-			return w
+	runes := []rune(strings.ToUpper(s))
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != 'A' && runes[i] != 'B' {
+			continue
 		}
-		if hasPrefix(w, "A-") || hasPrefix(w, "B-") {
-			return w
+		j := i + 1
+		if j < len(runes) && runes[j] == '-' {
+			j++
 		}
+		digits := j
+		for j < len(runes) && runes[j] >= '0' && runes[j] <= '9' {
+			j++
+		}
+		if j == digits {
+			continue // a stray A or B, not an id
+		}
+		return string(runes[i]) + "-" + string(runes[digits:j])
 	}
 	return ""
 }
