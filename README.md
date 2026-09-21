@@ -281,7 +281,17 @@ docker compose -f compose.postgres.yml up -d
 
 迁移文件位于 `internal/postgres/migrations`。已发布的迁移由 SHA-256 校验，不能原地修改；结构变更应新增编号更大的 SQL 文件。启动时会在一条专用连接上持有 PostgreSQL advisory lock，每个待执行版本在独立事务中提交，因此多个实例可以同时启动。数据库包含当前程序未知的更高版本，或已执行迁移的校验和不匹配时，程序会拒绝启动。
 
-`RUN_EVENT_RETENTION` 默认 168 小时。到期的运行事件不再可读，并在后续写入时从数据库清理。设置 `TEST_DATABASE_URL` 后，`go test ./integration_test -run TestPostgres` 会执行真实数据库的并发迁移、双连接池共享、运行事件隔离、审批竞争和创建／恢复两阶段的事务回滚测试。
+`RUN_EVENT_RETENTION` 默认 168 小时。到期的运行事件不再可读，并在后续写入时从数据库清理。设置 `TEST_DATABASE_URL` 后，`go test ./integration_test -run TestPostgres` 会执行真实数据库的并发迁移、双连接池共享、运行事件隔离、审批竞争、创建／恢复两阶段的事务回滚，以及追加式写入的长度守卫与保留期清理：
+
+```bash
+docker compose -f compose.postgres.yml up -d
+TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslmode=disable' \
+  go test ./integration_test -run TestPostgres -v
+```
+
+这些测试需要真实数据库，因为单元测试用的 sqlmock 只校验 SQL 语句文本，不校验 PostgreSQL 是否接受它、行为是否符合预期。未设置 `TEST_DATABASE_URL` 时它们会跳过。
+
+> **运维注意**：迁移 004 用 `CREATE INDEX`（非 `CONCURRENTLY`）为线程保留期加索引。迁移执行器把每个版本包在事务里，而 `CREATE INDEX CONCURRENTLY` 不能在事务内运行，所以在已有大量数据的库上执行该迁移会短暂阻塞写入。演示与新建库不受影响。
 
 生产探针无需认证：`GET /healthz` 用于进程存活检查，`GET /readyz` 用于流量就绪检查。PostgreSQL 模式下，`/readyz` 会在 2 秒超时内核对数据库连接和完整迁移历史；依赖不可用时返回 `503 {"status":"unavailable"}`。内存或文件模式没有外部数据库依赖，初始化成功后即返回 ready。
 

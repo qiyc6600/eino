@@ -45,6 +45,7 @@
 | 35 | 行尾统一为 LF | 全局 | ✅ | `.gitattributes` 强制文本文件 LF：`core.autocrlf=true` 下 Windows 检出为 CRLF，会让 gofmt 把整个仓库判为未格式化，使检查脚本在本地误报 |
 | 36 | 线程历史治理开关 | 模块 04/05 | ✅ | `THREAD_HISTORY_MAX_MESSAGES`（单会话上限，裁剪后经 `GuardToolPairs` 保护 tool 配对）与 `THREAD_RETENTION`（按时间清理，写入时顺带执行、仅限当前用户）；默认均为保留；`updated_at` 索引由迁移 004 添加；未加时间戳的旧数据不删 |
 | 37 | 向量记忆文本长度上限 | 模块 05 | ✅ | `FormatVectorResultsWithin` 按预算跳过装不下的条目（整条丢弃而非截断文本），`RetrieveRelevant` 用它截断向量文本后再让 KV 条目使用剩余预算；顺带把硬编码的 0.3 阈值改用既有但未被使用的 `minVectorRelevance` 常量 |
+| 38 | 真实 PostgreSQL 验证 | 全局 | ✅ | 新增 `TestPostgresThreadAppendAndPrune`：直接断言迁移 004 的版本记录与索引存在，并在真实库上验证追加守卫（首次插入、长度匹配追加、过期长度拒绝且不改数据）与保留期清理。全量 `-race` 测试带真实数据库通过 |
 
 ---
 
@@ -90,6 +91,7 @@
 - 2026-09-21：新增 `.gitattributes` 统一文本文件为 LF。此前 `core.autocrlf=true` 使 Windows 检出为 CRLF，gofmt 会把整个仓库判为未格式化，导致检查脚本在本地误报全部文件——正是脚本要防的"本地与 CI 不一致"。
 - 2026-09-21：新增线程历史治理开关。`THREAD_HISTORY_MAX_MESSAGES` 限制单会话消息数（裁剪后经 `GuardToolPairs` 丢弃孤立 tool 结果），`THREAD_RETENTION` 按时间清理未使用的会话（写入时顺带执行，仅限当前用户以保持存储层"只触碰调用者命名空间"的不变量）。两者默认均为保留——静默丢弃用户对话属于产品决策。清理复用既有 `updated_at` 列，迁移 004 仅添加索引。实测：上限 4 时 4 轮对话只保留 4 条，默认配置保留全部 8 条。
 - 2026-09-21：向量记忆文本加上长度上限。此前召回文本无任何截断，可单独超出整个记忆预算：实测 120 token 预算下注入 1242 token，且所有 KV 条目被跳过。改为按预算跳过装不下的条目（整条丢弃而非截断文本，避免历史片段被切成另一个事实），KV 条目随后使用剩余预算。顺带把 `FormatVectorResults` 里硬编码的 0.3 阈值改用 `retrieval.go` 中已定义却未被使用的 `minVectorRelevance`。两个回归测试均验证过"去掉上限即失败"。
+- 2026-09-21：补上真实 PostgreSQL 验证。此前迁移 004 与新增的 SQL（`jsonb_array_length` 长度守卫、`messages || $new::jsonb` 追加、保留期 DELETE）只在 sqlmock 上验证过，而 sqlmock 只校验语句文本，不校验 PostgreSQL 是否接受与行为是否符合预期。新增 `TestPostgresThreadAppendAndPrune` 在真实库上覆盖三者，并直接断言迁移版本记录与索引存在；全量 `-race` 测试带真实数据库通过。README 补充复现命令，并注明迁移 004 在已有大量数据的库上会短暂阻塞写入（迁移执行器包事务，无法使用 `CREATE INDEX CONCURRENTLY`）。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

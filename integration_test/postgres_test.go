@@ -665,3 +665,96 @@ func TestPostgresStoresAndAtomicApproval(t *testing.T) {
 		t.Fatalf("expected exactly one approval claimant, got %d", count)
 	}
 }
+
+// TestPostgresThreadAppendAndPrune validates the SQL behind the guarded append
+// and the retention sweep against a real database. The unit tests use sqlmock,
+// which checks the statement text but not whether PostgreSQL accepts it or
+// behaves as intended.
+func TestPostgresThreadAppendAndPrune(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	backend, err := pgstore.Open(ctx, dsn, 5, 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+
+	suffix := uuid.NewString()
+	userID := "test-append-" + suffix
+	threadID := "t-" + suffix
+	staleID := "t-stale-" + suffix
+	defer func() {
+		_, _ = backend.DB.Exec(`DELETE FROM agent_threads WHERE user_id=$1`, userID)
+	}()
+
+	// Migration 004 must have applied: both the recorded version and the index
+	// the retention sweep relies on.
+	var version int
+	if err := backend.DB.QueryRowContext(ctx,
+		`SELECT version FROM agent_schema_migrations WHERE name='thread_retention_index'`).Scan(&version); err != nil {
+		t.Fatalf("migration 004 is not recorded: %v", err)
+	}
+	if version != 4 {
+		t.Fatalf("thread_retention_index recorded as version %d, want 4", version)
+	}
+	var indexName string
+	if err := backend.DB.QueryRowContext(ctx,
+		`SELECT indexname FROM pg_indexes WHERE tablename='agent_threads' AND indexname='agent_threads_user_updated_idx'`).Scan(&indexName); err != nil {
+		t.Fatalf("retention index missing — migration 004 did not apply: %v", err)
+	}
+
+	store := backend.Threads
+
+	// First turn: the guard expects an empty history and inserts the row.
+	if err := store.AppendHistoryContext(ctx, userID, threadID, 0, []*schema.Message{schema.UserMessage("第一轮")}); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if got := len(store.Copy(userID, threadID)); got != 1 {
+		t.Fatalf("after first append: %d messages, want 1", got)
+	}
+
+	// Second turn: a matching length appends in place.
+	if err := store.AppendHistoryContext(ctx, userID, threadID, 1, []*schema.Message{schema.AssistantMessage("回复", nil)}); err != nil {
+		t.Fatalf("second append: %v", err)
+	}
+	msgs := store.Copy(userID, threadID)
+	if len(msgs) != 2 || msgs[0].Content != "第一轮" || msgs[1].Content != "回复" {
+		t.Fatalf("append produced the wrong history: %+v", msgs)
+	}
+
+	// A stale expected length must be refused, and refusing must not modify the
+	// stored history — this is what protects checkpoints written before the guard
+	// existed.
+	err = store.AppendHistoryContext(ctx, userID, threadID, 0, []*schema.Message{schema.UserMessage("不该写入")})
+	if !errors.Is(err, agent.ErrThreadAppendMismatch) {
+		t.Fatalf("expected ErrThreadAppendMismatch for a stale prefix, got %v", err)
+	}
+	if got := len(store.Copy(userID, threadID)); got != 2 {
+		t.Fatalf("a refused append modified the history: %d messages", got)
+	}
+
+	// Retention: a thread touched two days ago is swept, a fresh one survives.
+	if err := store.AppendHistoryContext(ctx, userID, staleID, 0, []*schema.Message{schema.UserMessage("旧会话")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.DB.ExecContext(ctx,
+		`UPDATE agent_threads SET updated_at = NOW() - INTERVAL '48 hours' WHERE user_id=$1 AND thread_id=$2`,
+		userID, staleID); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.PruneThreadsBefore(ctx, userID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("prune removed %d threads, want 1", removed)
+	}
+	ids := store.List(userID)
+	if len(ids) != 1 || ids[0] != threadID {
+		t.Fatalf("wrong thread survived the sweep: %v", ids)
+	}
+}
