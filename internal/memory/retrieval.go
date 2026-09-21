@@ -47,6 +47,11 @@ type scoredEntry struct {
 // read-only recounts (e.g. UI display) that must not skew the statistics.
 // An empty query scores on importance/recency/access only.
 func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, budgetTokens int, reinforce bool) string {
+	// The switch is enforced here rather than at each call site, so no caller can
+	// inject memories for a user who turned them off.
+	if !s.MemoryEnabled(ctx, userID) {
+		return ""
+	}
 	if budgetTokens <= 0 {
 		budgetTokens = s.budgetTokens
 	}
@@ -61,7 +66,7 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	// --- Score KV entries ---
 	scored := make([]scoredEntry, 0, len(entries))
 	for _, e := range entries {
-		if e.Archived {
+		if e.Archived || IsReservedKey(e.Key) {
 			continue
 		}
 		scored = append(scored, scoredEntry{

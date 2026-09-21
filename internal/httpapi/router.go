@@ -107,6 +107,7 @@ func (r *Router) Handler() http.Handler {
 	// Memory
 	mux.Handle("/api/memory", authMw(http.HandlerFunc(r.handleMemory)))
 	mux.Handle("/api/memory/consolidate", authMw(http.HandlerFunc(r.memoryHandler.ConsolidateMemory)))
+	mux.Handle("/api/memory/settings", authMw(http.HandlerFunc(r.memoryHandler.MemorySettings)))
 	mux.Handle("/api/memory/", authMw(http.HandlerFunc(r.memoryHandler.DeleteMemory)))
 
 	// Model switching

@@ -39,6 +39,9 @@ type ConsolidationResult struct {
 //     rule-based profile is written instead, so the flow stays demoable in
 //     mock mode.
 func (s *Service) Consolidate(ctx context.Context, userID string) (*ConsolidationResult, error) {
+	if !s.MemoryEnabled(ctx, userID) {
+		return &ConsolidationResult{NewFactKeys: []string{}, Skipped: "记忆已关闭"}, nil
+	}
 	entries, err := s.store.List(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -49,7 +52,7 @@ func (s *Service) Consolidate(ctx context.Context, userID string) (*Consolidatio
 	// --- 1. Forgetting: archive stale low-value entries ---
 	var active []MemoryEntry
 	for _, e := range entries {
-		if e.Archived || e.Key == profileKey {
+		if e.Archived || e.Key == profileKey || IsReservedKey(e.Key) {
 			active = append(active, e)
 			continue
 		}

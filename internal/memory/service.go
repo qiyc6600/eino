@@ -61,6 +61,11 @@ type EntryMeta struct {
 // entry's history (capped) instead of being silently dropped. Identical
 // values are a no-op.
 func (s *Service) UpsertPreference(ctx context.Context, userID, key, value string, meta EntryMeta) error {
+	// Framework entries are written through their own typed setters, never by
+	// extraction or the memory API.
+	if IsReservedKey(key) {
+		return fmt.Errorf("保留键不可通过记忆接口写入：%s", key)
+	}
 	now := time.Now().Format(time.RFC3339)
 
 	existing, ok, err := s.store.Get(ctx, userID, key)
@@ -130,13 +135,29 @@ func (s *Service) GetPreference(ctx context.Context, userID, key string) (string
 	return entry.Value, true, nil
 }
 
-// ListPreferences returns all preferences for a user.
+// ListPreferences returns all user-visible preferences for a user. Framework
+// entries (reserved keys) are internal bookkeeping and never listed.
 func (s *Service) ListPreferences(ctx context.Context, userID string) ([]MemoryEntry, error) {
-	return s.store.List(ctx, userID)
+	entries, err := s.store.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	visible := make([]MemoryEntry, 0, len(entries))
+	for _, e := range entries {
+		if IsReservedKey(e.Key) {
+			continue
+		}
+		visible = append(visible, e)
+	}
+	return visible, nil
 }
 
-// DeletePreference removes a preference from long-term memory.
+// DeletePreference removes a preference from long-term memory. Reserved keys are
+// refused so the memory API cannot corrupt framework state.
 func (s *Service) DeletePreference(ctx context.Context, userID, key string) error {
+	if IsReservedKey(key) {
+		return fmt.Errorf("保留键不可通过记忆接口修改：%s", key)
+	}
 	return s.store.Delete(ctx, userID, key)
 }
 
@@ -150,7 +171,12 @@ func (s *Service) DeletePreference(ctx context.Context, userID, key string) erro
 //     deterministic and demoable without a real LLM.
 //  3. Messages that actually carry memory value are additionally stored as
 //     episodes (KV + vector index); plain chit-chat is never indexed.
+//
+// A user who turned memory off ("do not remember") is never extracted from.
 func (s *Service) ExtractAndSave(ctx context.Context, userID, threadID, message string) error {
+	if !s.MemoryEnabled(ctx, userID) {
+		return nil
+	}
 	excerpt := truncateExcerpt(message, 100)
 
 	// 1. LLM extraction owns the turn when the model is usable.

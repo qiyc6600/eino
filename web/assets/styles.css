@@ -179,8 +179,7 @@ body {
     background: white;
 }
 
-/* Live one-line status while a run is executing (routing, tool calls, approval) */
-.stream-progress {
+/* Live one-line status while a run is executing (routing, tool calls, approval) */.stream-progress {
     padding: 6px 20px;
     font-size: 12px;
     color: #4b5563;
@@ -445,6 +444,8 @@ body {
 
 /* Memory List */
 .memory-list { font-size: 12px; }
+/* Memory is switched off: entries stay visible but clearly inactive. */
+.memory-list.memory-disabled { opacity: 0.45; filter: grayscale(0.6); }
 .memory-item {
     padding: 6px 8px;
     background: #f3f4f6;

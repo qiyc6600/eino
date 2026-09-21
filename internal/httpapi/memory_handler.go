@@ -100,3 +100,44 @@ func (h *MemoryHandler) ConsolidateMemory(w http.ResponseWriter, r *http.Request
 
 	writeJSON(w, http.StatusOK, result)
 }
+
+// MemorySettings handles GET and PUT /api/memory/settings.
+// The switch is per user: turning memory off stops both extraction from new
+// turns and injection of existing entries, without deleting anything.
+func (h *MemoryHandler) MemorySettings(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := h.memSvc.GetSettings(r.Context(), ac.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	case http.MethodPut:
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if body.Enabled == nil {
+			writeError(w, http.StatusBadRequest, "enabled is required")
+			return
+		}
+		settings := memory.MemorySettings{Enabled: *body.Enabled}
+		if err := h.memSvc.SetSettings(r.Context(), ac.UserID, settings); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, settings)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}

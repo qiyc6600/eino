@@ -239,6 +239,68 @@ func TestIntegration_MemoryCRUD(t *testing.T) {
 	}
 }
 
+// TestIntegration_MemorySettings covers the "do not remember" switch end to end:
+// it toggles over HTTP, keeps the reserved entry out of the user-visible list,
+// and refuses to let the memory API overwrite framework state.
+func TestIntegration_MemorySettings(t *testing.T) {
+	application := createTestApp(t)
+	server := httptest.NewServer(application.Router.Handler())
+	defer server.Close()
+
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
+
+	// Default is on.
+	resp := doGet(t, server.URL, "/api/memory/settings", sessionID)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for settings GET, got %d", resp.StatusCode)
+	}
+	var settings map[string]any
+	json.NewDecoder(resp.Body).Decode(&settings)
+	resp.Body.Close()
+	if settings["memory_enabled"] != true {
+		t.Fatalf("expected memory enabled by default, got %v", settings)
+	}
+
+	// Turn it off.
+	putBody, _ := json.Marshal(map[string]any{"enabled": false})
+	req, _ := http.NewRequest(http.MethodPut, server.URL+"/api/memory/settings", bytes.NewReader(putBody))
+	req.Header.Set("Authorization", "Bearer "+sessionID)
+	req.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putResp.Body.Close()
+	if putResp.StatusCode != 200 {
+		t.Fatalf("expected 200 for settings PUT, got %d", putResp.StatusCode)
+	}
+
+	resp = doGet(t, server.URL, "/api/memory/settings", sessionID)
+	json.NewDecoder(resp.Body).Decode(&settings)
+	resp.Body.Close()
+	if settings["memory_enabled"] != false {
+		t.Fatalf("expected memory disabled after PUT, got %v", settings)
+	}
+
+	// The reserved settings entry must not appear as a user memory.
+	resp = doGet(t, server.URL, "/api/memory", sessionID)
+	var entries []map[string]any
+	json.NewDecoder(resp.Body).Decode(&entries)
+	resp.Body.Close()
+	for _, e := range entries {
+		if key, _ := e["key"].(string); strings.HasPrefix(key, "__") {
+			t.Fatalf("reserved entry leaked into the memory list: %v", e)
+		}
+	}
+
+	// And the memory API must refuse to delete it.
+	delResp := doDelete(t, server.URL, "/api/memory/__settings", sessionID)
+	delResp.Body.Close()
+	if delResp.StatusCode == 200 {
+		t.Fatal("deleting a reserved key through the memory API must be refused")
+	}
+}
+
 func TestIntegration_ApprovalFlow(t *testing.T) {
 	application := createTestApp(t)
 	server := httptest.NewServer(application.Router.Handler())

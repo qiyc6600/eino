@@ -787,6 +787,7 @@ async function refreshMemory() {
     const listDiv = document.getElementById('memoryList');
     if (!listDiv) return;
     listDiv.innerHTML = '<div class="empty-state">加载中...</div>';
+    await refreshMemorySettings();
     try {
         const data = await api('GET', '/api/memory');
         console.log('[Memory] data:', data);
@@ -794,6 +795,55 @@ async function refreshMemory() {
     } catch (e) {
         console.error('[Memory] refresh failed:', e);
         listDiv.innerHTML = '<div class="empty-state">加载失败，点击刷新重试</div>';
+    }
+}
+
+// refreshMemorySettings syncs the "do not remember" toggle with the server.
+async function refreshMemorySettings() {
+    const toggle = document.getElementById('memoryDisabled');
+    if (!toggle) return;
+    try {
+        const settings = await api('GET', '/api/memory/settings');
+        toggle.checked = settings.enabled === false;
+        applyMemoryDisabledState(toggle.checked);
+    } catch (e) {
+        console.warn('[Memory] settings unavailable:', e.message || e);
+    }
+}
+
+// toggleMemorySetting persists the switch and reflects it in the panel.
+async function toggleMemorySetting(disabled) {
+    try {
+        await api('PUT', '/api/memory/settings', { enabled: !disabled });
+        applyMemoryDisabledState(disabled);
+        pushMessage(currentThread, 'system', disabled
+            ? '🙈 已禁止记忆：不再提取新记忆，也不再注入已有记忆（条目仍保留）'
+            : '🧠 已恢复记忆：新对话会重新提取并注入记忆');
+        renderChat();
+    } catch (e) {
+        // Roll the checkbox back so it never disagrees with the server.
+        const toggle = document.getElementById('memoryDisabled');
+        if (toggle) toggle.checked = !disabled;
+        pushMessage(currentThread, 'system', `记忆设置保存失败：${e.message}`);
+        renderChat();
+    }
+}
+
+function applyMemoryDisabledState(disabled) {
+    const listDiv = document.getElementById('memoryList');
+    if (!listDiv) return;
+    listDiv.classList.toggle('memory-disabled', !!disabled);
+    let notice = document.getElementById('memoryDisabledNotice');
+    if (disabled) {
+        if (!notice) {
+            notice = document.createElement('div');
+            notice.id = 'memoryDisabledNotice';
+            notice.className = 'empty-state';
+            notice.textContent = '记忆已关闭：下方为已有条目，不再被提取或注入';
+            listDiv.parentNode.insertBefore(notice, listDiv);
+        }
+    } else if (notice) {
+        notice.remove();
     }
 }
 
