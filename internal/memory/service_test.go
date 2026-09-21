@@ -23,11 +23,14 @@ func TestService_ExtractAndSave_Language(t *testing.T) {
 	}
 }
 
+// TestService_ExtractAndSave_Style covers a presentation preference stated with
+// persistence. The phrasing matters: only "以后请…" asks for a standing change.
+// See TestService_ExtractAndSave_TransientRequestsDoNotPersist for the other side.
 func TestService_ExtractAndSave_Style(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "请简洁回答")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "以后请简洁回答")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -42,7 +45,7 @@ func TestService_ExtractAndSave_DetailedStyle(t *testing.T) {
 	store := NewInMemoryMemoryStore()
 	svc := NewService(store, nil, nil, nil)
 
-	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "请详细回答")
+	err := svc.ExtractAndSave(context.Background(), "u_admin", "t1", "以后请详细回答")
 	if err != nil {
 		t.Fatalf("extract failed: %v", err)
 	}
@@ -50,6 +53,37 @@ func TestService_ExtractAndSave_DetailedStyle(t *testing.T) {
 	value, ok, _ := svc.GetPreference(context.Background(), "u_admin", "answer_style")
 	if !ok || value != "detailed" {
 		t.Errorf("expected answer_style=detailed, got %s (ok=%v)", value, ok)
+	}
+}
+
+// TestService_ExtractAndSave_TransientRequestsDoNotPersist is the guard on the
+// other side of the line, and the more important one.
+//
+// Every message here is a request about the answer the user is reading. None
+// carries a persistence marker, so none may write a standing preference: a
+// single "这个回答太长了" used to set answer_style=concise permanently, for every
+// future conversation. Repeating them the other way ("简洁点", then "详细讲讲")
+// made the profile oscillate with each turn's wording.
+func TestService_ExtractAndSave_TransientRequestsDoNotPersist(t *testing.T) {
+	cases := []string{
+		"请详细说明这个函数的作用",
+		"这个回答太长了，请简短一些",
+		"简洁点",
+		"帮我详细讲讲这段代码",
+		"请用简洁的方式回答", // an instruction about this answer, not a standing change
+		"展开说说",
+	}
+	for _, msg := range cases {
+		store := NewInMemoryMemoryStore()
+		svc := NewService(store, nil, nil, nil)
+		ctx := context.Background()
+
+		if err := svc.ExtractAndSave(ctx, "u1", "t1", msg); err != nil {
+			t.Fatalf("extract %q: %v", msg, err)
+		}
+		if _, ok, _ := svc.GetPreference(ctx, "u1", "answer_style"); ok {
+			t.Errorf("%q must not persist a standing style preference", msg)
+		}
 	}
 }
 

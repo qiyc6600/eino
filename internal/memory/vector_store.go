@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/example/agent-eino-demo/internal/auth"
 	"github.com/example/agent-eino-demo/internal/contextmgr"
@@ -257,6 +258,57 @@ func tokenize(text string) []string {
 
 func isWordChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r > 0x4e00
+}
+
+// overlapTokens splits text for the lexical-overlap channel used by retrieval
+// scoring.
+//
+// It is deliberately NOT tokenize. tokenize feeds hashEmbed, so its output has
+// to stay stable — changing it would invalidate every stored hash vector and the
+// VECTOR_MIN_SCORE calibration measured against them.
+//
+// The difference is CJK. tokenize emits a whole Chinese run as a single token,
+// so a Chinese query can only match an entry containing that exact run: measured
+// overlap for a natural Chinese query was 0, which made the query-aware half of
+// the scoring dead for the language most of this project's data is in. Here CJK
+// runs contribute character unigrams and bigrams — the standard cheap approach
+// for CJK retrieval — so "帮我写个部署脚本" and "部署脚本要用 Go 写" share
+// 部署 / 署脚 / 脚本.
+func overlapTokens(text string) []string {
+	runes := []rune(strings.ToLower(text))
+	out := make([]string, 0, len(runes))
+	var word []rune
+	flush := func() {
+		if len(word) > 0 {
+			out = append(out, string(word))
+			word = nil
+		}
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case isASCIIWordRune(r):
+			word = append(word, r)
+		case isCJKRune(r):
+			flush()
+			out = append(out, string(r))
+			if i+1 < len(runes) && isCJKRune(runes[i+1]) {
+				out = append(out, string(runes[i:i+2]))
+			}
+		default:
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+func isASCIIWordRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+func isCJKRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r)
 }
 
 func fnvHash(s string) uint32 {

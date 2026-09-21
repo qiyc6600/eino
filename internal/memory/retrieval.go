@@ -12,6 +12,33 @@ import (
 	"github.com/example/agent-eino-demo/internal/contextmgr"
 )
 
+// corePreferenceImportance is the importance at or above which a preference,
+// identity or rule is injected unconditionally, ahead of the competition for
+// the budget.
+//
+// The competition is not a fair fight. A preference's score ceiling is
+// importance/5 + recency — about 1.6 at the default importance — while an
+// episode that matches the query scores 0.4*0.8 + 2.0 = 2.32. With enough
+// query-matching episodes a standing preference was crowded out completely: the
+// user asked for a deployment script and the assistant did not even learn which
+// language they prefer. Importance is an explicit statement that an entry
+// matters regardless of what is being asked, so those entries are placed first
+// and do not compete.
+const corePreferenceImportance = 4
+
+// isCorePreference reports whether an entry is guaranteed a place in the
+// injected context.
+func isCorePreference(e MemoryEntry) bool {
+	if e.EffectiveImportance() < corePreferenceImportance {
+		return false
+	}
+	switch e.EffectiveType() {
+	case MemoryTypePreference, MemoryTypeIdentity, MemoryTypeRule:
+		return true
+	}
+	return false
+}
+
 // Retrieval defaults, overridable via Service.SetRetrievalConfig.
 //
 // The token budgets below are measured with contextmgr.CountText — the same
@@ -212,12 +239,19 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	// recall for a user whose KV entries were removed while their episodes
 	// remained. The cost is one embedding call for a user with no memories yet.
 
-	queryTokens := tokenize(query)
+	queryTokens := overlapTokens(query)
 
-	// --- Score KV entries ---
+	// --- Split core preferences from the competing pool ---
+	var core []scoredEntry
 	scored := make([]scoredEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.Archived || IsReservedKey(e.Key) {
+			continue
+		}
+		if isCorePreference(e) {
+			// Scored without the query: core entries are ranked among themselves by
+			// importance and recency, since relevance is not what put them here.
+			core = append(core, scoredEntry{entry: e, score: scoreEntry(e, nil, false)})
 			continue
 		}
 		scored = append(scored, scoredEntry{
@@ -225,17 +259,34 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 			score: scoreEntry(e, queryTokens, query != ""),
 		})
 	}
+	sort.Slice(core, func(i, j int) bool { return core[i].score > core[j].score })
 	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-
-	// --- Semantic episodes from the vector store ---
-	// The recalled text is capped at the budget so it can never exceed the
-	// injected memory budget on its own; the KV entries below use the remainder.
-	vectorText := s.QueryVectorMemory(ctx, userID, query, retrievalVectorTopK, budgetTokens)
 
 	// --- Assemble within budget ---
 	var prefLines, otherLines []string
 	var reinforced []MemoryEntry
-	used := contextmgr.CountText(vectorText)
+	used := 0
+
+	// Core preferences first, so semantic recall cannot displace them.
+	for _, se := range core {
+		line := formatEntryLine(se.entry)
+		cost := contextmgr.CountText(line)
+		if used+cost > budgetTokens {
+			continue
+		}
+		used += cost
+		prefLines = append(prefLines, line)
+		reinforced = append(reinforced, se.entry)
+	}
+
+	// Semantic episodes from the vector store, within what core left behind.
+	// Skipped rather than passed 0 when nothing is left: maxTokens=0 means
+	// "no limit" in that call, so passing it would defeat the budget entirely.
+	vectorText := ""
+	if remaining := budgetTokens - used; remaining > 0 {
+		vectorText = s.QueryVectorMemory(ctx, userID, query, retrievalVectorTopK, remaining)
+		used += contextmgr.CountText(vectorText)
+	}
 
 	for _, se := range scored {
 		line := formatEntryLine(se.entry)
@@ -322,15 +373,16 @@ func scoreEntry(e MemoryEntry, queryTokens []string, queryAware bool) float64 {
 	return score
 }
 
-// keywordOverlap counts query tokens present in the entry's key or value.
+// keywordOverlap counts query tokens present in the entry's key, value or
+// excerpt. It uses overlapTokens rather than tokenize: the latter emits whole
+// CJK runs, which made this channel return 0 for any natural Chinese query.
 func keywordOverlap(e MemoryEntry, queryTokens []string) float64 {
 	if len(queryTokens) == 0 {
 		return 0
 	}
 	hay := strings.ToLower(e.Key + " " + e.Value + " " + e.SourceExcerpt)
-	hayTokens := tokenize(hay)
-	haySet := make(map[string]bool, len(hayTokens))
-	for _, t := range hayTokens {
+	haySet := make(map[string]bool)
+	for _, t := range overlapTokens(hay) {
 		haySet[t] = true
 	}
 	var hits float64
@@ -338,9 +390,6 @@ func keywordOverlap(e MemoryEntry, queryTokens []string) float64 {
 		if haySet[t] {
 			hits++
 		}
-	}
-	if len(queryTokens) == 0 {
-		return 0
 	}
 	return hits / float64(len(queryTokens))
 }

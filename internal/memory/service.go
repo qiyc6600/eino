@@ -138,8 +138,16 @@ func (s *Service) UpsertPreference(ctx context.Context, userID, key, value strin
 }
 
 // PutPreference writes a user preference (simple form, upsert semantics).
+//
+// It writes at core importance: a memory the user created by hand is itself the
+// statement that it matters, and the API exposes no importance field, so without
+// this every hand-written entry would sit at the default and be the first thing
+// crowded out by query-matching episodes.
 func (s *Service) PutPreference(ctx context.Context, userID, key, value string) error {
-	return s.UpsertPreference(ctx, userID, key, value, EntryMeta{Source: "user_stated"})
+	return s.UpsertPreference(ctx, userID, key, value, EntryMeta{
+		Source:     "user_stated",
+		Importance: corePreferenceImportance,
+	})
 }
 
 // GetPreference reads a single preference from long-term memory.
@@ -245,14 +253,24 @@ var enumerableMemoryKeys = map[string]bool{
 	"preferred_city":      true,
 }
 
-// valueSupportedByMessage reports whether an extracted entry is supported by
-// the message text. Non-enumerable keys (answer_style, communication_style…)
-// pass unconditionally — their values are paraphrases, not verbatim quotes.
+// valueSupportedByMessage reports whether an extracted entry is supported by the
+// message text.
+//
+//   - Closed-list keys (language/framework/editor/city): the value must appear
+//     verbatim — fabrication is most likely exactly there.
+//   - Presentation keys (style/format): the message must carry a persistence
+//     marker. Without this the model can turn "请详细说明这个函数" — a request
+//     about the current answer — into a standing preference, which is the same
+//     defect the rule path guards against.
+//   - Everything else passes: those values are paraphrases, not verbatim quotes.
 func valueSupportedByMessage(key, value, message string) bool {
-	if !enumerableMemoryKeys[key] {
-		return true
+	if enumerableMemoryKeys[key] {
+		return strings.Contains(strings.ToLower(message), strings.ToLower(value))
 	}
-	return strings.Contains(strings.ToLower(message), strings.ToLower(value))
+	if persistentMemoryKeys[key] {
+		return hasStandingMarker(message)
+	}
+	return true
 }
 
 // storeEpisode records a valuable message as an episode entry (source of
@@ -406,26 +424,59 @@ func extractJSONArray(s string) string {
 	return ""
 }
 
+// standingMarkers express persistence — "from now on", "by default", "always".
+// They are what separates a standing preference from a request about the answer
+// the user is reading right now.
+//
+// Only explicit persistence counts. "请用简洁的方式回答" and "请简洁回答" mean
+// the same thing as each other — "make this answer concise" — so neither writes
+// a preference; "以后请用简洁的方式回答" does. That line is drawn here because
+// the data model has no per-conversation scope: the only scope an entry can
+// have is the whole user, so only an explicit request for the whole user is
+// recorded. Widening this list is how the extractor starts rewriting a user's
+// profile from a passing remark.
+var standingMarkers = []string{
+	"以后", "今后", "默认", "一直", "始终", "每次", "都要", "记住",
+	"我喜欢", "我偏好", "喜欢用", "偏好",
+	"prefer", "always", "by default", "from now on",
+}
+
+// presentationWords name how an answer should look. On their own they are
+// requests about the current answer, not preferences: "请详细说明这个函数"
+// means "expand this one", and persisting it would rewrite the user's profile
+// for every future conversation. They only become a preference alongside a
+// standing marker ("以后请用简洁的方式回答").
+var presentationWords = []string{"简洁", "简短", "详细", "详尽", "具体", "展开"}
+
+// persistentMemoryKeys are keys whose value describes a standing preference
+// about presentation. The LLM path must see a standing marker for these, for
+// the same reason the rule path requires one.
+var persistentMemoryKeys = map[string]bool{
+	"answer_style":        true,
+	"output_format":       true,
+	"communication_style": true,
+}
+
+// hasStandingMarker reports whether the message expresses persistence.
+func hasStandingMarker(message string) bool {
+	lower := strings.ToLower(message)
+	for _, m := range standingMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractWithRules is the fallback rule-based preference extraction.
 // Returns the keys written during this call so the LLM pass can skip them.
 func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerpt, message string) ([]string, error) {
 	lower := strings.ToLower(message)
 
-	// Trigger: only extract when user expresses a preference
-	hasPreferenceTrigger := strings.Contains(lower, "我喜欢") ||
-		strings.Contains(lower, "偏好") ||
-		strings.Contains(lower, "喜欢用") ||
-		strings.Contains(lower, "prefer") ||
-		strings.Contains(lower, "以后请") ||
-		strings.Contains(lower, "默认用") ||
-		strings.Contains(lower, "请用") ||
-		strings.Contains(lower, "用...风格") ||
-		strings.Contains(lower, "简洁") ||
-		strings.Contains(lower, "简短") ||
-		strings.Contains(lower, "详细") ||
-		strings.Contains(lower, "详尽")
-
-	if !hasPreferenceTrigger {
+	// A standing marker is required for everything this extractor writes. A
+	// presentation word alone is not enough — see presentationWords.
+	standing := hasStandingMarker(message)
+	if !standing {
 		return nil, nil
 	}
 
@@ -504,11 +555,20 @@ func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerp
 	}
 
 	// --- Answer style preference ---
-	if strings.Contains(lower, "简洁") || strings.Contains(lower, "简短") {
-		write("answer_style", "concise", 3)
-	}
-	if strings.Contains(lower, "详细") || strings.Contains(lower, "详尽") {
-		write("answer_style", "detailed", 3)
+	// Two conditions, both required: the function already returned unless a
+	// standing marker is present, and a presentation word must be present too.
+	// That is exactly what makes "以后请用简洁的方式回答" a preference and
+	// "请详细说明这个函数" not one.
+	for _, w := range presentationWords {
+		if !strings.Contains(lower, w) {
+			continue
+		}
+		switch w {
+		case "简洁", "简短":
+			write("answer_style", "concise", 3)
+		case "详细", "详尽":
+			write("answer_style", "detailed", 3)
+		}
 	}
 
 	// --- Answer language preference ---

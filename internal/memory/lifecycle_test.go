@@ -165,15 +165,22 @@ func TestExtractAndSave_MockGarbageFallsBack(t *testing.T) {
 	}
 }
 
-// TestExtractAndSave_AntiHallucinationGuard verifies the validator: closed-
-// list keys require the value to appear in the message; other keys pass.
+// TestExtractAndSave_AntiHallucinationGuard verifies the validator's three
+// classes: closed-list keys need the value verbatim; presentation keys need a
+// persistence marker; everything else passes because its value is a paraphrase.
 func TestExtractAndSave_AntiHallucinationGuard(t *testing.T) {
 	store := NewInMemoryMemoryStore()
-	// The message never mentions Python, but the LLM "extracts" it anyway.
-	stub := &stubChatModel{resp: `[{"key":"preferred_language","value":"Python","type":"preference","importance":4},{"key":"communication_style","value":"casual","type":"preference","importance":3}]`}
+	// The message mentions no language, yet the LLM "extracts" one; it also
+	// asserts a presentation preference and a plain fact.
+	stub := &stubChatModel{resp: `[` +
+		`{"key":"preferred_language","value":"Python","type":"preference","importance":4},` +
+		`{"key":"communication_style","value":"casual","type":"preference","importance":3},` +
+		`{"key":"work_style","value":"remote","type":"identity","importance":3}` +
+		`]`}
 	svc := NewService(store, nil, nil, stub)
 	ctx := context.Background()
 
+	// No persistence marker anywhere in this message.
 	if err := svc.ExtractAndSave(ctx, "u1", "t1", "帮我写个脚本，说话随意一点"); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
@@ -181,8 +188,20 @@ func TestExtractAndSave_AntiHallucinationGuard(t *testing.T) {
 	if _, ok, _ := store.Get(ctx, "u1", "preferred_language"); ok {
 		t.Error("hallucinated language must not be written")
 	}
+	if _, ok, _ := store.Get(ctx, "u1", "communication_style"); ok {
+		t.Error("a presentation key must not be written without a persistence marker — " +
+			"otherwise one request about the current answer rewrites the user's profile")
+	}
+	if entry, ok, _ := store.Get(ctx, "u1", "work_style"); !ok || entry.Value != "remote" {
+		t.Error("a key whose value is a paraphrase should pass the guard")
+	}
+
+	// The same presentation key is accepted once the message asks it to persist.
+	if err := svc.ExtractAndSave(ctx, "u1", "t1", "以后说话随意一点，别太正式"); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
 	if entry, ok, _ := store.Get(ctx, "u1", "communication_style"); !ok || entry.Value != "casual" {
-		t.Error("non-enumerable key should pass the guard and be written")
+		t.Error("a presentation key should be written when the message asks for it to persist")
 	}
 }
 
