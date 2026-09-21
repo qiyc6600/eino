@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/example/agent-eino-demo/internal/auth"
@@ -63,7 +64,7 @@ func NewWeatherTool() RegisteredTool {
 // httpClient with timeout
 var weatherHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
-func executeWeather(_ *auth.ToolIdentity, argumentsInJSON string) ToolResult {
+func executeWeather(identity *auth.ToolIdentity, argumentsInJSON string) ToolResult {
 	var args WeatherArgs
 	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
 		return BusinessErrorResult("weather", "invalid arguments: "+err.Error())
@@ -74,8 +75,15 @@ func executeWeather(_ *auth.ToolIdentity, argumentsInJSON string) ToolResult {
 	}
 
 	// Call wttr.in API — free, no API key needed
-	resp, err := queryWttrIn(args.City)
+	ctx := context.Background()
+	if identity != nil && identity.Context != nil {
+		ctx = identity.Context
+	}
+	resp, err := queryWttrInContext(ctx, args.City)
 	if err != nil {
+		if ctx.Err() != nil {
+			return SystemErrorResult("weather", ctx.Err().Error(), "")
+		}
 		// Fallback to mock data on API failure
 		return fallbackMockWeather(args.City, err)
 	}
@@ -85,11 +93,14 @@ func executeWeather(_ *auth.ToolIdentity, argumentsInJSON string) ToolResult {
 
 // queryWttrIn calls the wttr.in JSON API.
 func queryWttrIn(city string) (*wttrInResponse, error) {
+	return queryWttrInContext(context.Background(), city)
+}
+func queryWttrInContext(ctx context.Context, city string) (*wttrInResponse, error) {
 	// URL-encode the city name to handle Chinese characters
 	encodedCity := url.PathEscape(city)
 	apiURL := fmt.Sprintf("https://wttr.in/%s?format=j1&lang=zh", encodedCity)
 
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

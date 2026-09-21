@@ -150,6 +150,20 @@ func TestDeleteOrderTool_Success(t *testing.T) {
 	}
 }
 
+func TestDeleteOrderTool_IdempotentReplay(t *testing.T) {
+	store := NewOrderStore()
+	tool := NewDeleteOrderTool(store)
+	identity := &auth.ToolIdentity{UserID: "u_admin", Roles: []string{"admin"}, RunID: "r-1", ToolCallID: "tc-1"}
+	first := tool.Fn(identity, `{"order_id":"A-1001"}`)
+	second := tool.Fn(identity, `{"order_id":"A-1001"}`)
+	if first.Error != "" || second.Error != "" {
+		t.Fatalf("idempotent delete failed: first=%q second=%q", first.Error, second.Error)
+	}
+	if replayed, _ := second.Metadata["idempotent_replay"].(bool); !replayed {
+		t.Fatalf("second delete was not reported as replay: %+v", second.Metadata)
+	}
+}
+
 func TestDeleteOrderTool_MissingOrderID(t *testing.T) {
 	registry := NewToolRegistry()
 	orderStore := NewOrderStore()

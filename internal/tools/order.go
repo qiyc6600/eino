@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -23,23 +25,38 @@ type Order struct {
 	Desc   string `json:"description"`
 }
 
+// OrderRepository is the durable business boundary used by order tools.
+type OrderRepository interface {
+	QueryByUserContext(ctx context.Context, userID string) ([]Order, error)
+	DeleteContext(ctx context.Context, userID, orderID, idempotencyKey string) (deleted, replayed bool, err error)
+}
+
 // OrderStore holds sample orders in memory, keyed by userID+orderID.
 type OrderStore struct {
-	mu     sync.RWMutex
-	orders map[string][]Order // userID -> orders
+	mu      sync.RWMutex
+	orders  map[string][]Order // userID -> orders
+	effects map[string]bool    // idempotency key -> original delete result
 }
 
 // NewOrderStore creates an OrderStore with seed data.
 func NewOrderStore() *OrderStore {
 	s := &OrderStore{
-		orders: make(map[string][]Order),
+		orders:  make(map[string][]Order),
+		effects: make(map[string]bool),
 	}
 	s.seed()
 	return s
 }
 
 func (s *OrderStore) seed() {
-	s.orders["u_admin"] = []Order{
+	for _, order := range DefaultOrders() {
+		s.orders[order.UserID] = append(s.orders[order.UserID], order)
+	}
+}
+
+// DefaultOrders returns the demo seed data used by memory and PostgreSQL.
+func DefaultOrders() []Order {
+	return []Order{
 		{ID: "A-1001", UserID: "u_admin", Status: "pending", Amount: "¥199.00", Desc: "无线鼠标"},
 		{ID: "A-1002", UserID: "u_admin", Status: "shipped", Amount: "¥599.00", Desc: "机械键盘"},
 		{ID: "A-1003", UserID: "u_admin", Status: "pending", Amount: "¥4,999.00", Desc: "27寸4K显示器"},
@@ -48,8 +65,6 @@ func (s *OrderStore) seed() {
 		{ID: "A-1006", UserID: "u_admin", Status: "cancelled", Amount: "¥299.00", Desc: "手机壳（已取消）"},
 		{ID: "A-1007", UserID: "u_admin", Status: "pending", Amount: "¥6,499.00", Desc: "年度云服务器续费"},
 		{ID: "A-1008", UserID: "u_admin", Status: "shipped", Amount: "¥1,299.00", Desc: "人体工学椅"},
-	}
-	s.orders["u_visitor"] = []Order{
 		{ID: "B-2001", UserID: "u_visitor", Status: "pending", Amount: "¥49.00", Desc: "USB 数据线"},
 		{ID: "B-2002", UserID: "u_visitor", Status: "delivered", Amount: "¥299.00", Desc: "蓝牙耳机"},
 		{ID: "B-2003", UserID: "u_visitor", Status: "pending", Amount: "¥2,399.00", Desc: "平板电脑"},
@@ -60,31 +75,67 @@ func (s *OrderStore) seed() {
 
 // QueryByUser returns orders for a given user.
 func (s *OrderStore) QueryByUser(userID string) []Order {
+	orders, _ := s.QueryByUserContext(context.Background(), userID)
+	return orders
+}
+
+func (s *OrderStore) QueryByUserContext(ctx context.Context, userID string) ([]Order, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.orders[userID]
+	return append([]Order(nil), s.orders[userID]...), nil
 }
 
 // Delete removes an order for a user.
 func (s *OrderStore) Delete(userID, orderID string) bool {
+	deleted, _, _ := s.DeleteContext(context.Background(), userID, orderID, "")
+	return deleted
+}
+
+func (s *OrderStore) DeleteContext(ctx context.Context, userID, orderID, idempotencyKey string) (bool, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, false, err
+	}
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return false, false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if idempotencyKey != "" {
+		if deleted, ok := s.effects[idempotencyKey]; ok {
+			return deleted, true, nil
+		}
+	}
 
 	orders, ok := s.orders[userID]
 	if !ok {
-		return false
+		if idempotencyKey != "" {
+			s.effects[idempotencyKey] = false
+		}
+		return false, false, nil
 	}
 	for i, o := range orders {
 		if o.ID == orderID {
 			s.orders[userID] = append(orders[:i], orders[i+1:]...)
-			return true
+			if idempotencyKey != "" {
+				s.effects[idempotencyKey] = true
+			}
+			return true, false, nil
 		}
 	}
-	return false
+	if idempotencyKey != "" {
+		s.effects[idempotencyKey] = false
+	}
+	return false, false, nil
 }
 
 // NewQueryOrderTool creates the query_order tool.
-func NewQueryOrderTool(store *OrderStore) RegisteredTool {
+func NewQueryOrderTool(store OrderRepository) RegisteredTool {
 	return RegisteredTool{
 		Meta: ToolMeta{
 			Name:             "query_order",
@@ -108,7 +159,10 @@ func NewQueryOrderTool(store *OrderStore) RegisteredTool {
 			var args OrderArgs
 			json.Unmarshal([]byte(arguments), &args)
 
-			orders := store.QueryByUser(userID)
+			orders, err := store.QueryByUserContext(toolContext(identity), userID)
+			if err != nil {
+				return SystemErrorResult("query_order", err.Error(), identity.RunID)
+			}
 
 			if args.OrderID != "" {
 				var found *Order
@@ -134,7 +188,7 @@ func NewQueryOrderTool(store *OrderStore) RegisteredTool {
 }
 
 // NewDeleteOrderTool creates the delete_order tool (admin, requires approval).
-func NewDeleteOrderTool(store *OrderStore) RegisteredTool {
+func NewDeleteOrderTool(store OrderRepository) RegisteredTool {
 	return RegisteredTool{
 		Meta: ToolMeta{
 			Name:             "delete_order",
@@ -165,7 +219,11 @@ func NewDeleteOrderTool(store *OrderStore) RegisteredTool {
 				return BusinessErrorResult("delete_order", "order_id is required")
 			}
 
-			deleted := store.Delete(userID, args.OrderID)
+			deleted, replayed, err := store.DeleteContext(toolContext(identity), userID, args.OrderID,
+				toolIdempotencyKey(identity, "delete_order", arguments))
+			if err != nil {
+				return SystemErrorResult("delete_order", err.Error(), identity.RunID)
+			}
 			if !deleted {
 				return BusinessErrorResult("delete_order",
 					fmt.Sprintf("order %s not found for current user", args.OrderID))
@@ -173,10 +231,31 @@ func NewDeleteOrderTool(store *OrderStore) RegisteredTool {
 
 			return SuccessResult("delete_order",
 				fmt.Sprintf("⚠️ 订单 %s 已删除", args.OrderID),
-				map[string]any{"order_id": args.OrderID})
+				map[string]any{"order_id": args.OrderID, "idempotent_replay": replayed})
 		},
 	}
 }
+
+func toolContext(identity *auth.ToolIdentity) context.Context {
+	if identity != nil && identity.Context != nil {
+		return identity.Context
+	}
+	return context.Background()
+}
+
+func toolIdempotencyKey(identity *auth.ToolIdentity, toolName, arguments string) string {
+	if identity == nil || identity.UserID == "" || identity.RunID == "" {
+		return ""
+	}
+	callID := identity.ToolCallID
+	if callID == "" {
+		digest := sha256.Sum256([]byte(arguments))
+		callID = fmt.Sprintf("args:%x", digest[:12])
+	}
+	return identity.UserID + ":" + identity.RunID + ":" + toolName + ":" + callID
+}
+
+var _ OrderRepository = (*OrderStore)(nil)
 
 // formatOrderList formats an order list as a readable text table.
 func formatOrderList(orders []Order) string {
