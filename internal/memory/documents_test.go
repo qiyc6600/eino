@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 	"strings"
 	"testing"
 	"time"
@@ -216,7 +217,7 @@ func TestRetrieveRelevant_DocumentSection(t *testing.T) {
 		if idx < 0 {
 			t.Fatalf("a sufficient budget should keep the chunk:\n%s", out)
 		}
-		if got := estimateTokens(out[idx:]); got > 200 {
+		if got := contextmgr.CountText(out[idx:]); got > 200 {
 			t.Fatalf("document section is %d tokens, over its 200 budget", got)
 		}
 

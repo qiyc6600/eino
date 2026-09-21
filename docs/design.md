@@ -443,10 +443,19 @@ type MemoryStore interface {
 
 #### 3.5.3 偏好提取与注入
 
+写入是**两段式**：模型可用时由模型主导，否则规则兜底。
+
 ```
 用户消息 → memory.Service.ExtractAndSave()
-  → 规则匹配（"我喜欢用Python" → preferred_language=Python）
-  → 写入 MemoryStore（userId 命名空间）
+  ├─ 模型可用 → extractWithLLM（要求返回 JSON 数组）
+  │    └─ 闭集键校验：值必须逐字出现在消息里，否则丢弃（防幻觉）
+  └─ 模型不可用 / 调用或解析失败 → extractWithRules（关键词匹配）
+       ↑ mock 模型走这条：它把提取提示词当普通对话回答，解析必然失败，
+         这是刻意的——让 mock 假装会提取，等于让一个手写匹配器悄悄
+         替模型下判断（"javascript" 会命中裸 "java"，"django" 会命中裸 "go"）
+  → 写入 MemoryStore（userId 命名空间），Source 记录实际路径
+     （llm_extracted / user_stated）
+  → 有记忆价值的消息额外存为 episode（KV + 向量索引），闲聊不索引
 
 下次对话 → Runner.ChatContext()
   → memory.Service.RetrieveRelevant(ctx, userID, 本轮消息, 预算, reinforce=true)
@@ -454,6 +463,8 @@ type MemoryStore interface {
 ```
 
 注入的唯一入口是 `RetrieveRelevant`（打分与预算见 9.3）。界面刷新 token 条时以 `reinforce=false` 调用同一入口，避免只读重算污染"使用强化记忆"的访问统计。
+
+**预算与窗口必须用同一个估算器**：记忆预算用 `contextmgr.CountText` 度量，与上下文窗口、UI token 条同一单位。此前本包自带一个私有估算器（CJK 按 1 token/字，而 contextmgr 按约 1/1.5），两者差约四分之一——400 的预算实际只注入 305 token，表现为"记忆段静默少给"且 token 条与配置对不上。方向值得注意：**这类不一致不会超预算，只会少给**，所以"输出不超预算"的断言抓不住它，必须同时断言预算确实被用满。
 
 > `Service.BuildMemoryContext` 是早期实现，**当前没有任何生产调用方**（只有单元测试引用）。注入逻辑已统一到 `RetrieveRelevant`，保留它是为了兼容既有测试；后续可删除。
 

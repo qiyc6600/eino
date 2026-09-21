@@ -8,10 +8,17 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
+
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 )
 
 // Retrieval defaults, overridable via Service.SetRetrievalConfig.
+//
+// The token budgets below are measured with contextmgr.CountText — the same
+// estimator the context window and the UI token bar use. That is deliberate: a
+// budget expressed in a different unit than the window accounting would let the
+// injected memory disagree with what the provider is actually billed for, which
+// is exactly what a second, private estimator here used to do.
 const (
 	DefaultBudgetTokens      = 400
 	DefaultConsolidateThresh = 30
@@ -151,7 +158,7 @@ func (s *Service) retrieveDocuments(ctx context.Context, userID, query string, b
 	}
 
 	const header = "【文档片段】\n"
-	used := estimateTokens(header)
+	used := contextmgr.CountText(header)
 	var lines []string
 	for _, r := range results {
 		if float64(r.Score) < s.MinVectorScore() {
@@ -162,7 +169,7 @@ func (s *Service) retrieveDocuments(ctx context.Context, userID, query string, b
 			name = "未命名文档"
 		}
 		line := fmt.Sprintf("[%d] %s · 片段 %v：%s", len(lines)+1, name, r.Metadata["chunk"], r.Content)
-		cost := estimateTokens(line)
+		cost := contextmgr.CountText(line)
 		if used+cost > budgetTokens {
 			continue
 		}
@@ -228,11 +235,11 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	// --- Assemble within budget ---
 	var prefLines, otherLines []string
 	var reinforced []MemoryEntry
-	used := estimateTokens(vectorText)
+	used := contextmgr.CountText(vectorText)
 
 	for _, se := range scored {
 		line := formatEntryLine(se.entry)
-		cost := estimateTokens(line)
+		cost := contextmgr.CountText(line)
 		if used+cost > budgetTokens {
 			continue
 		}
@@ -349,21 +356,4 @@ func formatEntryLine(e MemoryEntry) string {
 		b.WriteString(fmt.Sprintf("（已更新 %d 次）", n))
 	}
 	return b.String()
-}
-
-// estimateTokens approximates token usage: CJK runes ≈ 1 token, other
-// scripts ≈ 1 token per 4 characters (word-ish granularity).
-func estimateTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-	cjk, other := 0, 0
-	for _, r := range text {
-		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) {
-			cjk++
-		} else {
-			other++
-		}
-	}
-	return cjk + (other+3)/4
 }

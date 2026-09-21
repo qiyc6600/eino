@@ -64,14 +64,18 @@ func (m *MockChatModel) Generate(ctx context.Context, input []*schema.Message, o
 		return schema.AssistantMessage(summary, nil), nil
 	}
 
-	// Handle preference extraction prompts from the memory service.
-	if isPreferenceExtractionRequest(input) {
-		extracted := extractPreferences(input)
-		return schema.AssistantMessage(extracted, nil), nil
-	}
+	// A memory-extraction prompt from the memory service is deliberately NOT
+	// special-cased: the mock answers it as ordinary chat, the service cannot
+	// parse the reply as JSON, and extraction falls back to its rule matcher.
+	// That is the documented mock-mode behaviour, and it keeps the mock from
+	// pretending to do extraction it cannot really do — a hand-written matcher
+	// here would silently disagree with the real model's judgement (and did:
+	// "javascript" matched a bare "java", "django" matched a bare "go").
+	// A previous unreachable implementation of exactly that is why this note
+	// exists.
 
 	// Parse system prompt for user preferences
-	preferredLang := detectPreferredLangFromMessages(input)
+	preferredLang := preferredLanguageFromPrompt(input)
 
 	// Try to match a tool call
 	lower := toLower(lastUserMsg)
@@ -355,36 +359,85 @@ func summarizeToolResults(messages []*schema.Message) string {
 
 // ---- Helper functions ----
 
-func detectPreferredLangFromMessages(messages []*schema.Message) string {
+// preferredLanguageFromPrompt reads the language out of the memory line the
+// framework injects into the system prompt ("- preferred_language: JavaScript").
+//
+// It parses the value instead of scanning the prompt for language names. A
+// substring scan cannot tell JavaScript from Java — the prompt contains the
+// former, and "java" matches it — so the mock used to answer "Java" for a user
+// whose stored preference was JavaScript, contradicting the very memory it was
+// reading.
+func preferredLanguageFromPrompt(messages []*schema.Message) string {
+	const marker = "preferred_language:"
 	for _, m := range messages {
-		if m.Role == schema.System {
-			if containsAny(m.Content, "preferred_language") {
-				if containsAny(m.Content, "Python") {
-					return "Python"
-				}
-				if containsAny(m.Content, "Java") {
-					return "Java"
-				}
-				if containsAny(m.Content, "Go") {
-					return "Go"
-				}
-			}
+		if m.Role != schema.System {
+			continue
+		}
+		idx := strings.Index(m.Content, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := m.Content[idx+len(marker):]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[:nl]
+		}
+		if v := strings.TrimSpace(rest); v != "" {
+			return v
 		}
 	}
 	return ""
 }
 
+// detectLanguagePreference reads a language name out of the user's own message.
+//
+// Candidates are ordered longest-first, and short ambiguous names must appear as
+// a whole word: a plain substring scan reports JavaScript as Java and Django as
+// Go, the same defect class that made the mock's deleted extraction matcher
+// wrong. "golang" is listed separately because the whole-word rule rightly
+// rejects "go" inside it.
 func detectLanguagePreference(s string) string {
-	pairs := []struct{ p, l string }{
-		{"python", "Python"}, {"java", "Java"}, {"go", "Go"},
-		{"javascript", "JavaScript"}, {"typescript", "TypeScript"},
+	candidates := []struct{ name, label string }{
+		{"typescript", "TypeScript"},
+		{"javascript", "JavaScript"},
+		{"golang", "Go"},
+		{"python", "Python"},
+		{"kotlin", "Kotlin"},
+		{"swift", "Swift"},
+		{"rust", "Rust"},
+		{"java", "Java"},
+		{"go", "Go"},
 	}
-	for _, pp := range pairs {
-		if containsAny(s, pp.p) {
-			return pp.l
+	for _, c := range candidates {
+		if containsWord(s, c.name) {
+			return c.label
 		}
 	}
 	return ""
+}
+
+// containsWord reports whether s contains needle delimited by non-alphanumerics,
+// so "go" does not match "django" and "java" does not match "javascript". Bytes
+// ≥ 0x80 count as delimiters, which is what makes a preceding CJK character a
+// boundary rather than part of a word.
+func containsWord(s, needle string) bool {
+	isAlnum := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+	}
+	for idx := 0; idx < len(s); {
+		i := strings.Index(s[idx:], needle)
+		if i < 0 {
+			return false
+		}
+		i += idx
+		before := i == 0 || !isAlnum(s[i-1])
+		end := i + len(needle)
+		after := end >= len(s) || !isAlnum(s[end])
+		if before && after {
+			return true
+		}
+		idx = i + 1
+	}
+	return false
 }
 
 func extractMathExpr(s string) string {
@@ -660,87 +713,4 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
-}
-
-// ---- Preference extraction for long-term memory ----
-
-// isPreferenceExtractionRequest detects whether the input messages are a
-// preference extraction request from memory.Service.ExtractAndSave().
-// The service sends a system message "用户偏好提取助手" followed by a user
-// message containing the user's original message.
-func isPreferenceExtractionRequest(input []*schema.Message) bool {
-	for _, m := range input {
-		if m.Role == schema.System {
-			if containsAny(m.Content, "偏好提取助手") || containsAny(m.Content, "preference extract") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// extractPreferences simulates LLM-based preference extraction.
-// It parses the user message for common preference patterns and returns
-// a JSON array of {key, value} pairs, matching the format expected by
-// memory.Service.extractWithLLM().
-func extractPreferences(input []*schema.Message) string {
-	userMsg := ""
-	for _, m := range input {
-		if m.Role == schema.User {
-			userMsg = m.Content
-			break
-		}
-	}
-
-	// Extract the actual user message from the prompt
-	// The prompt ends with "用户消息：" followed by the message
-	msgIdx := strings.LastIndex(userMsg, "用户消息：")
-	if msgIdx == -1 {
-		msgIdx = strings.LastIndex(userMsg, "用户消息:")
-	}
-	if msgIdx != -1 {
-		userMsg = userMsg[msgIdx+len("用户消息："):]
-	}
-
-	lower := toLower(userMsg)
-	var pairs []string
-
-	// Language preference
-	if containsAny(lower, "喜欢", "偏好", "prefer") {
-		switch {
-		case containsAny(lower, "python"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"Python"}`)
-		case containsAny(lower, "java"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"Java"}`)
-		case containsAny(lower, "go") || containsAny(lower, "golang"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"Go"}`)
-		case containsAny(lower, "javascript") || containsAny(lower, "js"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"JavaScript"}`)
-		case containsAny(lower, "rust"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"Rust"}`)
-		case containsAny(lower, "c++") || containsAny(lower, "cpp"):
-			pairs = append(pairs, `{"key":"preferred_language","value":"C++"}`)
-		}
-	}
-
-	// Answer style preference
-	if containsAny(lower, "简洁", "简短") {
-		pairs = append(pairs, `{"key":"answer_style","value":"concise"}`)
-	}
-	if containsAny(lower, "详细", "详尽") {
-		pairs = append(pairs, `{"key":"answer_style","value":"detailed"}`)
-	}
-
-	// Framework preference
-	if containsAny(lower, "react") && !containsAny(lower, "vue") {
-		pairs = append(pairs, `{"key":"preferred_framework","value":"React"}`)
-	}
-	if containsAny(lower, "vue") {
-		pairs = append(pairs, `{"key":"preferred_framework","value":"Vue"}`)
-	}
-
-	if len(pairs) == 0 {
-		return "[]"
-	}
-	return "[" + joinStrings(pairs, ",") + "]"
 }

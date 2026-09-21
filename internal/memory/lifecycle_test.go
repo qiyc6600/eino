@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 )
 
 // stubChatModel returns a canned response; used to drive LLM extraction and
@@ -291,10 +292,10 @@ func TestRetrieveRelevant_VectorTextRespectsBudget(t *testing.T) {
 	}
 	// The recalled text must have actually been produced, otherwise this test
 	// would pass without exercising the cap at all.
-	if got := estimateTokens(long); got <= budget {
+	if got := contextmgr.CountText(long); got <= budget {
 		t.Fatalf("test setup is wrong: the episode is %d tokens, not larger than the %d budget", got, budget)
 	}
-	if got := estimateTokens(out); got > budget {
+	if got := contextmgr.CountText(out); got > budget {
 		t.Fatalf("injected memory exceeds the budget: %d > %d tokens\n%s", got, budget, out)
 	}
 	// Every recalled entry is larger than the whole budget, so the correct
@@ -328,14 +329,14 @@ func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
 	if !strings.Contains(out, "用户历史相关记忆") {
 		t.Fatalf("entries that fit the budget must be injected:\n%s", out)
 	}
-	if got := estimateTokens(out); got > budget {
+	if got := contextmgr.CountText(out); got > budget {
 		t.Fatalf("injected memory exceeds the budget: %d > %d tokens", got, budget)
 	}
 	// The cap must be doing work: all entries together would not fit.
 	all := FormatVectorResultsWithin(vec.results, 0, 0)
-	if estimateTokens(all) <= budget {
+	if contextmgr.CountText(all) <= budget {
 		t.Fatalf("test setup is wrong: the uncapped recall (%d tokens) fits the %d budget",
-			estimateTokens(all), budget)
+			contextmgr.CountText(all), budget)
 	}
 }
 

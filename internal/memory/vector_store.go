@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/example/agent-eino-demo/internal/auth"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 )
 
 // VectorResult holds a single result from a vector similarity query.
@@ -330,7 +331,7 @@ func FormatVectorResultsWithin(results []VectorResult, maxTokens int, minScore f
 	const header = "用户历史相关记忆：\n"
 	used := 0
 	if maxTokens > 0 {
-		used = estimateTokens(header)
+		used = contextmgr.CountText(header)
 	}
 
 	var lines []string
@@ -344,7 +345,7 @@ func FormatVectorResultsWithin(results []VectorResult, maxTokens int, minScore f
 		}
 		line := fmt.Sprintf("- %s%s [相关度: %.0f%%]", r.Content, ts, r.Score*100)
 		if maxTokens > 0 {
-			cost := estimateTokens(line)
+			cost := contextmgr.CountText(line)
 			if used+cost > maxTokens {
 				continue
 			}
