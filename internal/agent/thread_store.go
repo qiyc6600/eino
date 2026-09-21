@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -25,9 +26,20 @@ type ThreadHistoryAppender interface {
 	AppendHistoryContext(ctx context.Context, userID, threadID string, expectedLen int, msgs []*schema.Message) error
 }
 
+// ThreadPruner deletes a user's threads that have not been touched since the
+// cutoff, and reports how many were removed.
+//
+// Retention is expressed as an age rather than a stored expiry column, so no
+// schema change is needed. Sweeping is scoped to one user so the store keeps its
+// invariant of only ever touching the calling user's namespace.
+type ThreadPruner interface {
+	PruneThreadsBefore(ctx context.Context, userID string, cutoff time.Time) (int, error)
+}
+
 // threadRecord is a conversation thread bound to its owning user.
 type threadRecord struct {
-	messages []*schema.Message
+	messages  []*schema.Message
+	updatedAt time.Time
 }
 
 // threadKey namespaces a thread by owner and client-side thread ID.
@@ -86,6 +98,7 @@ func newThreadStore() *threadStore {
 // Ensure the in-memory implementation satisfies the interface.
 var _ ThreadStore = (*threadStore)(nil)
 var _ ThreadHistoryAppender = (*threadStore)(nil)
+var _ ThreadPruner = (*threadStore)(nil)
 
 func (s *threadStore) record(userID, threadID string) *threadRecord {
 	key := threadKey{userID: userID, threadID: threadID}
@@ -115,7 +128,9 @@ func (s *threadStore) Copy(userID, threadID string) []*schema.Message {
 func (s *threadStore) Replace(userID, threadID string, msgs []*schema.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.record(userID, threadID).messages = msgs
+	rec := s.record(userID, threadID)
+	rec.messages = msgs
+	rec.updatedAt = time.Now()
 	return nil
 }
 
@@ -125,6 +140,7 @@ func (s *threadStore) Append(userID, threadID string, msgs ...*schema.Message) e
 	defer s.mu.Unlock()
 	rec := s.record(userID, threadID)
 	rec.messages = append(rec.messages, msgs...)
+	rec.updatedAt = time.Now()
 	return nil
 }
 
@@ -148,14 +164,38 @@ func (s *threadStore) AppendHistoryContext(_ context.Context, userID, threadID s
 		s.threads[key] = rec
 	}
 	rec.messages = append(rec.messages, msgs...)
+	rec.updatedAt = time.Now()
 	return nil
+}
+
+// PruneThreadsBefore deletes the user's threads last touched before the cutoff.
+func (s *threadStore) PruneThreadsBefore(_ context.Context, userID string, cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for key, rec := range s.threads {
+		if key.userID != userID {
+			continue
+		}
+		// A thread with no recorded timestamp predates retention support; treat
+		// it as fresh rather than deleting data we cannot date.
+		if rec.updatedAt.IsZero() || !rec.updatedAt.Before(cutoff) {
+			continue
+		}
+		delete(s.threads, key)
+		removed++
+	}
+	return removed, nil
 }
 
 // Create idempotently creates an empty thread for the user.
 func (s *threadStore) Create(userID, threadID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.record(userID, threadID)
+	rec := s.record(userID, threadID)
+	if rec.updatedAt.IsZero() {
+		rec.updatedAt = time.Now()
+	}
 	return nil
 }
 
@@ -187,9 +227,10 @@ func (s *threadStore) List(userID string) []string {
 
 // ThreadSnapshot is one persisted thread: owner + full message history.
 type ThreadSnapshot struct {
-	UserID   string            `json:"user_id"`
-	ThreadID string            `json:"thread_id"`
-	Messages []*schema.Message `json:"messages"`
+	UserID    string            `json:"user_id"`
+	ThreadID  string            `json:"thread_id"`
+	Messages  []*schema.Message `json:"messages"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
 }
 
 // Snapshot returns all threads with their messages (for persistence decorators).
@@ -202,9 +243,10 @@ func (s *threadStore) Snapshot() []ThreadSnapshot {
 		msgs := make([]*schema.Message, len(rec.messages))
 		copy(msgs, rec.messages)
 		result = append(result, ThreadSnapshot{
-			UserID:   key.userID,
-			ThreadID: key.threadID,
-			Messages: msgs,
+			UserID:    key.userID,
+			ThreadID:  key.threadID,
+			Messages:  msgs,
+			UpdatedAt: rec.updatedAt,
 		})
 	}
 	return result
@@ -222,6 +264,6 @@ func (s *threadStore) Restore(snapshots []ThreadSnapshot) {
 			continue
 		}
 		key := threadKey{userID: snap.UserID, threadID: snap.ThreadID}
-		s.threads[key] = &threadRecord{messages: snap.Messages}
+		s.threads[key] = &threadRecord{messages: snap.Messages, updatedAt: snap.UpdatedAt}
 	}
 }

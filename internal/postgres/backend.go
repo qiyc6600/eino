@@ -297,10 +297,28 @@ func (s *ThreadStore) AppendHistoryContext(ctx context.Context, userID, threadID
 	return agent.ErrThreadAppendMismatch
 }
 
+// PruneThreadsBefore deletes the user's threads last touched before the cutoff.
+// Retention is computed from the existing updated_at column, so no schema change
+// is needed; the (user_id, updated_at) index keeps the sweep cheap.
+func (s *ThreadStore) PruneThreadsBefore(ctx context.Context, userID string, cutoff time.Time) (int, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return 0, err
+	}
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM agent_threads WHERE user_id=$1 AND updated_at < $2`, userID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(removed), nil
+}
+
 func (s *ThreadStore) Create(userID, threadID string) error {
 	return s.CreateContext(context.Background(), userID, threadID)
 }
-
 func (s *ThreadStore) CreateContext(ctx context.Context, userID, threadID string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_threads(user_id,thread_id,messages) VALUES($1,$2,'[]'::jsonb) ON CONFLICT DO NOTHING`, userID, threadID)
 	return err

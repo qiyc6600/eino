@@ -68,6 +68,16 @@ type Config struct {
 	// Memory retrieval & lifecycle
 	MemoryBudgetTokens         int // token budget for memory injection per turn
 	MemoryConsolidateThreshold int // active entries before consolidation pays off
+
+	// Thread history governance. Both default to preserving everything: a
+	// conversation store that silently drops data is a product decision, not a
+	// sensible default.
+	//
+	// ThreadHistoryMaxMessages caps one conversation's stored history; older
+	// messages are dropped on write (0 = unlimited).
+	ThreadHistoryMaxMessages int
+	// ThreadRetention deletes threads untouched for this long (0 = keep forever).
+	ThreadRetention time.Duration
 }
 
 // ModelProfile defines a pre-configured AI model provider profile.
@@ -187,6 +197,8 @@ func LoadConfig() *Config {
 		MaxToolResultChars:         getEnvInt("MAX_TOOL_RESULT_CHARS", 8000),
 		MemoryBudgetTokens:         getEnvInt("MEMORY_BUDGET_TOKENS", 400),
 		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
+		ThreadHistoryMaxMessages:   getEnvInt("THREAD_HISTORY_MAX_MESSAGES", 0),
+		ThreadRetention:            getEnvDuration("THREAD_RETENTION", 0),
 	}
 }
 

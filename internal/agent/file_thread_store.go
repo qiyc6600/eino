@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 
@@ -70,6 +71,18 @@ func (f *FileThreadStore) AppendHistoryContext(_ context.Context, userID, thread
 		return ErrThreadAppendMismatch
 	}
 	return f.Append(userID, threadID, msgs...)
+}
+
+// PruneThreadsBefore must be overridden for the same reason as the append: the
+// promoted version would delete from memory only, so the threads would come back
+// on the next restart.
+func (f *FileThreadStore) PruneThreadsBefore(_ context.Context, userID string, cutoff time.Time) (int, error) {
+	var removed int
+	err := f.update(func(s *threadStore) { removed, _ = s.PruneThreadsBefore(context.Background(), userID, cutoff) })
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 func (f *FileThreadStore) Create(userID, threadID string) error {
 	return f.update(func(s *threadStore) { s.Create(userID, threadID) })

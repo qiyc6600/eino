@@ -283,6 +283,41 @@ func TestThreadStoreAppendHistoryGuard(t *testing.T) {
 	})
 }
 
+// TestThreadStorePruneThreadsBefore covers the retention sweep: it is scoped to
+// one user, and it refuses a cross-user request before touching the database.
+func TestThreadStorePruneThreadsBefore(t *testing.T) {
+	ctx := context.Background()
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	t.Run("deletes the user's stale threads", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		mock.ExpectExec("DELETE FROM agent_threads WHERE user_id=\\$1 AND updated_at < \\$2").
+			WithArgs("u-1", cutoff).
+			WillReturnResult(sqlmock.NewResult(0, 3))
+		removed, err := backend.Threads.PruneThreadsBefore(ctx, "u-1", cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removed != 3 {
+			t.Fatalf("removed=%d, want 3", removed)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("cross-user sweeps are refused by the store", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		other := auth.WithAuthContext(context.Background(), &auth.AuthContext{UserID: "u-other"})
+		if _, err := backend.Threads.PruneThreadsBefore(other, "u-1", cutoff); err == nil {
+			t.Fatal("expected a scope violation")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestThreadStoreUsesDedicatedLockPool(t *testing.T) {
 	db, dbMock, err := sqlmock.New()
 	if err != nil {
@@ -473,7 +508,7 @@ func TestEmbeddedInitialMigrationContainsAllDurableTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 3 || migrations[0].Version != 1 || migrations[0].Name != "initial" || migrations[1].Version != 2 || migrations[2].Version != 3 || migrations[2].Name != "run_events" {
+	if len(migrations) != 4 || migrations[0].Version != 1 || migrations[0].Name != "initial" || migrations[1].Version != 2 || migrations[2].Version != 3 || migrations[2].Name != "run_events" || migrations[3].Version != 4 || migrations[3].Name != "thread_retention_index" {
 		t.Fatalf("unexpected migrations: %+v", migrations)
 	}
 	for _, table := range []string{
@@ -523,6 +558,11 @@ func TestMigrateAppliesAndRecordsPendingVersion(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO agent_schema_migrations(version,name,checksum) VALUES($1,$2,$3)")).
 		WithArgs(migrations[2].Version, migrations[2].Name, migrations[2].Checksum).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE INDEX IF NOT EXISTS agent_threads_user_updated_idx").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO agent_schema_migrations(version,name,checksum) VALUES($1,$2,$3)")).
+		WithArgs(migrations[3].Version, migrations[3].Name, migrations[3].Checksum).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	expectMigrationUnlock(mock)
 
 	if err := migrate(context.Background(), backend.DB); err != nil {
@@ -547,7 +587,8 @@ func TestMigrateSkipsVerifiedVersion(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"version", "name", "checksum"}).
 			AddRow(initial.Version, initial.Name, initial.Checksum).
 			AddRow(migrations[1].Version, migrations[1].Name, migrations[1].Checksum).
-			AddRow(migrations[2].Version, migrations[2].Name, migrations[2].Checksum))
+			AddRow(migrations[2].Version, migrations[2].Name, migrations[2].Checksum).
+			AddRow(migrations[3].Version, migrations[3].Name, migrations[3].Checksum))
 	expectMigrationUnlock(mock)
 
 	if err := migrate(context.Background(), backend.DB); err != nil {
@@ -626,7 +667,8 @@ func TestBackendReadyValidatesCompleteSchema(t *testing.T) {
 			rows: sqlmock.NewRows([]string{"version", "name", "checksum"}).
 				AddRow(initial.Version, initial.Name, initial.Checksum).
 				AddRow(migrations[1].Version, migrations[1].Name, migrations[1].Checksum).
-				AddRow(migrations[2].Version, migrations[2].Name, migrations[2].Checksum),
+				AddRow(migrations[2].Version, migrations[2].Name, migrations[2].Checksum).
+				AddRow(migrations[3].Version, migrations[3].Name, migrations[3].Checksum),
 		},
 		{
 			name:    "missing migration",

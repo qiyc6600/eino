@@ -195,6 +195,9 @@ func NewApp(cfg *Config) *App {
 	// It is activated by the explicit per-request confirmBeforeExecute flag.
 	runner := agent.NewRunner(supervisor, steppedRunner, hitlSvc, toolRegistry, rbac, memorySvc, summarizer, cfg.MaxTokens)
 	runner.SetReserveOutputTokens(cfg.ReserveOutputTokens)
+	// Thread history governance: both default to preserving everything.
+	runner.SetThreadHistoryLimit(cfg.ThreadHistoryMaxMessages)
+	runner.SetThreadRetention(cfg.ThreadRetention)
 	if pg != nil {
 		runner.UseRunStore(pg.Runs, cfg.RunEventRetention)
 	}

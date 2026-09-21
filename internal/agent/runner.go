@@ -177,6 +177,31 @@ type Runner struct {
 	toolSchemaTokens atomic.Int64
 	// reserveOutputTokens is the slice of the window held back for the answer.
 	reserveOutputTokens atomic.Int64
+	// maxHistoryMessages caps one conversation's stored history (0 = unlimited).
+	maxHistoryMessages atomic.Int64
+	// threadRetention deletes threads untouched for this long (0 = keep forever).
+	threadRetention atomic.Int64
+}
+
+// SetThreadHistoryLimit caps how many messages of one conversation are stored.
+// Older messages are dropped on write; 0 keeps everything. Note that once a
+// conversation reaches its cap every turn rewrites the history rather than
+// appending, so this trades write cost for bounded storage.
+func (r *Runner) SetThreadHistoryLimit(maxMessages int) {
+	if maxMessages < 0 {
+		maxMessages = 0
+	}
+	r.maxHistoryMessages.Store(int64(maxMessages))
+}
+
+// SetThreadRetention deletes conversations untouched for the given duration.
+// 0 (the default) keeps them forever. The sweep is scoped to the acting user and
+// runs on the write path.
+func (r *Runner) SetThreadRetention(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	r.threadRetention.Store(int64(d))
 }
 
 // minUsableContextTokens keeps a pathological configuration — reserve plus tool

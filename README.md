@@ -322,6 +322,8 @@ docker compose -f compose.postgres.yml up -d
 | `SUMMARY_TARGET_TOKENS` | `800` | 摘要目标 token 数 |
 | `RESERVE_OUTPUT_TOKENS` | `1024` | 为模型回答预留的空间；可用预算 = `MAX_TOKENS` − 本项 − 工具定义开销 |
 | `MAX_TOOL_RESULT_CHARS` | `8000` | 单个工具结果的字符上限，超出截断并标注原始长度 |
+| `THREAD_HISTORY_MAX_MESSAGES` | `0` | 单个会话保留的消息上限，0 = 不限制 |
+| `THREAD_RETENTION` | `0` | 未使用多久的会话被清理（如 `720h`），0 = 永久保留 |
 | `RUN_EVENT_RETENTION` | `168h` | 运行事件保留期，到期后接口返回 404 |
 | `USER_STORE` | `memory` | 用户账户存储：`memory` / `postgres` |
 | `SESSION_STORE` | `memory` | 会话存储：`memory` / `file` / `postgres` |
@@ -507,7 +509,7 @@ go test ./...
 | HITL 为异步审批模式 | 中断后 run 结束，通过独立 API 恢复，非"挂起等待"语义 |
 | grep 使用示例数据 | 搜索日志为硬编码 mock，无真实文件系统访问 |
 | 凭证经 Bearer 头传递、JS 可读 | sessionId 仅存前端内存并经 Authorization 头发送（不支持 URL 查询参数，避免泄漏进日志/历史）；XSS 场景防护有限，生产应用 HttpOnly Cookie + CSRF 防护 |
-| 线程历史无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长；缺少保留期与归档策略（写入成本已通过追加式写入解决） |
+| 线程历史默认无保留上限 | 完整对话永久保留，模型输入由压缩保证有界，但存储总量持续增长。**可通过 `THREAD_HISTORY_MAX_MESSAGES` 与 `THREAD_RETENTION` 显式开启上限或清理**（默认保持完整保留：静默丢弃用户对话属于产品决策）。写入成本已通过追加式写入解决 |
 | 文件后端写入为全量重写 | 单文件 JSON 无法原地追加，成本为 O(全部会话)；写入成本敏感的场景应使用 PostgreSQL |
 | 压缩后 checkpoint 体积上升 | 压缩过的 run 会同时序列化完整历史与压缩上下文两份 |
 | 向量记忆文本无长度上限 | `FormatVectorResults` 不截断，向量文本可能单独超出记忆预算 |

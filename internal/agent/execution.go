@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/example/agent-eino-demo/internal/auth"
+	"github.com/example/agent-eino-demo/internal/contextmgr"
 	"github.com/example/agent-eino-demo/internal/hitl"
 	"github.com/example/agent-eino-demo/internal/memory"
 	"github.com/google/uuid"
@@ -203,6 +204,10 @@ func (r *Runner) advance(ctx context.Context, ac *auth.AuthContext, state *Stepp
 		}
 		if interrupt != nil {
 			result, publication, err := prepareInterrupt(ac, state, interrupt)
+			if err == nil {
+				// The interrupt persists history too, so the same cap applies.
+				publication.Messages = r.applyHistoryCap(publication.Messages)
+			}
 			if err == nil && !deferWrites {
 				err = r.publishInterrupt(ctx, publication)
 			}
@@ -225,20 +230,72 @@ func (r *Runner) advance(ctx context.Context, ac *auth.AuthContext, state *Stepp
 
 // saveHistory persists the run's conversation. A run that only extended the
 // stored history is written as a suffix, so the store never rewrites the whole
-// conversation; anything else (a repaired prefix, a store without the append
-// capability, a length guard that does not match) falls back to a full replace.
+// conversation; anything else (a capped history, a repaired prefix, a store
+// without the append capability, a length guard that does not match) falls back
+// to a full replace.
 func (r *Runner) saveHistory(ctx context.Context, user string, state *SteppedRunState) error {
-	all := historyMessages(state)
+	full := historyMessages(state)
+	all := r.applyHistoryCap(full)
+	if len(all) != len(full) {
+		// The cap dropped older messages, which is a rewrite rather than an
+		// append. Once a conversation sits at its cap, every turn takes this path.
+		if err := r.replaceHistory(ctx, user, state.ThreadID, all); err != nil {
+			return err
+		}
+		return r.pruneThreads(ctx, user)
+	}
 	if state.extendsStoredHistory(len(all)) {
 		appended, err := r.appendHistory(ctx, user, state.ThreadID, state.StoredCount, all[state.StoredCount:])
 		if err != nil {
 			return err
 		}
 		if appended {
-			return nil
+			return r.pruneThreads(ctx, user)
 		}
 	}
-	return r.replaceHistory(ctx, user, state.ThreadID, all)
+	if err := r.replaceHistory(ctx, user, state.ThreadID, all); err != nil {
+		return err
+	}
+	return r.pruneThreads(ctx, user)
+}
+
+// applyHistoryCap drops the oldest messages when a per-conversation cap is
+// configured. The cap governs what is stored, so the next turn's model context is
+// built from the shortened history — that is the intended trade of opting in.
+func (r *Runner) applyHistoryCap(messages []*schema.Message) []*schema.Message {
+	limit := int(r.maxHistoryMessages.Load())
+	if limit <= 0 || len(messages) <= limit {
+		return messages
+	}
+	return trimHistory(messages, limit)
+}
+
+// trimHistory keeps the newest maxMessages messages. Cutting from the front can
+// orphan a tool result whose tool_call was dropped, so the pair guard runs
+// afterwards — a result without its request confuses the model, and some
+// providers reject it outright.
+func trimHistory(messages []*schema.Message, maxMessages int) []*schema.Message {
+	if maxMessages <= 0 || len(messages) <= maxMessages {
+		return messages
+	}
+	kept := messages[len(messages)-maxMessages:]
+	return contextToEinoMessages(contextmgr.GuardToolPairs(einoToContextMessages(kept)))
+}
+
+// pruneThreads drops this user's threads past the retention age. Retention is off
+// by default; when enabled the sweep runs on the write path, matching how run
+// events expire, so no background job is needed.
+func (r *Runner) pruneThreads(ctx context.Context, user string) error {
+	retention := time.Duration(r.threadRetention.Load())
+	if retention <= 0 {
+		return nil
+	}
+	pruner, ok := r.threads.(ThreadPruner)
+	if !ok {
+		return nil
+	}
+	_, err := pruner.PruneThreadsBefore(ctx, user, time.Now().Add(-retention))
+	return err
 }
 
 // appendHistory writes only the new messages. It reports false when the store
@@ -414,7 +471,7 @@ func (r *Runner) ResumeContext(parent context.Context, ac *auth.AuthContext, id 
 	if r.resumePublisher != nil {
 		publication := ResumePublication{Approval: req, Result: result, Next: next, Retention: r.runRetention}
 		if result.Status == StatusCompleted {
-			publication.Messages = historyMessages(state)
+			publication.Messages = r.applyHistoryCap(historyMessages(state))
 			publication.ReplaceThread = true
 		}
 		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
