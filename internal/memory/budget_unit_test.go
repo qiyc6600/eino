@@ -40,7 +40,7 @@ func TestMemoryBudgetUsesTheWindowEstimator(t *testing.T) {
 	}
 
 	const budget = 400
-	out := svc.RetrieveRelevant(ctx, "u1", "", budget, false)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "", budget, false)
 	if out == "" {
 		t.Fatal("expected the preferences to be injected")
 	}

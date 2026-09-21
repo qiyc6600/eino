@@ -466,6 +466,18 @@ func (r *Runner) DeleteThreadContext(ctx context.Context, userID, threadID strin
 		return false, err
 	}
 	defer unlock()
+
+	// Conversation-scoped memory dies with the conversation. It lives under
+	// reserved keys in the memory store, which is what buys per-user isolation and
+	// backend switching — but nothing else would ever remove it, so a scoped entry
+	// whose thread is gone would sit there unreachable and still count as the
+	// user's data.
+	if r.memorySvc != nil {
+		if err := r.memorySvc.DeleteThreadPreferences(ctx, userID, threadID); err != nil {
+			return false, err
+		}
+	}
+
 	if store, ok := r.threads.(ContextThreadMutator); ok {
 		return store.DeleteContext(ctx, userID, threadID)
 	}
@@ -523,7 +535,7 @@ func (r *Runner) ThreadTokenInfo(userID string, roles []string, threadID string)
 	} else {
 		systemContent = r.buildSystemPrompt(roles)
 	}
-	if memCtx := r.memorySvc.RetrieveRelevant(ctx, userID, "", 0, false); memCtx != "" {
+	if memCtx := r.memorySvc.RetrieveRelevant(ctx, userID, threadID, "", 0, false); memCtx != "" {
 		systemContent += "\n\n" + memCtx
 	}
 

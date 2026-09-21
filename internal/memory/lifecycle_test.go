@@ -226,7 +226,7 @@ func TestRetrieveRelevant_ScoringBudgetAndReinforcement(t *testing.T) {
 	seed("stale_marginal", "old noise", old, 1, false)
 	seed("archived_one", "hidden", now.Format(time.RFC3339), 5, true)
 
-	out := svc.RetrieveRelevant(ctx, "u1", "", 0, true)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "", 0, true)
 	if !strings.Contains(out, "fresh_important") {
 		t.Errorf("high-importance fresh entry should be retrieved, got: %s", out)
 	}
@@ -248,7 +248,7 @@ func TestRetrieveRelevant_ScoringBudgetAndReinforcement(t *testing.T) {
 
 	// Tiny budget keeps only one line, and the second retrieval
 	// reinforces again — use strengthens memory.
-	out2 := svc.RetrieveRelevant(ctx, "u1", "", 30, true)
+	out2 := svc.RetrieveRelevant(ctx, "u1", "", "", 30, true)
 	if strings.Count(out2, "\n") > 2 {
 		t.Errorf("budget should limit injected lines, got: %s", out2)
 	}
@@ -305,7 +305,7 @@ func TestRetrieveRelevant_VectorTextRespectsBudget(t *testing.T) {
 	}
 
 	const budget = 120
-	out := svc.RetrieveRelevant(ctx, "u1", "脚本", budget, false)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "脚本", budget, false)
 	if out == "" {
 		t.Fatal("expected some memory to be injected")
 	}
@@ -344,7 +344,7 @@ func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
 	svc := NewService(store, nil, vec, nil)
 
 	const budget = 80
-	out := svc.RetrieveRelevant(ctx, "u1", "脚本", budget, false)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "脚本", budget, false)
 	if !strings.Contains(out, "用户历史相关记忆") {
 		t.Fatalf("entries that fit the budget must be injected:\n%s", out)
 	}
@@ -370,7 +370,7 @@ func TestRetrieveRelevant_VectorOnlyUserStillGetsRecall(t *testing.T) {
 	}}
 	svc := NewService(store, nil, vec, nil)
 
-	out := svc.RetrieveRelevant(context.Background(), "u1", "脚本", 200, false)
+	out := svc.RetrieveRelevant(context.Background(), "u1", "", "脚本", 200, false)
 	if !strings.Contains(out, "部署脚本") {
 		t.Fatalf("a user with only vector episodes must still get recall:\n%q", out)
 	}

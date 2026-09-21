@@ -59,7 +59,7 @@ func TestMemorySettings_DisabledStopsWriteAndRead(t *testing.T) {
 	if err := svc.ExtractAndSave(ctx, "u_admin", "t1", "我喜欢用Python"); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.RetrieveRelevant(ctx, "u_admin", "写脚本", 0, false); got == "" {
+	if got := svc.RetrieveRelevant(ctx, "u_admin", "", "写脚本", 0, false); got == "" {
 		t.Fatal("expected memory to be injected while enabled")
 	}
 
@@ -72,7 +72,7 @@ func TestMemorySettings_DisabledStopsWriteAndRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reads inject nothing.
-	if got := svc.RetrieveRelevant(ctx, "u_admin", "写脚本", 0, false); got != "" {
+	if got := svc.RetrieveRelevant(ctx, "u_admin", "", "写脚本", 0, false); got != "" {
 		t.Fatalf("disabled memory must not be injected, got %q", got)
 	}
 	// Entries are kept, not deleted.
@@ -93,7 +93,7 @@ func TestMemorySettings_DisabledStopsWriteAndRead(t *testing.T) {
 	if err := svc.SetSettings(ctx, "u_admin", MemorySettings{Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.RetrieveRelevant(ctx, "u_admin", "写脚本", 0, false); got == "" {
+	if got := svc.RetrieveRelevant(ctx, "u_admin", "", "写脚本", 0, false); got == "" {
 		t.Fatal("expected memory to be injected again after re-enabling")
 	}
 }

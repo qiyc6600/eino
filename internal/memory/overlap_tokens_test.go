@@ -67,7 +67,7 @@ func TestRetrieveRelevant_ChineseQueryRanksByRelevance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := svc.RetrieveRelevant(ctx, "u1", "帮我写一个部署脚本", 400, false)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "帮我写一个部署脚本", 400, false)
 	rel := strings.Index(out, "note_deploy")
 	unrel := strings.Index(out, "note_lunch")
 	if rel < 0 {

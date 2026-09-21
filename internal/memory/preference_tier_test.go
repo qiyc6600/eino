@@ -41,7 +41,7 @@ func TestRetrieveRelevant_CorePreferenceIsNotCrowdedOut(t *testing.T) {
 	}
 
 	const budget = 120
-	out := svc.RetrieveRelevant(ctx, "u1", "write a deployment script", budget, false)
+	out := svc.RetrieveRelevant(ctx, "u1", "", "write a deployment script", budget, false)
 	if out == "" {
 		t.Fatal("expected something to be injected")
 	}

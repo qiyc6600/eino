@@ -66,28 +66,127 @@ func (s *Service) GetCheckpointStore() CheckpointStore {
 	return s.checkpointStore
 }
 
+// MemoryScope is how far an entry reaches.
+//
+// The distinction exists because the storage model has no other way to express
+// it: an entry written under the user's namespace is visible in every
+// conversation, so a request about the answer the user is reading ("请详细
+// 说明这个函数") could only be either recorded globally — wrong — or dropped.
+// A thread-scoped entry lets it be honoured where it was asked for and nowhere
+// else.
+type MemoryScope string
+
+const (
+	// ScopeUser is the default: the entry applies to the user everywhere.
+	ScopeUser MemoryScope = "user"
+	// ScopeThread limits the entry to the conversation it was stated in. It
+	// survives context compaction within that conversation, which is the point —
+	// the conversation history alone stops carrying it once it is trimmed — and
+	// it dies with the thread.
+	ScopeThread MemoryScope = "thread"
+)
+
+// threadKeyPrefix namespaces a thread-scoped entry inside the user's namespace.
+//
+// Reserved keys are reused deliberately: the entries then inherit per-user
+// isolation and the configured backend (memory / file / PostgreSQL) with no new
+// storage code, and the existing reserved-key filters already keep them out of
+// the memory list, retrieval scoring, consolidation and the memory write API.
+//
+// The trailing double underscore terminates the thread id so listing is an
+// exact prefix match. Generated ids are "t_" plus hex, so they never contain
+// "__"; a caller-supplied id that did could be matched by a shorter id's
+// prefix, which is why the storage key is never parsed back apart from
+// stripping this exact prefix.
+const threadKeyPrefix = ReservedKeyPrefix + "thread_"
+
+func threadScopePrefix(threadID string) string {
+	return threadKeyPrefix + threadID + "__"
+}
+
+func threadScopedKey(threadID, key string) string {
+	return threadScopePrefix(threadID) + key
+}
+
+// sourceAuthority ranks how strong the evidence behind an entry's value is: how
+// much it should override a competing claim, not who wrote most recently.
+//
+// The order matters because the write paths have different failure modes. A
+// rule-matched or hand-written value comes from the user; an LLM-extracted one
+// is an inference that the anti-hallucination guard only partially checks (it
+// verifies closed-list values verbatim, but cannot tell "I use Python" from
+// "this Python snippet is broken"); a consolidated one is the model's own
+// summary of the others.
+func sourceAuthority(source string) int {
+	switch source {
+	case "user_stated":
+		return 3
+	case "consolidated":
+		return 2
+	case "llm_extracted":
+		return 1
+	default:
+		// Episodes, document chunks and settings live under their own key spaces
+		// and never collide with a preference, so they need no rank.
+		return 0
+	}
+}
+
+// entryAuthority is the strongest evidence ever recorded for an entry: its
+// current source plus every superseded revision still in the history chain.
+//
+// It is deliberately not just the current source. A user statement keeps its
+// protective effect after the model restates the key, so a second inference
+// cannot erode the entry further. The history chain is the natural place to read
+// that from — the alternative, a second sticky field, could drift out of sync
+// with the chain it is supposed to summarise.
+func entryAuthority(e MemoryEntry) int {
+	best := sourceAuthority(e.Source)
+	for _, rev := range e.History {
+		if a := sourceAuthority(rev.Source); a > best {
+			best = a
+		}
+	}
+	return best
+}
+
 // EntryMeta carries optional metadata for memory upserts.
 type EntryMeta struct {
-	Type       string // MemoryType* constant; empty = preference
-	Importance int    // 1-5; 0 = DefaultImportance
-	Source     string // user_stated | llm_extracted | consolidated; empty = user_stated
-	ThreadID   string // conversation provenance
-	Excerpt    string // truncated original message
+	Type       string      // MemoryType* constant; empty = preference
+	Importance int         // 1-5; 0 = DefaultImportance
+	Source     string      // user_stated | llm_extracted | consolidated; empty = user_stated
+	ThreadID   string      // conversation provenance
+	Excerpt    string      // truncated original message
+	Scope      MemoryScope // empty = ScopeUser
 }
 
 // UpsertPreference writes a preference with conflict resolution: when the key
 // already exists with a different value, the old value is archived into the
 // entry's history (capped) instead of being silently dropped. Identical
 // values are a no-op.
+//
+// Two guards keep a weak source from eroding a strong one. The value itself is
+// still last-write-wins — a later statement really can be a change of mind — but
+// a lower-authority write may not lower the entry's importance or downgrade its
+// source label. Without the importance guard an LLM extraction at the default
+// importance would knock a hand-written preference out of the core tier, which
+// is exactly the tier that guarantees it is injected at all.
 func (s *Service) UpsertPreference(ctx context.Context, userID, key, value string, meta EntryMeta) error {
-	// Framework entries are written through their own typed setters, never by
-	// extraction or the memory API.
 	if IsReservedKey(key) {
 		return fmt.Errorf("保留键不可通过记忆接口写入：%s", key)
 	}
+	// The scope decides the storage key; the logical key is what the caller and
+	// the API see, so validation happens before the prefix is applied.
+	storageKey := key
+	if meta.Scope == ScopeThread {
+		if meta.ThreadID == "" {
+			return fmt.Errorf("会话级记忆必须带 threadID：%s", key)
+		}
+		storageKey = threadScopedKey(meta.ThreadID, key)
+	}
 	now := time.Now().Format(time.RFC3339)
 
-	existing, ok, err := s.store.Get(ctx, userID, key)
+	existing, ok, err := s.store.Get(ctx, userID, storageKey)
 	if err != nil {
 		return err
 	}
@@ -107,7 +206,11 @@ func (s *Service) UpsertPreference(ctx context.Context, userID, key, value strin
 		if meta.Type != "" {
 			existing.Type = meta.Type
 		}
-		if meta.Importance > 0 {
+		// Source records who wrote the value that is now in effect, so it follows
+		// the write. Importance is the assertion "this matters", which a later,
+		// weaker inference does not disprove — so it may only be changed by a
+		// source at least as strong as the strongest evidence ever recorded.
+		if meta.Importance > 0 && sourceAuthority(meta.Source) >= entryAuthority(existing) {
 			existing.Importance = meta.Importance
 		}
 		if meta.Source != "" {
@@ -124,7 +227,7 @@ func (s *Service) UpsertPreference(ctx context.Context, userID, key, value strin
 
 	entry := MemoryEntry{
 		UserID:         userID,
-		Key:            key,
+		Key:            storageKey,
 		Value:          value,
 		Source:         meta.Source,
 		Type:           meta.Type,
@@ -148,6 +251,79 @@ func (s *Service) PutPreference(ctx context.Context, userID, key, value string) 
 		Source:     "user_stated",
 		Importance: corePreferenceImportance,
 	})
+}
+
+// ListThreadPreferences returns one thread's scoped entries, keyed by their
+// logical key (the prefix stripped), so callers never see the encoding.
+func (s *Service) ListThreadPreferences(ctx context.Context, userID, threadID string) (map[string]MemoryEntry, error) {
+	entries, err := s.store.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	prefix := threadScopePrefix(threadID)
+	out := make(map[string]MemoryEntry)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Key, prefix) {
+			continue
+		}
+		e.Key = strings.TrimPrefix(e.Key, prefix)
+		out[e.Key] = e
+	}
+	return out, nil
+}
+
+// DeleteThreadPreferences drops everything scoped to one thread. It is called
+// when the thread is deleted: a scoped entry that outlives its thread would be
+// unreachable but never cleaned, and — worse — would still be counted as the
+// user's data.
+func (s *Service) DeleteThreadPreferences(ctx context.Context, userID, threadID string) error {
+	scoped, err := s.ListThreadPreferences(ctx, userID, threadID)
+	if err != nil {
+		return err
+	}
+	prefix := threadScopePrefix(threadID)
+	for key := range scoped {
+		if err := s.store.Delete(ctx, userID, prefix+key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PruneThreadPreferences removes scoped entries last touched before the cutoff,
+// for the retention path.
+//
+// It filters on the entries' own timestamps rather than on the set of threads
+// the thread store just pruned: PruneThreadsBefore reports only a count, not
+// which threads went, and widening that interface across four implementations
+// would buy nothing — an entry whose thread is gone is stale by definition, and
+// an entry older than the retention window belongs to a thread that is about to
+// be pruned anyway.
+func (s *Service) PruneThreadPreferences(ctx context.Context, userID string, cutoff time.Time) (int, error) {
+	entries, err := s.store.List(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Key, threadKeyPrefix) {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, e.UpdatedAt)
+		if err != nil {
+			// No usable timestamp: keep it, the same way the thread store keeps
+			// entries whose age it cannot determine.
+			continue
+		}
+		if !t.Before(cutoff) {
+			continue
+		}
+		if err := s.store.Delete(ctx, userID, e.Key); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // GetPreference reads a single preference from long-term memory.
@@ -214,12 +390,14 @@ func (s *Service) ExtractAndSave(ctx context.Context, userID, threadID, message 
 		if err == nil {
 			llmOwned = true
 			for _, e := range extracted {
-				if !valueSupportedByMessage(e.Key, e.Value, message) {
+				scope, ok := memoryScopeFor(e.Key, e.Value, message)
+				if !ok {
 					continue // hallucinated value for a closed-list key
 				}
 				if err := s.UpsertPreference(ctx, userID, e.Key, e.Value, EntryMeta{
 					Type: e.Type, Importance: e.Importance,
 					Source: "llm_extracted", ThreadID: threadID, Excerpt: excerpt,
+					Scope: scope,
 				}); err == nil {
 					llmEntries = append(llmEntries, e)
 				}
@@ -253,24 +431,30 @@ var enumerableMemoryKeys = map[string]bool{
 	"preferred_city":      true,
 }
 
-// valueSupportedByMessage reports whether an extracted entry is supported by the
-// message text.
+// memoryScopeFor decides where an extracted entry belongs, and whether it is
+// admissible at all. It is the single place that answers both questions, because
+// they are the same question: how far does this statement reach?
 //
-//   - Closed-list keys (language/framework/editor/city): the value must appear
-//     verbatim — fabrication is most likely exactly there.
-//   - Presentation keys (style/format): the message must carry a persistence
-//     marker. Without this the model can turn "请详细说明这个函数" — a request
-//     about the current answer — into a standing preference, which is the same
-//     defect the rule path guards against.
-//   - Everything else passes: those values are paraphrases, not verbatim quotes.
-func valueSupportedByMessage(key, value, message string) bool {
+//   - Closed-list keys (language/framework/editor/city) are identity facts, so
+//     they are always user-wide and their value must appear verbatim in the
+//     message — fabrication is most likely exactly there, and "用Python写这个"
+//     is an instruction for one answer with no thread-scoped reading either.
+//   - Presentation keys (style/format) are honoured where they were asked: a
+//     marker makes them user-wide, its absence scopes them to the conversation.
+//     That is what lets "请详细说明这个函数" mean something in its thread instead
+//     of being discarded for fear of polluting the user's profile.
+//   - Everything else is a user-wide paraphrase.
+func memoryScopeFor(key, value, message string) (MemoryScope, bool) {
 	if enumerableMemoryKeys[key] {
-		return strings.Contains(strings.ToLower(message), strings.ToLower(value))
+		return ScopeUser, strings.Contains(strings.ToLower(message), strings.ToLower(value))
 	}
 	if persistentMemoryKeys[key] {
-		return hasStandingMarker(message)
+		if hasStandingMarker(message) {
+			return ScopeUser, true
+		}
+		return ScopeThread, true
 	}
-	return true
+	return ScopeUser, true
 }
 
 // storeEpisode records a valuable message as an episode entry (source of
@@ -446,7 +630,7 @@ var standingMarkers = []string{
 // means "expand this one", and persisting it would rewrite the user's profile
 // for every future conversation. They only become a preference alongside a
 // standing marker ("以后请用简洁的方式回答").
-var presentationWords = []string{"简洁", "简短", "详细", "详尽", "具体", "展开"}
+var presentationWords = []string{"简洁", "简短", "详细", "详尽", "展开"}
 
 // persistentMemoryKeys are keys whose value describes a standing preference
 // about presentation. The LLM path must see a standing marker for these, for
@@ -470,113 +654,145 @@ func hasStandingMarker(message string) bool {
 
 // extractWithRules is the fallback rule-based preference extraction.
 // Returns the keys written during this call so the LLM pass can skip them.
+//
+// Scope is decided by the same signal that decides whether to write at all. A
+// presentation request without a persistence marker is recorded against the
+// conversation, not the user: "请详细说明这个函数" is honoured in the thread it
+// was asked in and nowhere else. With a marker ("以后请用简洁的方式回答") it
+// becomes a user-wide preference.
 func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerpt, message string) ([]string, error) {
 	lower := strings.ToLower(message)
 
-	// A standing marker is required for everything this extractor writes. A
-	// presentation word alone is not enough — see presentationWords.
 	standing := hasStandingMarker(message)
-	if !standing {
+	presentation := false
+	for _, w := range presentationWords {
+		if strings.Contains(lower, w) {
+			presentation = true
+			break
+		}
+	}
+	// Nothing to do without either an explicit standing preference or a
+	// presentation request that the thread can hold.
+	if !standing && !presentation {
 		return nil, nil
 	}
 
-	// write records one rule-extracted preference with provenance metadata.
+	// Language, framework, editor and city are identity facts about the user, so
+	// they still require a standing marker: "用Python写这个" is an instruction for
+	// one answer, and there is no sensible thread-scoped reading of it.
+	if !standing && !presentation {
+		return nil, nil
+	}
+
+	// write records one rule-extracted preference with provenance metadata. The
+	// scope decides whether it lands in the user's namespace or the thread's.
 	var written []string
-	write := func(key, value string, importance int) {
+	write := func(key, value string, importance int, scope MemoryScope) {
 		if err := s.UpsertPreference(ctx, userID, key, value, EntryMeta{
 			Type:       MemoryTypePreference,
 			Importance: importance,
 			Source:     "user_stated",
 			ThreadID:   threadID,
 			Excerpt:    excerpt,
+			Scope:      scope,
 		}); err == nil {
 			written = append(written, key)
 		}
 	}
 
-	// --- Programming language preference ---
-	switch {
-	case strings.Contains(lower, "python"):
-		write("preferred_language", "Python", 4)
-	case strings.Contains(lower, "java") && !strings.Contains(lower, "javascript"):
-		write("preferred_language", "Java", 4)
-	case strings.Contains(lower, "go") || strings.Contains(lower, "golang"):
-		write("preferred_language", "Go", 4)
-	case strings.Contains(lower, "javascript") || strings.Contains(lower, "js"):
-		write("preferred_language", "JavaScript", 4)
-	case strings.Contains(lower, "typescript") || strings.Contains(lower, "ts"):
-		write("preferred_language", "TypeScript", 4)
-	case strings.Contains(lower, "rust"):
-		write("preferred_language", "Rust", 4)
-	case strings.Contains(lower, "c++") || strings.Contains(lower, "cpp"):
-		write("preferred_language", "C++", 4)
-	case strings.Contains(lower, "c#") || strings.Contains(lower, "csharp"):
-		write("preferred_language", "C#", 4)
-	case strings.Contains(lower, "swift"):
-		write("preferred_language", "Swift", 4)
-	case strings.Contains(lower, "kotlin"):
-		write("preferred_language", "Kotlin", 4)
+	// Presentation requests are always recorded — scoped to the thread unless the
+	// message asked for them to persist. This is what replaced "drop it": the
+	// request is honoured where it was made, and the user's profile is untouched.
+	styleScope := ScopeThread
+	if standing {
+		styleScope = ScopeUser
 	}
-
-	// --- Framework preference ---
-	switch {
-	case strings.Contains(lower, "react") && !strings.Contains(lower, "vue"):
-		write("preferred_framework", "React", 4)
-	case strings.Contains(lower, "vue"):
-		write("preferred_framework", "Vue", 4)
-	case strings.Contains(lower, "angular"):
-		write("preferred_framework", "Angular", 4)
-	case strings.Contains(lower, "spring"):
-		write("preferred_framework", "Spring", 4)
-	case strings.Contains(lower, "django"):
-		write("preferred_framework", "Django", 4)
-	case strings.Contains(lower, "flask"):
-		write("preferred_framework", "Flask", 4)
-	case strings.Contains(lower, "gin") && !strings.Contains(lower, "begin"):
-		write("preferred_framework", "Gin", 4)
-	case strings.Contains(lower, "fib") || strings.Contains(lower, "fiber"):
-		write("preferred_framework", "Fiber", 4)
-	}
-
-	// --- Editor/IDE preference ---
-	switch {
-	case strings.Contains(lower, "vscode") || strings.Contains(lower, "vs code"):
-		write("preferred_editor", "VSCode", 4)
-	case strings.Contains(lower, "vim") || strings.Contains(lower, "neovim"):
-		write("preferred_editor", "Vim", 4)
-	case strings.Contains(lower, "emacs"):
-		write("preferred_editor", "Emacs", 4)
-	case strings.Contains(lower, "idea") || strings.Contains(lower, "intellij"):
-		write("preferred_editor", "IntelliJ IDEA", 4)
-	case strings.Contains(lower, "pycharm"):
-		write("preferred_editor", "PyCharm", 4)
-	case strings.Contains(lower, "goland"):
-		write("preferred_editor", "GoLand", 4)
-	}
-
-	// --- Answer style preference ---
-	// Two conditions, both required: the function already returned unless a
-	// standing marker is present, and a presentation word must be present too.
-	// That is exactly what makes "以后请用简洁的方式回答" a preference and
-	// "请详细说明这个函数" not one.
 	for _, w := range presentationWords {
 		if !strings.Contains(lower, w) {
 			continue
 		}
 		switch w {
 		case "简洁", "简短":
-			write("answer_style", "concise", 3)
-		case "详细", "详尽":
-			write("answer_style", "detailed", 3)
+			write("answer_style", "concise", 3, styleScope)
+		case "详细", "详尽", "展开":
+			write("answer_style", "detailed", 3, styleScope)
 		}
+	}
+
+	// Identity facts only ever go user-wide.
+	if !standing {
+		return written, nil
+	}
+	writeIdentity := func(key, value string, importance int) {
+		write(key, value, importance, ScopeUser)
+	}
+
+	// --- Programming language preference ---
+	switch {
+	case strings.Contains(lower, "python"):
+		writeIdentity("preferred_language", "Python", 4)
+	case strings.Contains(lower, "java") && !strings.Contains(lower, "javascript"):
+		writeIdentity("preferred_language", "Java", 4)
+	case strings.Contains(lower, "go") || strings.Contains(lower, "golang"):
+		writeIdentity("preferred_language", "Go", 4)
+	case strings.Contains(lower, "javascript") || strings.Contains(lower, "js"):
+		writeIdentity("preferred_language", "JavaScript", 4)
+	case strings.Contains(lower, "typescript") || strings.Contains(lower, "ts"):
+		writeIdentity("preferred_language", "TypeScript", 4)
+	case strings.Contains(lower, "rust"):
+		writeIdentity("preferred_language", "Rust", 4)
+	case strings.Contains(lower, "c++") || strings.Contains(lower, "cpp"):
+		writeIdentity("preferred_language", "C++", 4)
+	case strings.Contains(lower, "c#") || strings.Contains(lower, "csharp"):
+		writeIdentity("preferred_language", "C#", 4)
+	case strings.Contains(lower, "swift"):
+		writeIdentity("preferred_language", "Swift", 4)
+	case strings.Contains(lower, "kotlin"):
+		writeIdentity("preferred_language", "Kotlin", 4)
+	}
+
+	// --- Framework preference ---
+	switch {
+	case strings.Contains(lower, "react") && !strings.Contains(lower, "vue"):
+		writeIdentity("preferred_framework", "React", 4)
+	case strings.Contains(lower, "vue"):
+		writeIdentity("preferred_framework", "Vue", 4)
+	case strings.Contains(lower, "angular"):
+		writeIdentity("preferred_framework", "Angular", 4)
+	case strings.Contains(lower, "spring"):
+		writeIdentity("preferred_framework", "Spring", 4)
+	case strings.Contains(lower, "django"):
+		writeIdentity("preferred_framework", "Django", 4)
+	case strings.Contains(lower, "flask"):
+		writeIdentity("preferred_framework", "Flask", 4)
+	case strings.Contains(lower, "gin") && !strings.Contains(lower, "begin"):
+		writeIdentity("preferred_framework", "Gin", 4)
+	case strings.Contains(lower, "fib") || strings.Contains(lower, "fiber"):
+		writeIdentity("preferred_framework", "Fiber", 4)
+	}
+
+	// --- Editor/IDE preference ---
+	switch {
+	case strings.Contains(lower, "vscode") || strings.Contains(lower, "vs code"):
+		writeIdentity("preferred_editor", "VSCode", 4)
+	case strings.Contains(lower, "vim") || strings.Contains(lower, "neovim"):
+		writeIdentity("preferred_editor", "Vim", 4)
+	case strings.Contains(lower, "emacs"):
+		writeIdentity("preferred_editor", "Emacs", 4)
+	case strings.Contains(lower, "idea") || strings.Contains(lower, "intellij"):
+		writeIdentity("preferred_editor", "IntelliJ IDEA", 4)
+	case strings.Contains(lower, "pycharm"):
+		writeIdentity("preferred_editor", "PyCharm", 4)
+	case strings.Contains(lower, "goland"):
+		writeIdentity("preferred_editor", "GoLand", 4)
 	}
 
 	// --- Answer language preference ---
 	switch {
 	case strings.Contains(lower, "用中文回答") || strings.Contains(lower, "中文回复"):
-		write("answer_language", "Chinese", 3)
+		writeIdentity("answer_language", "Chinese", 3)
 	case strings.Contains(lower, "用英文回答") || strings.Contains(lower, "英文回复") || strings.Contains(lower, "answer in english"):
-		write("answer_language", "English", 3)
+		writeIdentity("answer_language", "English", 3)
 	}
 
 	// --- City/location preference ---
@@ -584,7 +800,7 @@ func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerp
 	for _, city := range cities {
 		if strings.Contains(lower, "默认城市") || strings.Contains(lower, "所在城市") || strings.Contains(lower, "我在") {
 			if strings.Contains(lower, city) {
-				write("preferred_city", city, 3)
+				writeIdentity("preferred_city", city, 3)
 				break
 			}
 		}
@@ -593,11 +809,11 @@ func (s *Service) extractWithRules(ctx context.Context, userID, threadID, excerp
 	// --- Output format preference ---
 	switch {
 	case strings.Contains(lower, "表格形式") || strings.Contains(lower, "表格展示"):
-		write("output_format", "table", 3)
+		writeIdentity("output_format", "table", 3)
 	case strings.Contains(lower, "列表形式") || strings.Contains(lower, "列表展示"):
-		write("output_format", "list", 3)
+		writeIdentity("output_format", "list", 3)
 	case strings.Contains(lower, "代码形式") || strings.Contains(lower, "代码展示"):
-		write("output_format", "code", 3)
+		writeIdentity("output_format", "code", 3)
 	}
 
 	return written, nil

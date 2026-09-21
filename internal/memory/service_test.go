@@ -56,15 +56,19 @@ func TestService_ExtractAndSave_DetailedStyle(t *testing.T) {
 	}
 }
 
-// TestService_ExtractAndSave_TransientRequestsDoNotPersist is the guard on the
-// other side of the line, and the more important one.
+// TestService_ExtractAndSave_TransientRequestsAreThreadScoped is the guard on
+// the line between the two scopes, and the more important one.
 //
 // Every message here is a request about the answer the user is reading. None
-// carries a persistence marker, so none may write a standing preference: a
+// carries a persistence marker, so none may write a user-wide preference: a
 // single "这个回答太长了" used to set answer_style=concise permanently, for every
-// future conversation. Repeating them the other way ("简洁点", then "详细讲讲")
-// made the profile oscillate with each turn's wording.
-func TestService_ExtractAndSave_TransientRequestsDoNotPersist(t *testing.T) {
+// future conversation, and repeating them the other way ("简洁点", then
+// "详细讲讲") made the profile oscillate with each turn's wording.
+//
+// They are still honoured — scoped to the conversation they were asked in,
+// which is what the thread scope is for. Asserting only "no user-wide entry" would
+// pass even if the write were dropped entirely, so both halves are checked.
+func TestService_ExtractAndSave_TransientRequestsAreThreadScoped(t *testing.T) {
 	cases := []string{
 		"请详细说明这个函数的作用",
 		"这个回答太长了，请简短一些",
@@ -78,12 +82,40 @@ func TestService_ExtractAndSave_TransientRequestsDoNotPersist(t *testing.T) {
 		svc := NewService(store, nil, nil, nil)
 		ctx := context.Background()
 
-		if err := svc.ExtractAndSave(ctx, "u1", "t1", msg); err != nil {
+		if err := svc.ExtractAndSave(ctx, "u1", "t_here", msg); err != nil {
 			t.Fatalf("extract %q: %v", msg, err)
 		}
 		if _, ok, _ := svc.GetPreference(ctx, "u1", "answer_style"); ok {
-			t.Errorf("%q must not persist a standing style preference", msg)
+			t.Errorf("%q must not persist a user-wide style preference", msg)
 		}
+		scoped, err := svc.ListThreadPreferences(ctx, "u1", "t_here")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := scoped["answer_style"]; !ok {
+			t.Errorf("%q should still be honoured in its own conversation", msg)
+		}
+	}
+}
+
+// TestService_ExtractAndSave_StandingRequestIsUserWide is the other half: the
+// same words with a persistence marker become a preference about the user.
+func TestService_ExtractAndSave_StandingRequestIsUserWide(t *testing.T) {
+	store := NewInMemoryMemoryStore()
+	svc := NewService(store, nil, nil, nil)
+	ctx := context.Background()
+
+	if err := svc.ExtractAndSave(ctx, "u1", "t_here", "以后请用简洁的方式回答"); err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok, _ := svc.GetPreference(ctx, "u1", "answer_style")
+	if !ok || value != "concise" {
+		t.Fatalf("expected a user-wide answer_style=concise, got %q (ok=%v)", value, ok)
+	}
+	scoped, _ := svc.ListThreadPreferences(ctx, "u1", "t_here")
+	if _, ok := scoped["answer_style"]; ok {
+		t.Fatal("a standing preference must not also be written to the thread scope")
 	}
 }
 

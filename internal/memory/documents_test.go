@@ -181,7 +181,7 @@ func TestRetrieveRelevant_DocumentSection(t *testing.T) {
 		if _, err := svc.IngestDocument(ctx, "u1", "运维手册", "重启服务前先确认备份完成。\n\n备份失败时不要继续。"); err != nil {
 			t.Fatal(err)
 		}
-		out := svc.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false)
+		out := svc.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false)
 		if !strings.Contains(out, "【文档片段】") {
 			t.Fatalf("document section missing:\n%s", out)
 		}
@@ -199,7 +199,7 @@ func TestRetrieveRelevant_DocumentSection(t *testing.T) {
 			t.Fatal(err)
 		}
 		svc.SetDocumentBudgetTokens(0)
-		if out := svc.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false); strings.Contains(out, "【文档片段】") {
+		if out := svc.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false); strings.Contains(out, "【文档片段】") {
 			t.Fatalf("document retrieval should be off at budget 0:\n%s", out)
 		}
 	})
@@ -212,7 +212,7 @@ func TestRetrieveRelevant_DocumentSection(t *testing.T) {
 
 		// A budget with room for the one chunk keeps it.
 		svc.SetDocumentBudgetTokens(200)
-		out := svc.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false)
+		out := svc.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false)
 		idx := strings.Index(out, "【文档片段】")
 		if idx < 0 {
 			t.Fatalf("a sufficient budget should keep the chunk:\n%s", out)
@@ -224,14 +224,14 @@ func TestRetrieveRelevant_DocumentSection(t *testing.T) {
 		// A budget too small for any chunk drops the section rather than
 		// overflowing it.
 		svc.SetDocumentBudgetTokens(5)
-		if out := svc.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false); strings.Contains(out, "【文档片段】") {
+		if out := svc.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false); strings.Contains(out, "【文档片段】") {
 			t.Fatalf("a 5-token budget cannot fit a chunk, yet one was injected:\n%s", out)
 		}
 	})
 
 	t.Run("no documents means no section", func(t *testing.T) {
 		svc := newService(t)
-		if out := svc.RetrieveRelevant(ctx, "u1", "任意问题", 0, false); strings.Contains(out, "【文档片段】") {
+		if out := svc.RetrieveRelevant(ctx, "u1", "", "任意问题", 0, false); strings.Contains(out, "【文档片段】") {
 			t.Fatalf("unexpected document section:\n%s", out)
 		}
 	})
@@ -250,7 +250,7 @@ func TestEnsureVectorIndex_RebuildsAfterRestart(t *testing.T) {
 	if _, err := svc.IngestDocument(ctx, "u1", "运维手册", "重启服务前先确认备份完成。"); err != nil {
 		t.Fatal(err)
 	}
-	if out := svc.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false); !strings.Contains(out, "【文档片段】") {
+	if out := svc.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false); !strings.Contains(out, "【文档片段】") {
 		t.Fatalf("document recall did not work before the restart:\n%s", out)
 	}
 
@@ -259,7 +259,7 @@ func TestEnsureVectorIndex_RebuildsAfterRestart(t *testing.T) {
 	restarted := NewService(store, nil, NewInMemoryVectorStore(), nil)
 	restarted.SetDocumentStore(NewInMemoryVectorStore())
 	restarted.SetVectorMinScore(0.1)
-	out := restarted.RetrieveRelevant(ctx, "u1", "重启服务前要做什么", 0, false)
+	out := restarted.RetrieveRelevant(ctx, "u1", "", "重启服务前要做什么", 0, false)
 	if !strings.Contains(out, "【文档片段】") {
 		t.Fatalf("document recall was not rebuilt after restart:\n%s", out)
 	}
@@ -283,7 +283,7 @@ func TestVectorMinScore_MustMatchEmbedderScale(t *testing.T) {
 		if minScore > 0 {
 			svc.SetVectorMinScore(minScore)
 		}
-		return svc.RetrieveRelevant(ctx, "u1", "任意查询", 0, false)
+		return svc.RetrieveRelevant(ctx, "u1", "", "任意查询", 0, false)
 	}
 
 	// The default cut-off is calibrated for real embeddings; the hash fallback's
@@ -321,7 +321,7 @@ func TestEnsureVectorIndex_RebuildsEpisodes(t *testing.T) {
 		t.Fatalf("expected an empty index before the rebuild, got %d entries", len(results))
 	}
 
-	svc.RetrieveRelevant(ctx, "u1", "冒烟测试记录", 0, false)
+	svc.RetrieveRelevant(ctx, "u1", "", "冒烟测试记录", 0, false)
 
 	results, err := vec.Query(ctx, "u1", "冒烟测试记录", 5)
 	if err != nil {

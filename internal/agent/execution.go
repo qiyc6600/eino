@@ -101,7 +101,7 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	if r.steppedRunner.HasSubAgents() {
 		prompt = r.buildSupervisorPrompt(ac.Roles)
 	}
-	if mem := r.memorySvc.RetrieveRelevant(ctx, ac.UserID, message, 0, true); mem != "" {
+	if mem := r.memorySvc.RetrieveRelevant(ctx, ac.UserID, thread, message, 0, true); mem != "" {
 		prompt += "\n\n" + mem
 	}
 	threadMessages, err := r.copyThread(ctx, ac.UserID, thread)
@@ -295,11 +295,19 @@ func (r *Runner) pruneThreads(ctx context.Context, user string) error {
 	if retention <= 0 {
 		return nil
 	}
+	cutoff := time.Now().Add(-retention)
+	// Scoped memory is pruned alongside the threads, on the entries' own
+	// timestamps: PruneThreadsBefore reports only a count, not which threads went.
+	if r.memorySvc != nil {
+		if _, err := r.memorySvc.PruneThreadPreferences(ctx, user, cutoff); err != nil {
+			return err
+		}
+	}
 	pruner, ok := r.threads.(ThreadPruner)
 	if !ok {
 		return nil
 	}
-	_, err := pruner.PruneThreadsBefore(ctx, user, time.Now().Add(-retention))
+	_, err := pruner.PruneThreadsBefore(ctx, user, cutoff)
 	return err
 }
 

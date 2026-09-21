@@ -217,7 +217,10 @@ func (s *Service) retrieveDocuments(ctx context.Context, userID, query string, b
 // memories rank higher over time ("use strengthens memory"); pass false for
 // read-only recounts (e.g. UI display) that must not skew the statistics.
 // An empty query scores on importance/recency/access only.
-func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, budgetTokens int, reinforce bool) string {
+//
+// threadID selects the conversation-scoped entries to inject. Passing "" skips
+// them, which is what the read-only UI recount does when no thread is in play.
+func (s *Service) RetrieveRelevant(ctx context.Context, userID, threadID, query string, budgetTokens int, reinforce bool) string {
 	// The switch is enforced here rather than at each call site, so no caller can
 	// inject memories for a user who turned them off.
 	if !s.MemoryEnabled(ctx, userID) {
@@ -263,11 +266,30 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 
 	// --- Assemble within budget ---
-	var prefLines, otherLines []string
+	var threadLines, prefLines, otherLines []string
 	var reinforced []MemoryEntry
 	used := 0
 
-	// Core preferences first, so semantic recall cannot displace them.
+	// Thread-scoped entries first: the most specific scope wins the budget, and
+	// there are only ever a handful of them. They are read straight from the
+	// store rather than scored — they were stated for this conversation, so
+	// relevance is not what qualifies them.
+	if threadID != "" {
+		if scoped, err := s.ListThreadPreferences(ctx, userID, threadID); err == nil {
+			for _, e := range sortedByKey(scoped) {
+				line := formatEntryLine(e)
+				cost := contextmgr.CountText(line)
+				if used+cost > budgetTokens {
+					continue
+				}
+				used += cost
+				threadLines = append(threadLines, line)
+				reinforced = append(reinforced, e)
+			}
+		}
+	}
+
+	// Core preferences next, so semantic recall cannot displace them.
 	for _, se := range core {
 		line := formatEntryLine(se.entry)
 		cost := contextmgr.CountText(line)
@@ -316,6 +338,11 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	}
 
 	var parts []string
+	// The thread section is labelled as such on purpose: the model must not read a
+	// request made for one conversation as a fact about the user.
+	if len(threadLines) > 0 {
+		parts = append(parts, threadHeader+strings.Join(threadLines, "\n"))
+	}
 	if len(prefLines) > 0 {
 		parts = append(parts, "用户记忆（确定性）：\n"+strings.Join(prefLines, "\n"))
 	}
@@ -405,4 +432,24 @@ func formatEntryLine(e MemoryEntry) string {
 		b.WriteString(fmt.Sprintf("（已更新 %d 次）", n))
 	}
 	return b.String()
+}
+
+// threadHeader labels the conversation-scoped section.
+const threadHeader = "本次会话的偏好：\n"
+
+// sortedByKey gives thread-scoped entries a stable order. Map iteration is
+// random, and the injected text is part of the prompt — an order that changes
+// between identical requests makes the token count and the model input wobble
+// for no reason.
+func sortedByKey(entries map[string]MemoryEntry) []MemoryEntry {
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]MemoryEntry, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, entries[k])
+	}
+	return out
 }
