@@ -7,6 +7,13 @@ let currentModelId = 'mock'; // current model profile ID
 let modelProfiles = []; // available model profiles
 let pendingSwitchProfileId = null; // profile waiting for API key
 let currentApprovals = []; // current pending approval requests
+// allowedTools is the server's answer to "what may I call", taken from
+// /api/auth/me. It is never re-derived from roles here: the RBAC table lives on
+// the server, and a copy of it in the page drifts the moment roles gain tools
+// they did not have at build time — which is exactly what MCP-granted remote
+// tools are.
+let allowedTools = [];
+let registeredTools = []; // every registered tool, for the "N/M" denominator
 
 // ========== Persistence ==========
 function cacheKey(threadId) {
@@ -110,6 +117,7 @@ async function showMainApp(quiet = false) {
     try {
         const me = await api('GET', '/api/auth/me');
         currentUser = me.user;
+        allowedTools = me.tools || [];
         renderUserInfo(me);
     } catch (e) {
         if (!quiet) {
@@ -136,13 +144,22 @@ async function showMainApp(quiet = false) {
 
 function renderUserInfo(me) {
     const userDiv = document.getElementById('currentUser');
-    const allowedTools = me.tools || [];
-    const allToolCount = 6;
     userDiv.innerHTML = `
         <div class="username">${me.user.username}</div>
         <div class="roles">${me.user.roles.map(r => `<span class="role-badge role-${r}">${r}</span>`).join(' ')}</div>
-        <div class="tool-count">可用工具 ${allowedTools.length}/${allToolCount}</div>
+        <div class="tool-count">${toolCountText()}</div>
     `;
+}
+
+// toolCountText reports the ACL gap. The denominator is the number of registered
+// tools as the server reported them, not a constant: it grows when MCP servers
+// contribute tools, and a hardcoded 6 silently became a lie.
+function toolCountText() {
+    const total = registeredTools.length;
+    if (!total) {
+        return `可用工具 ${allowedTools.length}`;
+    }
+    return `可用工具 ${allowedTools.length}/${total}`;
 }
 
 // ========== Threads ==========
@@ -421,13 +438,18 @@ async function sendMessage() {
                 refreshApprovals();
             } else if (data.status === 'completed') {
                 pushMessage(currentThread, 'assistant', data.answer || '（无回复）');
-                if (data.memory && data.memory.length > 0) {
-                    renderMemory(data.memory);
-                } else {
-                    setTimeout(refreshMemory, 500);
-                }
+                // This response is a ChatRunResult, which carries no memory list —
+                // only the SSE done frame adds one. Refresh instead of reading a
+                // field that is not there.
+                setTimeout(refreshMemory, 500);
+            } else if (data.status === 'error' || data.status === 'cancelled') {
+                // Same distinction the SSE path makes. These used to fall into the
+                // catch-all below and reach the user labelled as an authorization
+                // refusal, which is a different failure entirely.
+                const label = data.status === 'cancelled' ? '⏹️ 已取消' : '❌ 执行失败';
+                pushMessage(currentThread, 'assistant', `${label}${data.answer ? `：${data.answer}` : ''}`);
             } else {
-                pushMessage(currentThread, 'acl-denied', `❌ ${data.answer}`);
+                pushMessage(currentThread, 'assistant', `❌ 未知状态 ${data.status}${data.answer ? `：${data.answer}` : ''}`);
             }
         } catch (e2) {
             const errMsg = e2.message || e.message;
@@ -530,6 +552,10 @@ async function chatStream(threadId, message) {
             const lines = buffer.split('\n');
             buffer = ''; // remaining incomplete line
 
+            // The frame set is chunk / tool_call / done. There is no error frame:
+            // a failed or cancelled run arrives as `done` carrying that status,
+            // which is why the branches below check data.status instead of
+            // waiting for an event that never comes.
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
 
@@ -603,9 +629,6 @@ async function chatStream(threadId, message) {
                                 if (data.contextTokens) {
                                     updateTokenBar(data.contextTokens, data.actualTokens);
                                 }
-                            } else if (eventType === 'error') {
-                                finalizeStreamingMessage(threadId, `❌ ${data.error}`);
-                                renderChat();
                             }
                         } catch (e) {
                             // Ignore parse errors for individual events
@@ -856,16 +879,19 @@ async function decideApproval(interruptId, approved) {
 async function loadTools() {
     try {
         const tools = await api('GET', '/api/tools');
-        renderTools(tools);
+        registeredTools = tools || [];
+        renderTools(registeredTools);
+        // The count in the sidebar needs both halves, and this is where the
+        // denominator arrives.
+        renderUserInfo({ user: currentUser });
     } catch (e) {}
 }
 
+// renderTools marks each tool available or not using the server's list. The
+// per-role tool table is not duplicated here on purpose — see the note on
+// allowedTools.
 function renderTools(tools) {
     const listDiv = document.getElementById('toolList');
-    const allowedTools = (currentUser && currentUser.roles) ?
-        (currentUser.roles.includes('admin') ?
-            ['calculator', 'weather', 'grep', 'query_order', 'delete_order', 'send_email'] :
-            ['calculator', 'weather', 'query_order']) : [];
     listDiv.innerHTML = tools.map(t => {
         const available = allowedTools.includes(t.name);
         const riskClass = t.risk_level || 'low';

@@ -129,6 +129,13 @@
   2. **保留期清理每轮全量扫描**。开启 `THREAD_RETENTION` 后清理在写路径每轮执行一次，而保留期以小时/天计——等于每轮读一遍整个命名空间去删"还不可能过期"的条目。加按用户节流（`DefaultThreadPruneInterval`，默认 1 小时，`SetThreadPruneInterval` 可改，0 = 每次），状态在成功清理后写入，失败的下轮重试。线程存储那侧不受影响：`PruneThreadsBefore` 是带索引的单条 DELETE，不把数据取回应用。
   3. **清理按创建时间判断年龄，会删掉活跃会话的条目**。这是正确性缺陷：注入时的强化只更新 `LastAccessedAt`，不动 `UpdatedAt`，所以一个每轮都在用、但创建于保留期之前的会话级偏好会被静默删除。`scoreEntry` 早已按"最后触碰"计算近因，清理却没跟上。改为同一取法（`LastAccessedAt` 优先）。
   另补两处**集成接线的测试**——`DeleteThread → DeleteThreadPreferences` 与 `pruneThreads → PruneThreadPreferences` 此前完全没有测试，而"忘掉这次调用"正是最容易犯且最难发现的错（症状是慢性泄漏，不是失败）。保留期那条用退化窗口（1ns）让所有条目都算陈旧，避免跨包改写时间戳。四处注入验证均确认测试会变红（恢复第二次读 → 报"读了 2 次"；去掉节流 → 第二次清理未被抑制；按创建时间 → 活跃条目被删；去掉接线 → 条目残留）。
+- 2026-09-21：前端 API 契约审计（逐端点核对前端读取的字段与后端 JSON tag）。**结论：绝大多数读取都是对的**——`/api/models` 的 `ModelProfileInfo` 有完整 tag、SSE 帧的 `contextTokens`/`actualTokens`、interrupt 的 snake_case、`/api/memory` 的 snake_case、决策请求体全部吻合。特别记录一处**看似不匹配其实正确**的：`/api/approvals` 返回的字段是大写的（`InterruptID`/`Status`/`ThreadID`…），因为 `hitl.ApprovalRequest` 大多数字段没有 JSON tag，Go 默认输出 Go 字段名——前端读大写是对的，不要"顺手改成 snake_case"。
+  修掉三处真问题：
+  1. **前端抄了一份后端 RBAC 表**。`renderTools` 按角色硬编码工具名，`renderUserInfo` 硬编码分母 6。MCP 接入后远端工具是启动时授予角色的，于是 admin 的工具面板把 `read_notes`/`delete_note` 显示成 🚫 不可用，计数也停在 "6/6"。`/api/auth/me` 本来就返回 `tools`，改为直接用它，分母用 `/api/tools` 的实际条数。实机验证：admin 显示 8/8 且两个 MCP 工具 ✅，visitor 显示 3/8 且 MCP 工具 🚫。
+  2. **非流式回退把 `error`/`cancelled` 误标成越权**。流式路径正确区分了四种状态，回退路径只判断 `interrupted`/`completed`，其余一律渲染成 `acl-denied`——而回退路径恰恰是在流式已经失败时才走的。改为与流式路径同样的区分。
+  3. **回退路径读了一个不存在的字段**：`data.memory`。非流式响应是 `ChatRunResult`，没有 memory 列表（只有 SSE 的 done 帧会附加）。它有 `setTimeout(refreshMemory, 500)` 兜底，所以没有可见症状，但读取是死代码。顺带删掉前端对 `error` SSE 事件的处理分支——服务端只发 `chunk`/`tool_call`/`done`，失败通过 `done.status` 表达，那个分支永远不可达（并在帧分发处写明帧集合）。
+  新增 `TestIntegration_FrontendContract` 与 `TestIntegration_FrontendSSEContract`：用真实路由驱动每个端点，断言前端读取的每个键确实存在，**并且该键确实出现在 app.js 里**（防止清单腐化成断言一个没人用的契约）。这个自检第一次运行就抓出我列表里三个前端根本不读的键（`created_at`、`superseded_at`、`last_accessed_at`）。注入验证：把 `risk_level` 改名 → 报"does not contain risk_level, but the page reads it"；把 `has_api_key` 的 tag 改名 → 同样报错。
+  另记录一处**未改的观感问题**：`acl-denied` 这个消息角色被用于两处通用请求失败（`pushMessage(threadId, 'acl-denied', '❌ 请求失败…')`），红色气泡的视觉效果合适但名字误导。改它要动 CSS 与调用点，属观感而非契约问题，故留着并记录。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
