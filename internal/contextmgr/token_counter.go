@@ -81,7 +81,7 @@ func (c *SimpleTokenCounter) estimateTokens(text string) int {
 		}
 	}
 
-	return int(chineseTokens + englishTokens) + specialCount/3 + 1
+	return int(chineseTokens+englishTokens) + specialCount/3 + 1
 }
 
 // CountText estimates tokens for a raw text string.

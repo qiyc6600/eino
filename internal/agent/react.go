@@ -21,8 +21,8 @@ type ReactAgentConfig struct {
 
 // ReactAgent wraps an Eino ReAct Agent with project-level configuration.
 type ReactAgent struct {
-	config   ReactAgentConfig
-	agent    *react.Agent
+	config ReactAgentConfig
+	agent  *react.Agent
 }
 
 // Registry is a minimal interface for getting tools by name.

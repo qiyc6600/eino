@@ -38,7 +38,7 @@ func TestIntegration_NodeInterrupt_ExplicitFlag(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	result := chatJSON(t, server.URL, sessionID, map[string]any{
 		"threadId":             "t_node_flag",
@@ -59,8 +59,19 @@ func TestIntegration_NodeInterrupt_ExplicitFlag(t *testing.T) {
 	if interrupt["node_name"] != "plan_review" {
 		t.Errorf("expected node_name=plan_review, got %v", interrupt["node_name"])
 	}
-	if msg, _ := interrupt["message"].(string); !strings.Contains(msg, "weather") && !strings.Contains(msg, "search_agent") {
-		t.Errorf("plan message should list the planned tool calls, got: %s", msg)
+
+	// The plan is structured (rendered as rows by the UI), and the message
+	// text must not contain the raw tool-call dump.
+	plan, ok := interrupt["plan"].([]any)
+	if !ok || len(plan) == 0 {
+		t.Fatalf("expected structured plan steps in interrupt, got %v", interrupt)
+	}
+	step0, _ := plan[0].(map[string]any)
+	if name, _ := step0["name"].(string); name == "" {
+		t.Errorf("plan step should carry the tool name, got %v", step0)
+	}
+	if msg, _ := interrupt["message"].(string); strings.Contains(msg, "search_agent") || strings.Contains(msg, "{") {
+		t.Errorf("message must not contain raw plan dump, got: %s", msg)
 	}
 }
 
@@ -72,7 +83,7 @@ func TestIntegration_NodeInterrupt_OffByDefault(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	// The message contains the old trigger keywords — they must no longer work.
 	result := chatJSON(t, server.URL, sessionID, map[string]any{
@@ -93,7 +104,7 @@ func TestIntegration_NodeInterrupt_ApproveResume(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	result := chatJSON(t, server.URL, sessionID, map[string]any{
 		"threadId":             "t_node_resume",

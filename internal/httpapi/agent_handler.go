@@ -67,7 +67,7 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-streaming: original behavior
-	result := h.runner.Chat(ac, req.ThreadID, req.Message, chatOptionsFromRequest(&req)...)
+	result := h.runner.ChatContext(r.Context(), ac, req.ThreadID, req.Message, chatOptionsFromRequest(&req)...)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -100,10 +100,7 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 
 	// Always use Chat() — it goes through SteppedRunner which records events,
 	// handles interrupts, and provides complete results.
-	result := h.runner.Chat(ac, req.ThreadID, req.Message, chatOptionsFromRequest(req)...)
-
-	// Extract preferences asynchronously
-	go h.runner.ExtractAndSavePreferences(ac, req.Message)
+	result := h.runner.ChatContext(r.Context(), ac, req.ThreadID, req.Message, chatOptionsFromRequest(req)...)
 
 	// Fetch current memory
 	memEntries, _ := h.memorySvc.ListPreferences(r.Context(), ac.UserID)
@@ -111,14 +108,14 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 	if result.Status == "interrupted" {
 		// Send interrupt event
 		fmt.Fprintf(w, "event: done\ndata: %s\n\n", jsonEncode(map[string]any{
-			"status":    "interrupted",
-			"answer":    result.Answer,
-			"threadId":  req.ThreadID,
-			"interrupt": result.Interrupt,
-			"memory":    memEntries,
-			"runId":     result.RunID,
-			"events":    result.Events,
-				"contextTokens": result.ContextTokens,
+			"status":        "interrupted",
+			"answer":        result.Answer,
+			"threadId":      req.ThreadID,
+			"interrupt":     result.Interrupt,
+			"memory":        memEntries,
+			"runId":         result.RunID,
+			"events":        result.Events,
+			"contextTokens": result.ContextTokens,
 		}))
 		flusher.Flush()
 		return
@@ -134,12 +131,12 @@ func (h *AgentHandler) chatStream(w http.ResponseWriter, r *http.Request, ac *au
 	}
 
 	fmt.Fprintf(w, "event: done\ndata: %s\n\n", jsonEncode(map[string]any{
-		"status":   "completed",
-		"answer":   result.Answer,
-		"threadId": req.ThreadID,
-		"memory":   memEntries,
-		"runId":    result.RunID,
-		"events":   result.Events,
+		"status":        result.Status,
+		"answer":        result.Answer,
+		"threadId":      req.ThreadID,
+		"memory":        memEntries,
+		"runId":         result.RunID,
+		"events":        result.Events,
 		"contextTokens": result.ContextTokens,
 	}))
 	flusher.Flush()
@@ -156,13 +153,43 @@ func (h *AgentHandler) GetRunEvents(w http.ResponseWriter, r *http.Request) {
 	runID := extractPathSuffix(r.URL.Path, "/api/agent/runs/")
 	runID = trimSuffix(runID, "/events")
 
-	result, ok := h.runner.GetRun(runID, ac.UserID)
+	result, ok, err := h.runner.GetRunContext(r.Context(), runID, ac.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取运行事件失败")
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "run not found")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, result.Events)
+}
+
+// GetThreadTokens handles GET /api/chat/{threadId}/tokens
+// Returns the thread's own context usage (current/threshold/max) so the UI
+// token bar reflects the selected conversation immediately on switch.
+func (h *AgentHandler) GetThreadTokens(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	threadID := extractPathSuffix(r.URL.Path, "/api/chat/")
+	threadID = trimSuffix(threadID, "/tokens")
+	if threadID == "" {
+		writeError(w, http.StatusBadRequest, "threadId is required")
+		return
+	}
+
+	info := h.runner.ThreadTokenInfo(ac.UserID, ac.Roles, threadID)
+	if info == nil {
+		writeError(w, http.StatusInternalServerError, "token counter unavailable")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, info)
 }
 
 // ResumeRequest is the request body for POST /api/agent/resume
@@ -197,12 +224,14 @@ func (h *AgentHandler) Resume(w http.ResponseWriter, r *http.Request) {
 		Reason:   req.Reason,
 	}
 
-	result := h.runner.Resume(ac, req.InterruptID, decision)
+	result := h.runner.ResumeContext(r.Context(), ac, req.InterruptID, decision)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run_id": result.RunID,
-		"status": result.Status,
-		"answer": result.Answer,
+		"run_id":    result.RunID,
+		"status":    result.Status,
+		"answer":    result.Answer,
+		"interrupt": result.Interrupt,
+		"events":    result.Events,
 	})
 }
 
@@ -223,7 +252,15 @@ func (h *AgentHandler) GetThreadMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	messages := h.runner.ThreadMessagesJSON(ac.UserID, threadID)
+	threadMessages, err := h.runner.GetThreadMessagesContext(r.Context(), ac.UserID, threadID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load thread")
+		return
+	}
+	messages := make([]map[string]any, 0, len(threadMessages))
+	for _, message := range threadMessages {
+		messages = append(messages, map[string]any{"role": string(message.Role), "content": message.Content})
+	}
 	if messages == nil {
 		messages = []map[string]any{}
 	}
@@ -238,7 +275,11 @@ func (h *AgentHandler) ListThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	threads := h.runner.ListThreads(ac.UserID)
+	threads, err := h.runner.ListThreadsContext(r.Context(), ac.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list threads")
+		return
+	}
 	if threads == nil {
 		threads = []string{}
 	}
@@ -260,7 +301,10 @@ func (h *AgentHandler) CreateThread(w http.ResponseWriter, r *http.Request) {
 	if req.ThreadID == "" {
 		req.ThreadID = "t_" + randomID()
 	}
-	h.runner.CreateThread(ac.UserID, req.ThreadID)
+	if err := h.runner.CreateThreadContext(r.Context(), ac.UserID, req.ThreadID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"threadId": req.ThreadID})
 }
 
@@ -282,7 +326,12 @@ func (h *AgentHandler) DeleteThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.runner.DeleteThread(ac.UserID, threadID) {
+	deleted, err := h.runner.DeleteThreadContext(r.Context(), ac.UserID, threadID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !deleted {
 		writeError(w, http.StatusNotFound, "thread not found")
 		return
 	}

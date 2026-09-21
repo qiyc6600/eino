@@ -2,21 +2,32 @@ package integration_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/example/agent-eino-demo/internal/app"
+	"github.com/example/agent-eino-demo/internal/auth"
 )
+
+const testAdminPassword = "admin-test-1234"
 
 // createTestApp creates a test application with mock model provider.
 func createTestApp(t *testing.T) *app.App {
 	t.Setenv("MODEL_PROVIDER", "mock")
 	t.Setenv("ADDR", ":0")
+	t.Setenv("BOOTSTRAP_ADMIN_USERNAME", "admin")
+	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", testAdminPassword)
 	cfg := app.LoadConfig()
-	return app.NewApp(cfg)
+	application := app.NewApp(cfg)
+	if _, err := application.AuthSvc.CreateUser(context.Background(), "visitor", "visitor123", []string{"visitor"}); err != nil && !errors.Is(err, auth.ErrUserExists) {
+		t.Fatalf("seed test visitor: %v", err)
+	}
+	return application
 }
 
 // doLogin logs in and returns the session ID.
@@ -82,7 +93,7 @@ func TestIntegration_LoginAndChat(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 	if sessionID == "" {
 		t.Fatal("expected non-empty sessionId")
 	}
@@ -145,7 +156,7 @@ func TestIntegration_ChatWithSession(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	resp := doPost(t, server.URL, "/api/agent/chat", sessionID, map[string]string{
 		"message":  "1+1等于多少",
@@ -170,7 +181,7 @@ func TestIntegration_ListTools(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	resp := doGet(t, server.URL, "/api/tools", sessionID)
 	defer resp.Body.Close()
@@ -192,7 +203,7 @@ func TestIntegration_MemoryCRUD(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	// PUT memory
 	resp := doPost(t, server.URL, "/api/memory", sessionID, map[string]string{
@@ -233,7 +244,7 @@ func TestIntegration_ApprovalFlow(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	// Chat: request to delete an order (should trigger HITL interrupt in mock mode)
 	resp := doPost(t, server.URL, "/api/agent/chat", sessionID, map[string]string{
@@ -295,7 +306,7 @@ func TestIntegration_ApprovalResumeNoDoubleExec(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	sessionID := doLogin(t, server.URL, "admin", "admin123")
+	sessionID := doLogin(t, server.URL, "admin", testAdminPassword)
 
 	// 1. Request delete of A-1002 (which exists in seed data for u_admin)
 	resp := doPost(t, server.URL, "/api/agent/chat", sessionID, map[string]string{

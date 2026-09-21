@@ -33,7 +33,7 @@ func TestIntegration_ThreadIsolation(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	adminSession := doLogin(t, server.URL, "admin", "admin123")
+	adminSession := doLogin(t, server.URL, "admin", testAdminPassword)
 	visitorSession := doLogin(t, server.URL, "visitor", "visitor123")
 
 	// Admin chats into thread "t_shared".
@@ -103,7 +103,7 @@ func TestIntegration_RunEventsOwnership(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	adminSession := doLogin(t, server.URL, "admin", "admin123")
+	adminSession := doLogin(t, server.URL, "admin", testAdminPassword)
 	visitorSession := doLogin(t, server.URL, "visitor", "visitor123")
 
 	resp := doPost(t, server.URL, "/api/agent/chat", adminSession, map[string]string{
@@ -142,7 +142,7 @@ func TestIntegration_ResumeOwnership(t *testing.T) {
 	server := httptest.NewServer(application.Router.Handler())
 	defer server.Close()
 
-	adminSession := doLogin(t, server.URL, "admin", "admin123")
+	adminSession := doLogin(t, server.URL, "admin", testAdminPassword)
 	visitorSession := doLogin(t, server.URL, "visitor", "visitor123")
 
 	// Admin triggers a delete_order interrupt.

@@ -24,13 +24,13 @@ const (
 
 // Event records a single event during agent execution.
 type Event struct {
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	Type      EventType `json:"type"`
-	Timestamp time.Time `json:"timestamp"`
-	AgentName string    `json:"agent_name,omitempty"`
-	ToolName  string    `json:"tool_name,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
+	ID        string         `json:"id"`
+	RunID     string         `json:"run_id"`
+	Type      EventType      `json:"type"`
+	Timestamp time.Time      `json:"timestamp"`
+	AgentName string         `json:"agent_name,omitempty"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
@@ -46,6 +46,13 @@ func NewEventRecorder(runID string) *EventRecorder {
 		events: make([]Event, 0),
 		runID:  runID,
 	}
+}
+
+// ContinueEventRecorder carries earlier events through an approval resume.
+func ContinueEventRecorder(runID string, earlier []Event) *EventRecorder {
+	recorder := NewEventRecorder(runID)
+	recorder.events = append(recorder.events, earlier...)
+	return recorder
 }
 
 // Record adds an event.

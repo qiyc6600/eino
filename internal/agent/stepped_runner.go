@@ -20,9 +20,9 @@ import (
 // DispatchEntry represents a single entry in the SteppedRunner's dispatch table.
 // It abstracts over "real tool" and "sub-agent tool" uniformly.
 type DispatchEntry struct {
-	Info             *schema.ToolInfo // tool definition for LLM binding
-	IsSubAgent       bool            // true = delegate to agentToolWrapper, false = real tool
-	RequiresApproval bool            // for real tools: HITL gate needed?
+	Info             *schema.ToolInfo  // tool definition for LLM binding
+	IsSubAgent       bool              // true = delegate to agentToolWrapper, false = real tool
+	RequiresApproval bool              // for real tools: HITL gate needed?
 	AgentWrapper     *agentToolWrapper // for sub-agents: the wrapper to call (set only when IsSubAgent)
 	ToolName         string            // for real tools: the name in ToolRegistry
 }
@@ -50,34 +50,36 @@ func isSubAgentInterrupt(err error) bool {
 // SteppedRunState holds the execution state of a stepped ReAct loop.
 // This state can be serialized to a Checkpoint for interrupt/resume.
 type SteppedRunState struct {
-	Step             int               `json:"step"`               // current iteration (0-based)
-	Messages         []SchemaMessage   `json:"messages"`           // full conversation history
-	PendingToolCalls []ToolCallInfo    `json:"pending_tool_calls"` // tool calls awaiting execution
-	Done             bool              `json:"done"`               // whether the loop has completed
-	Answer           string            `json:"answer"`             // final answer when done
-	RunID            string            `json:"run_id"`             // run identifier
-	ThreadID         string            `json:"thread_id"`          // thread identifier
+	Children         map[string]*SteppedRunState `json:"children,omitempty"`
+	Step             int                         `json:"step"`               // current iteration (0-based)
+	Messages         []SchemaMessage             `json:"messages"`           // full conversation history
+	PendingToolCalls []ToolCallInfo              `json:"pending_tool_calls"` // tool calls awaiting execution
+	Done             bool                        `json:"done"`               // whether the loop has completed
+	Answer           string                      `json:"answer"`             // final answer when done
+	RunID            string                      `json:"run_id"`             // run identifier
+	ThreadID         string                      `json:"thread_id"`          // thread identifier
 }
 
 // SchemaMessage is a serializable version of schema.Message.
 type SchemaMessage struct {
-	Role       string        `json:"role"`
-	Content    string        `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
 	ToolCalls  []ToolCallInfo `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	Name       string        `json:"name,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Name       string         `json:"name,omitempty"`
 }
 
 // ToolCallInfo is a serializable version of schema.ToolCall.
 type ToolCallInfo struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
 
 // InterruptRequest represents a pending interrupt that needs human approval.
 type InterruptRequest struct {
 	InterruptID string
+	ToolCallID  string
 	Type        hitl.InterruptType // "tool" or "node"
 	ToolName    string             // for tool-level: the tool name
 	Arguments   string             // for tool-level: the tool arguments
@@ -85,6 +87,8 @@ type InterruptRequest struct {
 	Message     string             // human-readable description
 	RunID       string
 	ThreadID    string
+	// Plan carries the structured planned steps for node-level interrupts.
+	Plan []InterruptPlanStep
 }
 
 // SteppedRunner executes a ReAct loop step-by-step with interrupt support.
@@ -93,7 +97,8 @@ type SteppedRunner struct {
 	toolModel   model.ToolCallingChatModel // model with tools bound via WithTools
 	registry    *tools.ToolRegistry
 	hitlSvc     *hitl.Service
-	rbac        *auth.RBACManager          // RBAC checker for tool-level ACL
+	rbac        *auth.RBACManager // RBAC checker for tool-level ACL
+	retryDelay  time.Duration
 	maxSteps    int
 	dispatchMap map[string]*DispatchEntry // name -> entry for O(1) dispatch
 	toolInfos   []*schema.ToolInfo        // ordered list for LLM binding
@@ -131,6 +136,7 @@ func NewSteppedRunner(
 		hitlSvc:     hitlSvc,
 		rbac:        rbac,
 		maxSteps:    maxSteps,
+		retryDelay:  250 * time.Millisecond,
 		dispatchMap: dispatchMap,
 		toolInfos:   toolInfos,
 	}
@@ -153,7 +159,7 @@ func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, 
 		Step:     0,
 		Messages: toSchemaMessages(messages),
 		Done:     false,
-		RunID:    "r_" + uuid.New().String()[:8],
+		RunID:    "r_" + uuid.New().String(),
 	}
 
 	var interruptReq *InterruptRequest
@@ -165,17 +171,13 @@ func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, 
 			return SupervisorRunResult{Answer: fmt.Sprintf("Error at step %d: %v", state.Step, err)}
 		}
 		if interruptReq != nil {
-			// No interrupt handling in RunAll — auto-approve
-			state, err = r.HandleApproval(ctx, state, interruptReq, true, "")
-			if err != nil {
-				return SupervisorRunResult{Answer: fmt.Sprintf("Error after approval: %v", err)}
-			}
+			return SupervisorRunResult{Answer: "执行需要人工审批，请使用支持中断的执行入口"}
 		}
 	}
 
 	return SupervisorRunResult{
-		Answer:       state.Answer,
-		RoutedAgent:  "assistant",
+		Answer:      state.Answer,
+		RoutedAgent: "assistant",
 	}
 }
 
@@ -186,25 +188,23 @@ func (r *SteppedRunner) RunAll(ctx context.Context, messages []*schema.Message, 
 // true, the run pauses after the LLM decides on tool calls (before executing
 // them) so the plan can be approved or rejected by a human.
 func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, recorder *EventRecorder, confirmBeforeExecute bool) (*SteppedRunState, *InterruptRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return state, nil, err
+	}
 	if state.Done {
 		return state, nil, nil
 	}
-
+	if len(state.PendingToolCalls) > 0 {
+		return r.executePendingTools(ctx, state, recorder)
+	}
 	if state.Step >= r.maxSteps {
-		state.Done = true
-		state.Answer = "达到最大迭代次数限制"
-		return state, nil, nil
+		return state, nil, fmt.Errorf("达到最大迭代次数限制")
 	}
 
 	einoMsgs := fromSchemaMessages(state.Messages)
 
-	// If there are pending tool calls (from a previous LLM step), execute them first
-	if len(state.PendingToolCalls) > 0 {
-		return r.executePendingTools(ctx, state, recorder)
-	}
-
 	// Step 1: Call LLM (with tools bound)
-	resp, err := r.toolModel.Generate(ctx, einoMsgs)
+	resp, err := r.generate(ctx, einoMsgs)
 	if err != nil {
 		return state, nil, fmt.Errorf("LLM generate failed at step %d: %w", state.Step, err)
 	}
@@ -233,6 +233,8 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 		return state, nil, nil
 	}
 
+	state.PendingToolCalls = append([]ToolCallInfo(nil), respMsg.ToolCalls...)
+
 	// Node-level interrupt point: after LLM decides to call tools,
 	// before executing them. This lets humans review the LLM's plan.
 	// Implements the "plan_review_node" pattern: LLM generates a plan (tool calls),
@@ -240,33 +242,33 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 	// confirmBeforeExecute is a per-run parameter supplied by the caller
 	// (explicit request flag), not shared runner state.
 	if confirmBeforeExecute {
-		// Build a human-readable summary of the planned tool calls
-		var planLines []string
+		// Build the structured plan for the approval card (rendered as rows
+		// by the UI — never dumped into the message text).
+		var plan []InterruptPlanStep
 		for _, tc := range resp.ToolCalls {
-			planLines = append(planLines, fmt.Sprintf("  - %s(%s)", tc.Function.Name, tc.Function.Arguments))
+			plan = append(plan, InterruptPlanStep{Name: tc.Function.Name, Arguments: tc.Function.Arguments})
 		}
-		planSummary := fmt.Sprintf("Agent 计划执行以下操作：\n%s", strings.Join(planLines, "\n"))
 
-		interruptMsg := "Agent 已生成执行计划，需要人工审批后方可继续"
-		interruptMsg += "\n\n" + planSummary
+		interruptMsg := "Agent 已生成执行计划，等待确认后继续执行"
 
 		// Create node-level interrupt request
 		interruptReq := &InterruptRequest{
-			InterruptID: "i_" + uuid.New().String()[:8],
+			InterruptID: "i_" + uuid.New().String(),
 			Type:        hitl.InterruptTypeNode,
 			NodeName:    "plan_review",
 			Arguments:   "", // node-level: no single tool arguments
 			Message:     interruptMsg,
 			RunID:       state.RunID,
 			ThreadID:    state.ThreadID,
+			Plan:        plan,
 		}
 
 		// Save state to checkpoint so Resume can restore it
 		if recorder != nil {
 			recorder.Record(EventAgentEnd, fmt.Sprintf("Node interrupt at %s — awaiting approval", "plan_review"), map[string]any{
-				"node":          "plan_review",
-				"tool_calls":    len(resp.ToolCalls),
-				"interrupt_id":  interruptReq.InterruptID,
+				"node":         "plan_review",
+				"tool_calls":   len(resp.ToolCalls),
+				"interrupt_id": interruptReq.InterruptID,
 			})
 		}
 
@@ -274,18 +276,6 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 		// and present the approval card to the user.
 		// On Resume, HandleApproval will continue from here (tools still pending).
 		return state, interruptReq, nil
-	}
-
-	// Step 3: Store pending tool calls and delegate to executePendingTools
-	// which handles both HITL interrupt gates (for real tools) and
-	// sub-agent dispatch (for agentToolWrapper entries)
-	state.PendingToolCalls = make([]ToolCallInfo, 0, len(resp.ToolCalls))
-	for _, tc := range resp.ToolCalls {
-		state.PendingToolCalls = append(state.PendingToolCalls, ToolCallInfo{
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: tc.Function.Arguments,
-		})
 	}
 
 	// Execute tools (with interrupt gates via dispatch table)
@@ -303,7 +293,11 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		roles = ac.Roles
 	}
 
-	for _, tc := range state.PendingToolCalls {
+	for len(state.PendingToolCalls) > 0 {
+		if err := ctx.Err(); err != nil {
+			return state, nil, err
+		}
+		tc := state.PendingToolCalls[0]
 		entry, found := r.dispatchMap[tc.Name]
 		if !found {
 			// Unknown tool — return error as tool result
@@ -314,6 +308,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 				Name:       tc.Name,
 			}
 			state.Messages = append(state.Messages, toolMsg)
+			state.PendingToolCalls = state.PendingToolCalls[1:]
 			continue
 		}
 
@@ -344,10 +339,11 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 					state.Messages = append(state.Messages, toolMsg)
 					if recorder != nil {
 						recorder.Record(EventToolCallEnd, fmt.Sprintf("ACL denied sub-agent %s", tc.Name), map[string]any{
-							"agent": tc.Name,
+							"agent":  tc.Name,
 							"denied": true,
 						})
 					}
+					state.PendingToolCalls = state.PendingToolCalls[1:]
 					continue
 				}
 			} else {
@@ -367,6 +363,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 							"denied": true,
 						})
 					}
+					state.PendingToolCalls = state.PendingToolCalls[1:]
 					continue
 				}
 			}
@@ -380,7 +377,8 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		// Real tool dispatch: check HITL gate
 		if entry.RequiresApproval {
 			return state, &InterruptRequest{
-				InterruptID: "i_" + uuid.New().String()[:8],
+				InterruptID: "i_" + uuid.New().String(),
+				ToolCallID:  tc.ID,
 				Type:        hitl.InterruptTypeTool,
 				ToolName:    tc.Name,
 				Arguments:   tc.Arguments,
@@ -391,7 +389,12 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		}
 
 		// Execute the real tool directly
-		toolResult := r.executeTool(ctx, tc)
+		toolResult, err := r.executeTool(ctx, tc)
+		if err != nil {
+			return state, nil, err
+		}
+
+		state.PendingToolCalls = state.PendingToolCalls[1:]
 
 		// Append tool result as a tool message
 		toolMsg := SchemaMessage{
@@ -404,8 +407,8 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 
 		if recorder != nil {
 			recorder.Record(EventToolCallEnd, fmt.Sprintf("Tool %s executed", tc.Name), map[string]any{
-				"tool":  tc.Name,
-				"step":  state.Step,
+				"tool":   tc.Name,
+				"step":   state.Step,
 				"result": truncate(toolResult, 200),
 			})
 		}
@@ -419,173 +422,139 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 // executeSubAgentTool delegates a tool call to a sub-agent wrapper.
 // If the sub-agent encounters a dangerous tool requiring HITL approval,
 // the interrupt is propagated up rather than swallowed as an error.
-func (r *SteppedRunner) executeSubAgentTool(
-	ctx context.Context,
-	state *SteppedRunState,
-	tc ToolCallInfo,
-	entry *DispatchEntry,
-	recorder *EventRecorder,
-) (*SteppedRunState, *InterruptRequest, error) {
+func (r *SteppedRunner) executeSubAgentTool(ctx context.Context, state *SteppedRunState, tc ToolCallInfo, entry *DispatchEntry, recorder *EventRecorder) (*SteppedRunState, *InterruptRequest, error) {
 	if recorder != nil {
-		recorder.Record(EventSupervisorRoute, fmt.Sprintf("Routing to sub-agent %s", tc.Name), map[string]any{
-			"agent": tc.Name,
-		})
+		recorder.Record(EventSupervisorRoute, "Routing to sub-agent "+tc.Name, map[string]any{"agent": tc.Name})
 	}
-
-	// Call the sub-agent wrapper
-	result, err := entry.AgentWrapper.InvokableRun(ctx, tc.Arguments)
-	if err != nil {
-		// Check if this is a propagated interrupt from the sub-agent
-		if isSubAgentInterrupt(err) {
-			var sae *SubAgentInterruptError
-			if errors.As(err, &sae) {
-				return state, &InterruptRequest{
-					InterruptID: "i_" + uuid.New().String()[:8],
-					Type:        hitl.InterruptTypeTool,
-					ToolName:    sae.ToolName,
-					Arguments:   sae.Arguments,
-					Message:     fmt.Sprintf("子代理 %s 的高危工具 %s 需要审批", sae.AgentName, sae.ToolName),
-					RunID:       state.RunID,
-					ThreadID:    state.ThreadID,
-				}, nil
-			}
+	childRunner := entry.AgentWrapper.steppedRunner
+	if childRunner == nil {
+		return state, nil, fmt.Errorf("sub-agent %s has no resumable runner", tc.Name)
+	}
+	if state.Children == nil {
+		state.Children = make(map[string]*SteppedRunState)
+	}
+	child := state.Children[tc.ID]
+	if child == nil {
+		var args struct {
+			Message string `json:"message"`
 		}
-		// Genuine error — return as tool result so the LLM can recover
-		toolMsg := SchemaMessage{
-			Role:       "tool",
-			Content:    fmt.Sprintf(`{"error":"sub-agent %s failed: %v"}`, tc.Name, err),
-			ToolCallID: tc.ID,
-			Name:       tc.Name,
+		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+			return state, nil, err
 		}
-		state.Messages = append(state.Messages, toolMsg)
-		// Clear pending and continue
-		state.PendingToolCalls = nil
-		return state, nil, nil
+		child = &SteppedRunState{RunID: state.RunID, ThreadID: state.ThreadID, Messages: toSchemaMessages([]*schema.Message{schema.SystemMessage(entry.AgentWrapper.SubAgentConfig().Instruction), schema.UserMessage(args.Message)})}
+		state.Children[tc.ID] = child
 	}
-
-	// Sub-agent completed successfully — return its answer as the tool result
-	toolMsg := SchemaMessage{
-		Role:       "tool",
-		Content:    result,
-		ToolCallID: tc.ID,
-		Name:       tc.Name,
+	for !child.Done {
+		_, interrupt, err := childRunner.RunStep(ctx, child, recorder, false)
+		if err != nil || interrupt != nil {
+			return state, interrupt, err
+		}
 	}
-	state.Messages = append(state.Messages, toolMsg)
-
-	if recorder != nil {
-		recorder.Record(EventToolCallEnd, fmt.Sprintf("Sub-agent %s completed", tc.Name), map[string]any{
-			"agent":  tc.Name,
-			"step":   state.Step,
-			"result": truncate(result, 200),
-		})
-	}
-
-	// Clear pending — next iteration will call LLM again
-	state.PendingToolCalls = nil
+	state.Messages = append(state.Messages, SchemaMessage{Role: "tool", Content: child.Answer, ToolCallID: tc.ID, Name: tc.Name})
+	state.PendingToolCalls = state.PendingToolCalls[1:]
+	delete(state.Children, tc.ID)
 	return state, nil, nil
 }
 
 // executeTool invokes a tool by name with the given arguments.
-func (r *SteppedRunner) executeTool(ctx context.Context, tc ToolCallInfo) string {
+func (r *SteppedRunner) executeTool(ctx context.Context, tc ToolCallInfo) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	regTool, found := r.registry.Get(tc.Name)
 	if !found {
-		return fmt.Sprintf(`{"error":"tool %s not found"}`, tc.Name)
+		return "", fmt.Errorf("tool %s not found", tc.Name)
 	}
 
 	// Typed identity derived from the authenticated context; nil when the
 	// caller chain carries no identity, which tools reject.
 	identity := auth.ToolIdentityFromContext(ctx)
+	if identity != nil {
+		identity.ToolCallID = tc.ID
+	}
 
 	result := regTool.Fn(identity, tc.Arguments)
-	if result.Error != "" {
-		return result.Error
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	return result.Content
+	if result.Error != "" {
+		if result.Metadata["status"] == "system_error" {
+			return "", fmt.Errorf("tool %s: %s", tc.Name, result.Error)
+		}
+		return result.Error, nil
+	}
+	return result.Content, nil
 }
 
 // HandleApproval processes an approval decision and continues execution.
 // For tool-level: if approved, execute the tool; if rejected, feed rejection back to LLM.
 // For node-level: if approved, continue from the next node; if rejected, feed rejection back to LLM.
 func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunState, interrupt *InterruptRequest, approved bool, reason string) (*SteppedRunState, error) {
-	if interrupt.Type == hitl.InterruptTypeTool {
-		if approved {
-			// Execute the approved tool
-			for _, tc := range state.PendingToolCalls {
-				if tc.Name == interrupt.ToolName {
-					toolResult := r.executeTool(ctx, tc)
-
-					toolMsg := SchemaMessage{
-						Role:       "tool",
-						Content:    toolResult,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-					}
-					state.Messages = append(state.Messages, toolMsg)
-
-					// Remove this tool call from pending
-					var remaining []ToolCallInfo
-					for _, p := range state.PendingToolCalls {
-						if p.ID != tc.ID {
-							remaining = append(remaining, p)
-						}
-					}
-					state.PendingToolCalls = remaining
-					break
-				}
-			}
-		} else {
-			// Rejected: feed rejection message back to LLM as tool result
-			rejectionMsg := "用户拒绝执行该操作"
-			if reason != "" {
-				rejectionMsg += "：" + reason
-			}
-
-			// Find the tool call and add rejection as its result
-			for _, tc := range state.PendingToolCalls {
-				if tc.Name == interrupt.ToolName {
-					toolMsg := SchemaMessage{
-						Role:       "tool",
-						Content:    rejectionMsg,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-					}
-					state.Messages = append(state.Messages, toolMsg)
-
-					// Remove from pending
-					var remaining []ToolCallInfo
-					for _, p := range state.PendingToolCalls {
-						if p.ID != tc.ID {
-							remaining = append(remaining, p)
-						}
-					}
-					state.PendingToolCalls = remaining
-					break
-				}
-			}
-		}
-	} else if interrupt.Type == hitl.InterruptTypeNode {
-		// Node-level interrupt resume:
-		// - Approved: continue execution — tools are still in PendingToolCalls,
-		//   the next RunStep call to executePendingTools will execute them.
-		// - Rejected: clear pending tools and feed a rejection message back
-		//   so the LLM can re-plan with the human's feedback.
+	if err := ctx.Err(); err != nil {
+		return state, err
+	}
+	if interrupt.Type == hitl.InterruptTypeNode {
 		if !approved {
-			rejectionMsg := "用户拒绝执行计划"
-			if reason != "" {
-				rejectionMsg += "：" + reason
+			for _, tc := range state.PendingToolCalls {
+				state.Messages = append(state.Messages, SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: "用户拒绝执行计划：" + reason})
 			}
-			// Feed rejection as assistant message so LLM sees the plan was rejected
-			assistantContent := "我计划的操作被拒绝了。" + rejectionMsg
-			state.Messages = append(state.Messages, SchemaMessage{
-				Role:    "assistant",
-				Content: assistantContent,
-			})
 			state.PendingToolCalls = nil
 		}
-		// If approved, PendingToolCalls remain intact — next RunStep will execute them
+		return state, nil
 	}
+	for _, tc := range state.PendingToolCalls {
+		if child := state.Children[tc.ID]; child != nil {
+			entry := r.dispatchMap[tc.Name]
+			if entry == nil || entry.AgentWrapper == nil || entry.AgentWrapper.steppedRunner == nil {
+				return state, fmt.Errorf("missing child runner %s", tc.Name)
+			}
+			_, err := entry.AgentWrapper.steppedRunner.HandleApproval(ctx, child, interrupt, approved, reason)
+			return state, err
+		}
+	}
+	for i, tc := range state.PendingToolCalls {
+		if tc.ID != interrupt.ToolCallID || tc.Name != interrupt.ToolName || tc.Arguments != interrupt.Arguments {
+			continue
+		}
+		content := "用户拒绝执行该操作：" + reason
+		if approved {
+			var err error
+			content, err = r.executeTool(ctx, tc)
+			if err != nil {
+				return state, err
+			}
+		}
+		state.Messages = append(state.Messages, SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: content})
+		state.PendingToolCalls = append(state.PendingToolCalls[:i], state.PendingToolCalls[i+1:]...)
+		return state, nil
+	}
+	return state, fmt.Errorf("approved tool call does not match checkpoint")
+}
 
-	return state, nil
+// generate retries only model calls, never tool side effects. Backoff respects cancellation.
+func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		response, err := r.toolModel.Generate(ctx, messages)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil && response == nil {
+			return nil, fmt.Errorf("model returned an empty response")
+		}
+		if err == nil || !isRateLimitError(err.Error()) || attempt >= 3 {
+			return response, err
+		}
+		timer := time.NewTimer(r.retryDelay * time.Duration(1<<attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // Serialize serializes the run state to bytes for checkpoint storage.

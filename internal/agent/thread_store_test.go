@@ -41,7 +41,7 @@ func TestThreadStore_DeleteScopedToOwner(t *testing.T) {
 	ts.Append("u_admin", "t1", schema.UserMessage("admin's data"))
 
 	// A different user has no thread "t1" — delete must not touch admin's.
-	if ts.Delete("u_visitor", "t1") {
+	if deleted, err := ts.Delete("u_visitor", "t1"); err != nil || deleted {
 		t.Error("visitor should not be able to delete admin's thread")
 	}
 	if len(ts.Copy("u_admin", "t1")) != 1 {
@@ -49,7 +49,7 @@ func TestThreadStore_DeleteScopedToOwner(t *testing.T) {
 	}
 
 	// The owner can delete it.
-	if !ts.Delete("u_admin", "t1") {
+	if deleted, err := ts.Delete("u_admin", "t1"); err != nil || !deleted {
 		t.Error("owner should be able to delete own thread")
 	}
 	if ts.Copy("u_admin", "t1") != nil {

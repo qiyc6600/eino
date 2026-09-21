@@ -78,9 +78,9 @@ func (m *MockChatModel) Generate(ctx context.Context, input []*schema.Message, o
 	if toolCall != nil {
 		// Return assistant message with tool calls — Eino ReAct loop will dispatch to ToolsNode
 		return &schema.Message{
-			Role:       schema.Assistant,
-			Content:    "",
-			ToolCalls:  []schema.ToolCall{*toolCall},
+			Role:      schema.Assistant,
+			Content:   "",
+			ToolCalls: []schema.ToolCall{*toolCall},
 		}, nil
 	}
 
@@ -118,8 +118,8 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 	}
 
 	type match struct {
-		toolName  string
-		argFunc   func(string) string
+		toolName string
+		argFunc  func(string) string
 	}
 
 	// Order matters: sub-agent routes first (priority when bound), then real tools
@@ -137,7 +137,9 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		// Real tools (used when sub-agents are not bound)
 		{"delete_order", func(s string) string {
 			id := extractOrderID(s)
-			if id == "" { id = "A-1001" }
+			if id == "" {
+				id = "A-1001"
+			}
 			return fmt.Sprintf(`{"order_id":"%s"}`, id)
 		}},
 		{"send_email", func(s string) string {
@@ -168,12 +170,12 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		"search_agent":  {"天气", "气温", "温度", "搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
 		"general_agent": {"删除订单", "删掉订单", "取消订单", "发邮件", "发送邮件", "发一封", "订单", "查我的", "查询订单", "我的订单"},
 		// Real tools (fallback when sub-agents not bound)
-		"delete_order":  {"删除订单", "删掉订单", "取消订单"},
-		"send_email":    {"发邮件", "发送邮件", "发一封"},
-		"calculator":    {"计算", "等于多少", "加", "减", "乘", "除", "×", "÷", "*"},
-		"weather":       {"天气", "气温", "温度"},
-		"grep":          {"搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
-		"query_order":   {"订单", "查我的", "查询订单", "我的订单", "查一下"},
+		"delete_order": {"删除订单", "删掉订单", "取消订单"},
+		"send_email":   {"发邮件", "发送邮件", "发一封"},
+		"calculator":   {"计算", "等于多少", "加", "减", "乘", "除", "×", "÷", "*"},
+		"weather":      {"天气", "气温", "温度"},
+		"grep":         {"搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
+		"query_order":  {"订单", "查我的", "查询订单", "我的订单", "查一下"},
 	}
 
 	// Find the best match: prefer the match with the longest matching keyword.
@@ -262,9 +264,15 @@ func detectPreferredLangFromMessages(messages []*schema.Message) string {
 	for _, m := range messages {
 		if m.Role == schema.System {
 			if containsAny(m.Content, "preferred_language") {
-				if containsAny(m.Content, "Python") { return "Python" }
-				if containsAny(m.Content, "Java") { return "Java" }
-				if containsAny(m.Content, "Go") { return "Go" }
+				if containsAny(m.Content, "Python") {
+					return "Python"
+				}
+				if containsAny(m.Content, "Java") {
+					return "Java"
+				}
+				if containsAny(m.Content, "Go") {
+					return "Go"
+				}
 			}
 		}
 	}
@@ -277,7 +285,9 @@ func detectLanguagePreference(s string) string {
 		{"javascript", "JavaScript"}, {"typescript", "TypeScript"},
 	}
 	for _, pp := range pairs {
-		if containsAny(s, pp.p) { return pp.l }
+		if containsAny(s, pp.p) {
+			return pp.l
+		}
 	}
 	return ""
 }
@@ -288,7 +298,11 @@ func extractMathExpr(s string) string {
 		if p == "*" || p == "+" || p == "-" || p == "/" || p == "×" || p == "÷" {
 			if i > 0 && i < len(parts)-1 {
 				op := p
-				if p == "×" { op = "*" } else if p == "÷" { op = "/" }
+				if p == "×" {
+					op = "*"
+				} else if p == "÷" {
+					op = "/"
+				}
 				return parts[i-1] + " " + op + " " + parts[i+1]
 			}
 		}
@@ -299,7 +313,9 @@ func extractMathExpr(s string) string {
 func extractCity(s string) string {
 	cities := []string{"北京", "上海", "深圳", "广州", "杭州", "成都", "武汉", "南京"}
 	for _, c := range cities {
-		if containsAny(s, c) { return c }
+		if containsAny(s, c) {
+			return c
+		}
 	}
 	return "北京"
 }
@@ -311,7 +327,9 @@ func extractOrderID(s string) string {
 		if len(w) > 2 && w[0] >= 'A' && w[0] <= 'B' && w[1] == '-' {
 			return w
 		}
-		if hasPrefix(w, "A-") || hasPrefix(w, "B-") { return w }
+		if hasPrefix(w, "A-") || hasPrefix(w, "B-") {
+			return w
+		}
 	}
 	return ""
 }
@@ -319,13 +337,19 @@ func extractOrderID(s string) string {
 func extractPattern(s string) string {
 	if idx := indexOf(s, "搜索"); idx >= 0 {
 		rest := trimLeft(s[idx+len("搜索"):], "中的")
-		if rest != "" { return rest }
+		if rest != "" {
+			return rest
+		}
 	}
 	if idx := indexOf(s, "grep"); idx >= 0 {
 		return trimSpaces(s[idx+4:])
 	}
-	if containsAny(s, "error") { return "error" }
-	if containsAny(s, "异常") { return "error" }
+	if containsAny(s, "error") {
+		return "error"
+	}
+	if containsAny(s, "异常") {
+		return "error"
+	}
 	return "error"
 }
 
@@ -333,7 +357,9 @@ func toLower(s string) string {
 	result := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c >= 'A' && c <= 'Z' { c += 'a' - 'A' }
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
 		result = append(result, c)
 	}
 	return string(result)
@@ -343,7 +369,9 @@ func containsAny(s string, keywords ...string) bool {
 	for _, k := range keywords {
 		if len(k) <= len(s) {
 			for i := 0; i <= len(s)-len(k); i++ {
-				if s[i:i+len(k)] == k { return true }
+				if s[i:i+len(k)] == k {
+					return true
+				}
 			}
 		}
 	}
@@ -370,9 +398,13 @@ func splitFields(s string) []string {
 }
 
 func joinStrings(ss []string, sep string) string {
-	if len(ss) == 0 { return "" }
+	if len(ss) == 0 {
+		return ""
+	}
 	result := ss[0]
-	for _, s := range ss[1:] { result += sep + s }
+	for _, s := range ss[1:] {
+		result += sep + s
+	}
 	return result
 }
 
@@ -393,18 +425,24 @@ func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
 
 func indexOf(s, sub string) int {
 	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub { return i }
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
 	}
 	return -1
 }
 
 func trimLeft(s, cutset string) string {
-	for hasPrefix(s, cutset) { s = s[len(cutset):] }
+	for hasPrefix(s, cutset) {
+		s = s[len(cutset):]
+	}
 	return s
 }
 
 func trimSpaces(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') { s = s[1:] }
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
+		s = s[1:]
+	}
 	return s
 }
 
