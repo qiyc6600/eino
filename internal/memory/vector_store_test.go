@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +92,50 @@ func TestFormatVectorResults(t *testing.T) {
 	if containsStr(formatted, "北京") {
 		t.Error("expected low-score result (0.15) to be filtered out (below 0.3 threshold)")
 	}
+}
+
+// TestFormatVectorResultsWithin covers the length cap: without it the recalled
+// text can exceed the whole memory budget on its own.
+func TestFormatVectorResultsWithin(t *testing.T) {
+	long := strings.Repeat("这是一个很长的历史片段。", 20)
+	results := []VectorResult{
+		{Content: long, Score: 0.95, Metadata: map[string]any{}},
+		{Content: "用户喜欢Python", Score: 0.85, Metadata: map[string]any{}},
+		{Content: "用户在北京", Score: 0.80, Metadata: map[string]any{}},
+	}
+
+	t.Run("no cap keeps everything", func(t *testing.T) {
+		got := FormatVectorResultsWithin(results, 0)
+		if !containsStr(got, "Python") || !containsStr(got, "北京") {
+			t.Fatalf("uncapped formatting dropped entries: %q", got)
+		}
+	})
+
+	t.Run("an oversized entry does not consume the whole budget", func(t *testing.T) {
+		// The first entry alone blows the cap, so it is skipped in favour of the
+		// shorter, slightly less relevant ones that still fit.
+		got := FormatVectorResultsWithin(results, 40)
+		if containsStr(got, long) {
+			t.Fatalf("the oversized entry should have been skipped: %q", got)
+		}
+		if !containsStr(got, "Python") {
+			t.Fatalf("expected the shorter entry to be kept: %q", got)
+		}
+	})
+
+	t.Run("entries are dropped whole, never cut in half", func(t *testing.T) {
+		got := FormatVectorResultsWithin(results, 25)
+		// Whatever survives must be a complete line: every content piece that
+		// appears in the output must appear in full.
+		if containsStr(got, long[:len(long)/2]) && !containsStr(got, long) {
+			t.Fatalf("an entry was truncated instead of dropped: %q", got)
+		}
+		for _, r := range results {
+			if containsStr(got, r.Content[:8]) && !containsStr(got, r.Content) {
+				t.Fatalf("partial entry in output: %q", got)
+			}
+		}
+	})
 }
 
 func containsStr(s, sub string) bool {

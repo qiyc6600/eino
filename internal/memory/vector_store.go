@@ -251,24 +251,54 @@ var _ VectorStore = (*InMemoryVectorStore)(nil)
 
 // FormatVectorResults formats vector query results as readable text for system prompt injection.
 func FormatVectorResults(results []VectorResult) string {
+	return FormatVectorResultsWithin(results, 0)
+}
+
+// FormatVectorResultsWithin formats vector results for injection, skipping the
+// entries that would push the text past maxTokens (0 = no limit).
+//
+// Without a cap the recalled text can exceed the whole memory budget on its own,
+// which used to leave the deterministic KV entries with nothing while the
+// injected memory was already over budget.
+//
+// Whole entries are skipped rather than truncating the text: a recalled episode
+// cut in half reads as a different fact. Results arrive ranked, so higher-ranked
+// entries claim the budget first; an oversized entry is skipped in favour of
+// shorter ones instead of wasting the remaining budget.
+func FormatVectorResultsWithin(results []VectorResult, maxTokens int) string {
 	if len(results) == 0 {
 		return ""
 	}
 
+	const header = "用户历史相关记忆：\n"
+	used := 0
+	if maxTokens > 0 {
+		used = estimateTokens(header)
+	}
+
 	var lines []string
 	for _, r := range results {
-		if r.Score >= 0.3 { // Only include results above minimum relevance threshold
-			ts := ""
-			if t, ok := r.Metadata["timestamp"]; ok {
-				ts = fmt.Sprintf(" (%v)", t)
-			}
-			lines = append(lines, fmt.Sprintf("- %s%s [相关度: %.0f%%]", r.Content, ts, r.Score*100))
+		if r.Score < minVectorRelevance {
+			continue
 		}
+		ts := ""
+		if t, ok := r.Metadata["timestamp"]; ok {
+			ts = fmt.Sprintf(" (%v)", t)
+		}
+		line := fmt.Sprintf("- %s%s [相关度: %.0f%%]", r.Content, ts, r.Score*100)
+		if maxTokens > 0 {
+			cost := estimateTokens(line)
+			if used+cost > maxTokens {
+				continue
+			}
+			used += cost
+		}
+		lines = append(lines, line)
 	}
 
 	if len(lines) == 0 {
 		return ""
 	}
 
-	return "用户历史相关记忆：\n" + strings.Join(lines, "\n")
+	return header + strings.Join(lines, "\n")
 }

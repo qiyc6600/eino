@@ -558,8 +558,9 @@ func (s *Service) BuildMemoryContext(ctx context.Context, userID string) string 
 }
 
 // QueryVectorMemory performs a semantic search on the user's memory and returns
-// formatted results for system prompt injection.
-func (s *Service) QueryVectorMemory(ctx context.Context, userID, query string, topK int) string {
+// formatted results for system prompt injection, skipping entries that would
+// exceed maxTokens (0 = no limit).
+func (s *Service) QueryVectorMemory(ctx context.Context, userID, query string, topK, maxTokens int) string {
 	if s.vectorStore == nil {
 		return ""
 	}
@@ -569,7 +570,7 @@ func (s *Service) QueryVectorMemory(ctx context.Context, userID, query string, t
 		return ""
 	}
 
-	return FormatVectorResults(results)
+	return FormatVectorResultsWithin(results, maxTokens)
 }
 
 // SaveSnapshot saves a conversation state snapshot to the CheckpointStore.

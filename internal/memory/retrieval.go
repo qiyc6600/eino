@@ -77,7 +77,9 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 
 	// --- Semantic episodes from the vector store ---
-	vectorText := s.QueryVectorMemory(ctx, userID, query, retrievalVectorTopK)
+	// The recalled text is capped at the budget so it can never exceed the
+	// injected memory budget on its own; the KV entries below use the remainder.
+	vectorText := s.QueryVectorMemory(ctx, userID, query, retrievalVectorTopK, budgetTokens)
 
 	// --- Assemble within budget ---
 	var prefLines, otherLines []string

@@ -238,6 +238,113 @@ func TestRetrieveRelevant_ScoringBudgetAndReinforcement(t *testing.T) {
 	}
 }
 
+// stubVectorStore returns fixed results, so the test exercises the retrieval
+// path deterministically instead of depending on the hash-based pseudo-embedding's
+// scores (which may all fall below the relevance threshold).
+type stubVectorStore struct {
+	results []VectorResult
+}
+
+func (s *stubVectorStore) Store(context.Context, string, string, map[string]any) error { return nil }
+func (s *stubVectorStore) DeleteUser(context.Context, string) error                    { return nil }
+func (s *stubVectorStore) Query(context.Context, string, string, int) ([]VectorResult, error) {
+	return s.results, nil
+}
+
+// TestRetrieveRelevant_VectorTextRespectsBudget is the regression guard for the
+// injected memory exceeding its own budget: the vector-recalled text used to be
+// added without any cap, so it could consume the whole budget on its own while
+// every KV entry was skipped.
+func TestRetrieveRelevant_VectorTextRespectsBudget(t *testing.T) {
+	store := NewInMemoryMemoryStore()
+	ctx := context.Background()
+
+	// Long, high-scoring recalled episodes — far more text than the budget.
+	long := strings.Repeat("这是一段很长的历史对话片段，包含大量细节。", 12)
+	vec := &stubVectorStore{}
+	for i := 0; i < retrievalVectorTopK; i++ {
+		vec.results = append(vec.results, VectorResult{
+			Content:  long,
+			Score:    0.9,
+			Metadata: map[string]any{"timestamp": time.Now().Format(time.RFC3339)},
+		})
+	}
+	svc := NewService(store, nil, vec, nil)
+
+	// A deterministic preference that must still be injected.
+	if err := store.Put(ctx, MemoryEntry{
+		UserID: "u1", Key: "preferred_language", Value: "Go",
+		Type: MemoryTypePreference, Importance: 5,
+		CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const budget = 120
+	out := svc.RetrieveRelevant(ctx, "u1", "脚本", budget, false)
+	if out == "" {
+		t.Fatal("expected some memory to be injected")
+	}
+	// The recalled text must have actually been produced, otherwise this test
+	// would pass without exercising the cap at all.
+	if got := estimateTokens(long); got <= budget {
+		t.Fatalf("test setup is wrong: the episode is %d tokens, not larger than the %d budget", got, budget)
+	}
+	if got := estimateTokens(out); got > budget {
+		t.Fatalf("injected memory exceeds the budget: %d > %d tokens\n%s", got, budget, out)
+	}
+	// Every recalled entry is larger than the whole budget, so the correct
+	// outcome is to drop them all rather than blow the budget.
+	if strings.Contains(out, "用户历史相关记忆") {
+		t.Fatalf("an entry larger than the budget should have been dropped entirely:\n%s", out)
+	}
+	// The deterministic preference must survive: it is exact, and dropping the
+	// oversized recalls leaves room for it.
+	if !strings.Contains(out, "preferred_language") {
+		t.Fatalf("the deterministic entry was crowded out by the recalled text:\n%s", out)
+	}
+}
+
+// TestRetrieveRelevant_KeepsRecalledEntriesThatFit is the counterpart: entries
+// that do fit must still be injected, so the cap cannot silently disable vector
+// recall altogether.
+func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
+	store := NewInMemoryMemoryStore()
+	ctx := context.Background()
+
+	short := strings.Repeat("简短的历史片段。", 3)
+	vec := &stubVectorStore{}
+	for i := 0; i < retrievalVectorTopK; i++ {
+		vec.results = append(vec.results, VectorResult{Content: short, Score: 0.9, Metadata: map[string]any{}})
+	}
+	svc := NewService(store, nil, vec, nil)
+
+	// RetrieveRelevant returns early when the KV store is empty, so a KV entry is
+	// needed to reach the vector path at all.
+	if err := store.Put(ctx, MemoryEntry{
+		UserID: "u1", Key: "note", Value: "x",
+		Type: MemoryTypeFact, Importance: 3,
+		CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const budget = 80
+	out := svc.RetrieveRelevant(ctx, "u1", "脚本", budget, false)
+	if !strings.Contains(out, "用户历史相关记忆") {
+		t.Fatalf("entries that fit the budget must be injected:\n%s", out)
+	}
+	if got := estimateTokens(out); got > budget {
+		t.Fatalf("injected memory exceeds the budget: %d > %d tokens", got, budget)
+	}
+	// The cap must be doing work: all entries together would not fit.
+	all := FormatVectorResultsWithin(vec.results, 0)
+	if estimateTokens(all) <= budget {
+		t.Fatalf("test setup is wrong: the uncapped recall (%d tokens) fits the %d budget",
+			estimateTokens(all), budget)
+	}
+}
+
 // TestConsolidate_DegradedArchivesAndProfile verifies the no-LLM path:
 // stale low-value entries are archived and a rule-built profile is written.
 func TestConsolidate_DegradedArchivesAndProfile(t *testing.T) {
