@@ -243,6 +243,62 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 ---
 
+## 🔌 MCP 外部工具
+
+通过 [MCP](https://modelcontextprotocol.io) 接入外部工具服务器，让 Agent 的能力不再局限于编译期内置的工具。
+
+| 能力 | 实现 |
+|------|------|
+| 接入方式 | 只做 **stdio**（启动子进程），适配层为 `eino-ext/components/tool/mcp`，客户端库为 `mark3labs/mcp-go` |
+| 默认状态 | **未配置即完全不启用**，内置工具集与行为不变 |
+| 工具发现 | 启动时握手 → `tools/list` → 转成框架的 `RegisteredTool` 并注册 |
+| 权限 | **与内置工具走同一条 ACL 拦截**（见下） |
+| 审批 | 由本地配置 `MCP_REQUIRE_APPROVAL` 决定，不读远端 annotations |
+| 结果 | 只把服务器文本交给模型，剥离 `{"content":[{"type":"text",…}]}` 协议信封 |
+| 可达性 | 自动新增 `mcp_agent` 子 Agent 承载远端工具；未发现工具时不创建 |
+| 生命周期 | `App.Close()` 终止所有子进程；单个服务器连不上只记日志并跳过 |
+
+```dotenv
+# 仓库自带的演示服务器（离线可跑）
+MCP_SERVERS=[{"name":"demo","command":"go","args":["run","./cmd/mcp-demo-server"]}]
+# 或官方 filesystem 服务器（需要 Node 与网络）
+MCP_SERVERS=[{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/tmp/demo"]}]
+
+# 哪些远端工具需要人工审批（按工具名，逗号分隔，忽略大小写）。空 = 都不需要。
+MCP_REQUIRE_APPROVAL=delete_note
+# 远端工具的授权：admin 默认全部（*），visitor 默认没有。
+MCP_ADMIN_TOOLS=*
+MCP_VISITOR_TOOLS=
+```
+
+`scripts/run-with-mcp.sh` 用上面的配置一键启动（演示服务器 + `delete_note` 需审批），用于本节的演示与集成测试。
+
+### 权限：为什么注册顺序是关键
+
+框架的 ACL 不是逐工具声明的，而是在启动时统一包装：先注册所有工具，再调 `aclMiddleware.WrapAllTools()` 把每个工具的 `Fn` 换成带权限校验的版本。因此 **MCP 工具必须注册在这一步之前**——顺序错了，远端工具就带着未包装的执行函数进入注册表，成为一个绕过权限的旁路，而且角色表看起来完全正常，只有实际调用才会暴露。
+
+集成测试直接通过注册表调用远端工具来断言这一点（而不是只查角色表）：未授予角色的用户调用必须被拒。把注册挪到包装之后，该测试会立刻报出 `ACL bypass`。
+
+**未授予任何角色的远端工具会被拒绝——包括 admin。** 内置角色的权限是静态列表，覆盖不到运行时才出现的工具，所以启动时会按 `MCP_ADMIN_TOOLS` / `MCP_VISITOR_TOOLS` 授予（`*` 表示全部）。默认 admin 拿到全部、visitor 一个都没有，因此"visitor 调用远端工具被拦截"是个天然可演示的场景。
+
+### 审批：只认本地策略
+
+`MCP_REQUIRE_APPROVAL` 列出需要人工审批的远端工具。**不读 MCP 的 `annotations`**（`readOnlyHint` / `destructiveHint` 等）：那是服务器自报的，一个恶意或有 bug 的服务器可以把自己标成只读。远端工具的描述同理——它会被拼进提示词供模型选择工具，但**不参与任何安全判断**。
+
+### 结果整形：剥离协议信封
+
+MCP 的返回是 `{"content":[{"type":"text","text":"…"}]}`。原样交给模型等于每次调用都付一遍脚手架 token，读起来也是噪声，所以转换时只提取 `content[].text` 并按序拼接。**识别不出信封就原样返回**——图片或嵌入资源不含文本，清空会静默丢掉结果。错误路径同样处理，因此远端报错保留服务器的原话（如"笔记 n3 不存在"）而不夹带协议 JSON。
+
+### 失败策略与存储相反
+
+单个 MCP 服务器连不上 → 记日志、跳过，应用照常启动。这与"存储后端初始化失败即拒绝启动"是刻意相反的：外部工具是可选能力，一个坏掉的服务器不该让整个框架不可用；而存储承载着不能静默丢失的数据。
+
+### 未做
+
+HTTP / SSE 传输（只做 stdio）；OAuth 与远端鉴权；远端工具名的自动命名空间化（与内置工具重名时跳过并记日志）；对远端工具描述做提示注入检测。
+
+---
+
 ## 📐 上下文管理
 
 长对话自动裁剪，确保不超出 LLM 窗口：
@@ -386,6 +442,10 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | `DATABASE_MAX_OPEN_CONNS` | `25` | PostgreSQL 最大打开连接数 |
 | `DATABASE_MAX_IDLE_CONNS` | `5` | PostgreSQL 最大空闲连接数 |
 | `DATABASE_CONN_MAX_LIFETIME` | `30m` | PostgreSQL 连接最长复用时间 |
+| `MCP_SERVERS` | 空 | 外部 MCP 服务器，JSON 数组；空 = 不启用 MCP |
+| `MCP_REQUIRE_APPROVAL` | 空 | 需要人工审批的远端工具名，逗号分隔；不读远端 annotations |
+| `MCP_ADMIN_TOOLS` | `*` | 授予 admin 的远端工具，`*` = 全部 |
+| `MCP_VISITOR_TOOLS` | 空 | 授予 visitor 的远端工具 |
 
 ### 一键接入 OpenAI 兼容 API
 

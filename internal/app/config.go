@@ -1,6 +1,8 @@
 package app
 
 import (
+	"encoding/json"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -92,6 +94,26 @@ type Config struct {
 	// store Secure cookies over HTTPS or on localhost, so serving the demo over
 	// plain HTTP on a LAN address requires turning this off.
 	SessionCookieSecure bool
+
+	// MCP external tools. Empty Servers disables the feature entirely, leaving
+	// the built-in tool set and behaviour unchanged.
+	MCPServers []MCPServerConfig
+	// MCPRequireApproval names remote tools that must be approved by a human
+	// before running. This is local policy on purpose: the MCP spec's
+	// annotations are self-reported by the server and are not a security boundary.
+	MCPRequireApproval []string
+	// MCPAdminTools / MCPVisitorTools grant remote tools to the built-in roles.
+	// "*" grants every discovered remote tool.
+	MCPAdminTools   []string
+	MCPVisitorTools []string
+}
+
+// MCPServerConfig describes one external MCP server reached over stdio.
+type MCPServerConfig struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	Env     []string `json:"env,omitempty"`
 }
 
 // ModelProfile defines a pre-configured AI model provider profile.
@@ -216,6 +238,10 @@ func LoadConfig() *Config {
 		ThreadHistoryMaxMessages:   getEnvInt("THREAD_HISTORY_MAX_MESSAGES", 0),
 		ThreadRetention:            getEnvDuration("THREAD_RETENTION", 0),
 		SessionCookieSecure:        getEnvBool("SESSION_COOKIE_SECURE", true),
+		MCPServers:                 getEnvMCPServers("MCP_SERVERS"),
+		MCPRequireApproval:         getEnvList("MCP_REQUIRE_APPROVAL"),
+		MCPAdminTools:              getEnvList("MCP_ADMIN_TOOLS", "*"),
+		MCPVisitorTools:            getEnvList("MCP_VISITOR_TOOLS"),
 	}
 }
 
@@ -274,6 +300,47 @@ func getEnvBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+// getEnvList reads a comma-separated list, dropping empty entries.
+func getEnvList(key string, fallback ...string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// getEnvMCPServers parses the MCP_SERVERS JSON array. A malformed value is
+// reported and treated as "no servers" rather than crashing the process: MCP is
+// an optional capability, and refusing to start over a typo in it would be worse
+// than running without it.
+func getEnvMCPServers(key string) []MCPServerConfig {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var servers []MCPServerConfig
+	if err := json.Unmarshal([]byte(raw), &servers); err != nil {
+		log.Printf("Warning: %s is not a valid JSON array (%v); MCP tools are disabled", key, err)
+		return nil
+	}
+	valid := servers[:0]
+	for _, s := range servers {
+		if s.Name == "" || s.Command == "" {
+			log.Printf("Warning: %s entry needs both name and command, skipping: %+v", key, s)
+			continue
+		}
+		valid = append(valid, s)
+	}
+	return valid
 }
 
 func getEnvFloat(key string, fallback float64) float64 {

@@ -644,6 +644,8 @@ claim 之前断连仍会中止本次恢复，因为那时还没有任何不可�
 ]
 ```
 
+配置了 MCP 服务器时，远端工具也出现在这个列表里，字段含义完全相同——`risk_level` 由本地策略统一给（默认 `medium`），`requires_approval` 只看 `MCP_REQUIRE_APPROVAL`，不看远端服务器自报的 annotations。`param_schema` 是远端声明的原始 JSON Schema，可能含嵌套对象与数组（`ParamsOneOf` 保真，不经过扁平格式）。
+
 ---
 
 ### GET /api/tools/{toolName}

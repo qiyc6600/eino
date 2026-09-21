@@ -208,7 +208,18 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		{"general_agent", func(s string) string {
 			return fmt.Sprintf(`{"message":"%s"}`, raw)
 		}},
+		// The MCP sub-agent passes the request straight through, like the other
+		// sub-agents: the remote tool decides what its arguments mean.
+		{"mcp_agent", func(s string) string {
+			return fmt.Sprintf(`{"message":"%s"}`, raw)
+		}},
 		// Real tools (used when sub-agents are not bound)
+		{"read_notes", func(s string) string {
+			return fmt.Sprintf(`{"id":"%s"}`, extractNoteID(s))
+		}},
+		{"delete_note", func(s string) string {
+			return fmt.Sprintf(`{"id":"%s"}`, extractNoteID(s))
+		}},
 		{"delete_order", func(s string) string {
 			id := extractOrderID(s)
 			if id == "" {
@@ -243,6 +254,16 @@ func matchToolCall(lower, raw string, boundTools []*schema.ToolInfo) *schema.Too
 		"math_agent":    {"计算", "等于多少", "加", "减", "乘", "除", "×", "÷", "*"},
 		"search_agent":  {"天气", "气温", "温度", "搜索日志", "查日志", "grep", "搜索error", "搜索错误", "定位异常"},
 		"general_agent": {"删除订单", "删掉订单", "取消订单", "发邮件", "发送邮件", "发一封", "订单", "查我的", "查询订单", "我的订单"},
+		// The MCP sub-agent owns whatever tools an external server exposes, so the
+		// mock cannot key on tool names it does not know. It routes on the demo
+		// server's vocabulary instead; a real model routes by the agent
+		// description. Without this the offline demo could never reach an
+		// external tool.
+		"mcp_agent": {"笔记", "notes", "read_notes", "delete_note"},
+		// Tools of the demo MCP server (cmd/mcp-demo-server). The longest matching
+		// keyword wins, so "删除笔记" beats read_notes' plain "笔记".
+		"read_notes":  {"笔记", "notes", "读取笔记"},
+		"delete_note": {"删除笔记", "删掉笔记"},
 		// Real tools (fallback when sub-agents not bound)
 		"delete_order": {"删除订单", "删掉订单", "取消订单"},
 		"send_email":   {"发邮件", "发送邮件", "发一封"},
@@ -392,6 +413,19 @@ func extractCity(s string) string {
 		}
 	}
 	return "北京"
+}
+
+// extractNoteID finds a note id like "n2" in the message, defaulting to n1 so the
+// demo always produces a callable argument.
+func extractNoteID(s string) string {
+	words := splitFields(s)
+	for _, w := range words {
+		w = trimRightPunct(w)
+		if len(w) == 2 && (w[0] == 'n' || w[0] == 'N') && w[1] >= '0' && w[1] <= '9' {
+			return "n" + string(w[1])
+		}
+	}
+	return "n1"
 }
 
 func extractOrderID(s string) string {

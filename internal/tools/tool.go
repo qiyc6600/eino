@@ -1,5 +1,7 @@
 package tools
 
+import "github.com/cloudwego/eino/schema"
+
 // RiskLevel indicates the risk level of a tool.
 type RiskLevel string
 
@@ -17,6 +19,11 @@ type ToolMeta struct {
 	RiskLevel        RiskLevel
 	RequiresApproval bool   // if true, HITL interrupt before execution
 	ParamSchema      string // JSON Schema string for tool parameters
+	// ParamsOneOf carries a tool's original Eino parameter schema when it is
+	// richer than ParamSchema's flat {properties:{type,description}} form.
+	// External MCP tools routinely declare nested objects and arrays, which that
+	// flat round-trip would silently drop; when set, it wins over ParamSchema.
+	ParamsOneOf *schema.ParamsOneOf `json:"-"`
 }
 
 // ToolResult is the unified result type for all tool invocations.

@@ -23,12 +23,15 @@ func NewEinoTool(rt RegisteredTool) *EinoTool {
 
 // Info implements tool.BaseTool.Info.
 func (t *EinoTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	// Build params from our simple JSON schema string
-	params := buildParamsFromSchema(t.meta.ParamSchema)
+	params := t.meta.ParamsOneOf
+	if params == nil {
+		// Build params from our simple JSON schema string
+		params = schema.NewParamsOneOfByParams(buildParamsFromSchema(t.meta.ParamSchema))
+	}
 	return &schema.ToolInfo{
 		Name:        t.meta.Name,
 		Desc:        t.meta.Description,
-		ParamsOneOf: schema.NewParamsOneOfByParams(params),
+		ParamsOneOf: params,
 	}, nil
 }
 

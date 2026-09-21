@@ -145,7 +145,7 @@ result, _ := agent.Generate(ctx, messages)
 | **并行子 Agent** | ✅ `Send` API | ❌ 无 | ⚠️ 需手动 goroutine |
 | **子 Agent 结果汇总** | ✅ supervisor 自动汇总 | ❌ 需自建 | ✅ supervisor 自动汇总 |
 
-**分析**：LangGraph 的多 Agent 能力最丰富，支持 Supervisor 和 Swarm 两种模式。Eino 通过 ADK 的 `AgentCollaboration` 和 `AgentTool` 提供了 Supervisor 模式的完整支持。本项目使用 `AgentAsTool` 模式将 3 个子 Agent（math_agent、search_agent、general_agent）包装为工具，由 supervisor 中心路由，满足任务"supervisor 中心路由分派"的要求。
+**分析**：LangGraph 的多 Agent 能力最丰富，支持 Supervisor 和 Swarm 两种模式。Eino 通过 ADK 的 `AgentCollaboration` 和 `AgentTool` 提供了 Supervisor 模式的完整支持。本项目使用 `AgentAsTool` 模式将 3 个子 Agent（math_agent、search_agent、general_agent）包装为工具，由 supervisor 中心路由，满足任务"supervisor 中心路由分派"的要求；配置了 MCP 服务器时再追加一个 `mcp_agent` 承载外部工具（未发现工具则不创建）。
 
 ### 2.5 工具系统
 

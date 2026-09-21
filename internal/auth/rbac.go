@@ -61,6 +61,37 @@ func (m *RBACManager) GetRole(name string) (*Role, bool) {
 	return r, ok
 }
 
+// GrantTool adds a tool permission to a role and reports whether the grant now
+// exists. The built-in roles list their tools statically, which cannot cover
+// tools that only appear at runtime — external MCP servers are discovered at
+// startup. Without a grant such a tool belongs to no role, so the ACL would deny
+// it for everyone including admin. Granting is idempotent.
+func (m *RBACManager) GrantTool(roleName, toolName string) bool {
+	role, ok := m.roles[roleName]
+	if !ok || toolName == "" {
+		return false
+	}
+	for _, perm := range role.Permissions {
+		if perm.Resource == "tool" && perm.Action == "invoke" && perm.Name == toolName {
+			return true
+		}
+	}
+	role.Permissions = append(role.Permissions, Permission{Resource: "tool", Action: "invoke", Name: toolName})
+	return true
+}
+
+// GrantAllTools grants every named tool to a role, returning how many names the
+// role now holds (whether or not they were already present).
+func (m *RBACManager) GrantAllTools(roleName string, toolNames []string) int {
+	granted := 0
+	for _, name := range toolNames {
+		if m.GrantTool(roleName, name) {
+			granted++
+		}
+	}
+	return granted
+}
+
 // ListRoles returns all defined roles.
 func (m *RBACManager) ListRoles() []*Role {
 	result := make([]*Role, 0, len(m.roles))

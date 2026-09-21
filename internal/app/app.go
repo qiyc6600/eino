@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -35,6 +36,10 @@ type App struct {
 	registry     *ModelRegistry
 	chatModel    model.ToolCallingChatModel
 	currentModel string // current model profile ID
+
+	// mcpConns are the live external MCP server sessions; Close terminates their
+	// subprocesses.
+	mcpConns []*tools.MCPConnection
 }
 
 // NewApp creates and wires all application components.
@@ -92,6 +97,17 @@ func NewApp(cfg *Config) *App {
 	toolRegistry.Register(tools.NewQueryOrderTool(orderStore))
 	toolRegistry.Register(tools.NewDeleteOrderTool(orderStore))
 	toolRegistry.Register(tools.NewSendEmailTool(emailStore))
+
+	// External MCP tools are registered BEFORE the ACL wrapping below, which is
+	// what puts them under exactly the same interception as the built-in tools.
+	// Registering them afterwards would leave a permission bypass around every
+	// remote tool — the one mistake this ordering exists to prevent.
+	mcpTools, mcpConns := connectMCPServers(ctx, cfg, rbac)
+	for _, rt := range mcpTools {
+		if err := toolRegistry.Register(rt); err != nil {
+			log.Printf("MCP tool %q not registered: %v", rt.Meta.Name, err)
+		}
+	}
 
 	// 3. ACL
 	aclMiddleware := tools.NewACLMiddleware(rbac)
@@ -164,7 +180,7 @@ func NewApp(cfg *Config) *App {
 	// 7. Agent — multi-agent with supervisor routing for all modes
 	registryAdapter := tools.NewEinoRegistryAdapter(toolRegistry)
 
-	supervisor, err := agent.BuildDefaultSupervisor(ctx, chatModel, registryAdapter)
+	supervisor, err := agent.BuildSupervisorWithExtraAgent(ctx, chatModel, registryAdapter, mcpSubAgent(mcpTools))
 	if err != nil {
 		log.Fatalf("Failed to build supervisor: %v", err)
 	}
@@ -216,6 +232,7 @@ func NewApp(cfg *Config) *App {
 		registry:     modelReg,
 		chatModel:    chatModel,
 		currentModel: currentModel,
+		mcpConns:     mcpConns,
 	}
 
 	// 8. Router (needs App for model switching)
@@ -227,10 +244,105 @@ func NewApp(cfg *Config) *App {
 
 // Close releases external storage pools. It is safe to call on memory/file deployments.
 func (a *App) Close() error {
+	// Terminate the MCP server subprocesses; they are children of this process
+	// and would otherwise outlive it.
+	for _, conn := range a.mcpConns {
+		if err := conn.Close(); err != nil {
+			log.Printf("closing MCP server %q: %v", conn.Name, err)
+		}
+	}
 	if a.Postgres != nil {
 		return a.Postgres.Close()
 	}
 	return nil
+}
+
+// mcpSubAgent describes the sub-agent that owns the external MCP tools, or nil
+// when none were discovered.
+//
+// Without it the tools would be registered but unreachable: the dispatch table is
+// built from each sub-agent's tool list, so a tool belonging to no sub-agent is
+// never routed to.
+func mcpSubAgent(mcpTools []tools.RegisteredTool) *agent.ExtraSubAgent {
+	if len(mcpTools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(mcpTools))
+	listed := make([]string, 0, len(mcpTools))
+	for _, rt := range mcpTools {
+		names = append(names, rt.Meta.Name)
+		listed = append(listed, fmt.Sprintf("%s（%s）", rt.Meta.Name, rt.Meta.Description))
+	}
+
+	return &agent.ExtraSubAgent{
+		Name: "mcp_agent",
+		Instruction: "你是一个外部工具助手，负责调用通过 MCP 接入的外部服务。可用工具：\n- " +
+			strings.Join(listed, "\n- ") +
+			"\n\n直接调用工具完成任务，不要用文字要求用户确认：需要人工审批的工具会在执行前自动触发审批。",
+		ToolNames:   names,
+		Description: "外部工具助手。当用户的问题需要外部 MCP 服务提供的信息或操作时调用。可用工具：" + strings.Join(names, "、") + "。",
+	}
+}
+
+// connectMCPServers starts the configured MCP servers, grants their tools to the
+// built-in roles and returns the registered tools plus the live connections.
+//
+// It returns empty results when no server is configured, so the feature is
+// entirely opt-in.
+func connectMCPServers(ctx context.Context, cfg *Config, rbac *auth.RBACManager) ([]tools.RegisteredTool, []*tools.MCPConnection) {
+	if len(cfg.MCPServers) == 0 {
+		return nil, nil
+	}
+
+	specs := make([]tools.MCPServerSpec, 0, len(cfg.MCPServers))
+	for _, s := range cfg.MCPServers {
+		specs = append(specs, tools.MCPServerSpec{Name: s.Name, Command: s.Command, Args: s.Args, Env: s.Env})
+	}
+
+	registered, conns := tools.ConnectMCPTools(ctx, specs, tools.MCPToolPolicy{
+		RequireApproval: cfg.MCPRequireApproval,
+		RiskLevel:       tools.RiskLevelMedium,
+	})
+
+	// A discovered tool belongs to no role until it is granted one, and the ACL
+	// denies what no role allows — so without this every remote tool would be
+	// refused for everyone, admin included.
+	names := make([]string, 0, len(registered))
+	for _, rt := range registered {
+		names = append(names, rt.Meta.Name)
+	}
+	granted := grantMCPTools(rbac, names, cfg)
+	log.Printf("MCP: %d tool(s) registered, %d role grant(s) applied", len(names), granted)
+	return registered, conns
+}
+
+// grantMCPTools applies the configured role grants, expanding "*" to every
+// discovered tool. It returns the number of role/tool pairs granted.
+func grantMCPTools(rbac *auth.RBACManager, toolNames []string, cfg *Config) int {
+	granted := 0
+	for role, configured := range map[string][]string{
+		"admin":   cfg.MCPAdminTools,
+		"visitor": cfg.MCPVisitorTools,
+	} {
+		expand := configured
+		if containsWildcard(configured) {
+			expand = toolNames
+		}
+		if len(expand) == 0 {
+			continue
+		}
+		granted += rbac.GrantAllTools(role, expand)
+	}
+	return granted
+}
+
+func containsWildcard(names []string) bool {
+	for _, n := range names {
+		if strings.TrimSpace(n) == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // Ready reports whether dependencies required to accept traffic are available.

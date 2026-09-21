@@ -129,11 +129,11 @@ HTTP 请求 → AuthMiddleware 提取 sessionId → ValidateSession → 构建 A
   → EinoTool.InvokableRun() → FromToolContext(ctx) → 工具函数
 ```
 
+**安全红线**：`AuthContext` 绝不暴露给 LLM。工具上下文中的 `user_id`、`roles` 等通过 `WithToolContext` 在 Go `context.Context` 中传递，不进入 LLM 的消息历史。
+
 **凭证的传递方式**：`extractSessionID` 先读 `Authorization: Bearer`，缺失时回退到会话 Cookie `agent_session`——请求头优先，因此脚本与第三方客户端不受影响。URL 查询参数不接受：URL 会进入浏览器历史、访问日志与 Referer 头。
 
 浏览器走 Cookie 的原因是它同时解决两个问题：`HttpOnly` 让页面脚本读不到会话（XSS 拿不到凭证），Cookie 随请求自动携带（刷新页面不必重新登录）。Cookie 用 `SameSite=Strict`——SPA 与接口同源，没有任何跨站导航需要带上它，因此这一档就足以覆盖 CSRF。`Secure` 由 `SESSION_COOKIE_SECURE` 控制并默认开启；浏览器只在 HTTPS 或 localhost 下保存 Secure Cookie，所以用普通 HTTP 在局域网地址上演示时必须关闭，否则 Cookie 被静默丢弃、表现为"每次请求都未认证"。
-
-**安全红线**：`AuthContext` 绝不暴露给 LLM。工具上下文中的 `user_id`、`roles` 等通过 `WithToolContext` 在 Go `context.Context` 中传递，不进入 LLM 的消息历史。
 
 #### 3.1.2 SessionStore 接口
 
@@ -157,6 +157,8 @@ type SessionStore interface {
 | `admin` | calculator, weather, grep, query_order, delete_order, send_email |
 | `visitor` | calculator, weather, query_order |
 
+上表是**静态内置权限**。远端 MCP 工具在运行时才被发现，静态列表覆盖不到，因此启动时按 `MCP_ADMIN_TOOLS` / `MCP_VISITOR_TOOLS` 追加授予（`GrantTool` / `GrantAllTools`，`*` 展开为全部已发现工具）；未授予的远端工具对**所有人**都被拒绝，包括 admin。详见 3.1.5。
+
 权限检查方法：`RBACManager.CanInvokeTool(ctx, roles, toolName) bool`
 
 #### 3.1.4 ACL 中间件拦截链
@@ -168,6 +170,35 @@ type SessionStore interface {
 ```
 
 **中间件链顺序**：ACL → Audit → HITL → 真实执行。ACL 必须先执行，拒绝时不创建审批请求。
+
+#### 3.1.5 工具级 ACL 的覆盖范围（含外部 MCP 工具）
+
+ACL 不是逐工具声明的，而是**启动时统一包装**：`toolRegistry.Register(...)` 注册全部工具，随后 `aclMiddleware.WrapAllTools(toolRegistry)` 把每个工具的 `Fn` 替换为带权限校验的版本。
+
+因此外部 MCP 工具的注册必须插在这两步**之间**：
+
+```
+注册内置工具 → 连接 MCP 服务器并注册远端工具 → WrapAllTools
+```
+
+顺序错了会怎样：远端工具带着未包装的 `Fn` 进入注册表，成为一个绕过权限的旁路。**角色表本身仍然正确**，所以只查权限表的测试会照常通过，只有真正调用该工具才会暴露——因此集成测试是直接通过注册表调用远端工具来断言拒绝的（注入验证：把注册挪到包装之后，测试报 `ACL bypass` 并返回了远端数据）。
+
+另一个必须处理的点：内置角色的权限是静态列表，覆盖不到运行时才出现的工具，所以未授予任何角色的远端工具会被 ACL 拒绝——**包括 admin**。启动时按 `MCP_ADMIN_TOOLS` / `MCP_VISITOR_TOOLS` 授予，`*` 展开为全部已发现工具。
+
+**安全边界只由本地策略决定**：远端工具的 `annotations`（`readOnlyHint` / `destructiveHint`）与描述文本都来自服务器，属于不可信输入。它们可以进入提示词供模型选择工具，但不参与权限或审批判断——审批只看本地配置 `MCP_REQUIRE_APPROVAL`。同理，工具描述存在提示注入的可能（"tool poisoning"），所以它只用于选择，不作为策略来源。
+
+**schema 保真**：`ToolMeta` 增加可选的 `ParamsOneOf`，`NewEinoTool.Info` 优先使用它。项目的 `ParamSchema` 是扁平的 `{properties:{type,description}}` 形式，而 MCP 工具常声明嵌套对象与数组，往返转换会静默丢参数——外部工具直接沿用原始 schema。
+
+**结果整形**：MCP 的返回是协议信封 `{"content":[{"type":"text","text":"…"}]}`，直接交给模型等于每次都付一遍脚手架 token，读起来也是噪声。转换时只提取 `content[].text` 并按序拼接；**识别不出信封就原样返回**——图片或嵌入资源不含文本，清空会静默丢掉结果。错误路径同样处理，因此远端报错保留服务器的原话（如"笔记 n3 不存在"）而不带协议 JSON。
+
+**失败策略**：单个 MCP 服务器连不上只记日志并跳过，不阻止启动。这与存储后端"初始化失败即拒绝启动"刻意相反：外部工具是可选能力，而存储承载不能静默丢失的数据。
+
+**传播路径（MCP）**：
+
+```
+启动 → NewStdioMCPClient → Initialize 握手 → GetTools → RegisteredTool（含 ACL 包装）
+调用 → EinoTool.InvokableRun → ToolIdentity.Context → 远端 tools/call → ToolResult
+```
 
 ### 3.2 人机协同（hitl）
 
@@ -345,7 +376,11 @@ type Message struct {
 - 未触发压缩时 `ModelContext` 为 `nil`，此时直接发送 `Messages`，行为与体积和未引入该机制时一致；只有真正压缩的 run 才同时保留两份。
 - 新消息通过 `SteppedRunState.appendMessage` 同时写入两个列表；读取时 `modelMessages()` 优先 `ModelContext`、为空则回退 `Messages`（兼容旧 checkpoint）。
 - **动机**：若把压缩结果直接写回 `Messages`，线程存储里保存的就是压缩版——原始对话被摘要永久覆盖，且下一轮摘要会被当作普通 assistant 消息再次参与压缩，形成"摘要的摘要"。
-- **代价**：线程存储会持续增长（完整历史永不丢弃），且压缩过的 run 其 checkpoint 会同时序列化两份。线程历史的保留上限/归档策略尚未实现，属于已知限制。
+- **代价**：线程存储会持续增长（完整历史永不丢弃），且压缩过的 run 其 checkpoint 会同时序列化两份。保留上限与保留期由 3.4.8 的两个开关控制，默认关闭。
+
+#### 3.4.6 工具结果长度上限
+
+单个工具结果在进入历史前经 `capToolResult` 截断（`MAX_TOOL_RESULT_CHARS`，默认 8000 字符），超出部分截断并标注原始长度。真实工具、子 Agent 结果与审批恢复三条路径都经过该上限，避免一条冗长结果挤占整个窗口。
 
 #### 3.4.7 追加式写入
 
@@ -379,10 +414,6 @@ type Message struct {
 **清理只在当前用户的命名空间内进行**，以保持 `ThreadStore` "只触碰调用者命名空间"的不变量。跨用户的全局清理需要单独的维护入口。没有时间戳的旧数据不会被删除（无法判断年龄，宁可保留）。
 
 **清理不需要 schema 变更**：保留期由既有的 `updated_at` 列计算，`updated_at` 的索引由迁移 004 添加，使这个在写入路径上执行的 DELETE 不必全表扫描。
-
-#### 3.4.6 工具结果长度上限
-
-单个工具结果在进入历史前经 `capToolResult` 截断（`MAX_TOOL_RESULT_CHARS`，默认 8000 字符），超出部分截断并标注原始长度。真实工具、子 Agent 结果与审批恢复三条路径都经过该上限，避免一条冗长结果挤占整个窗口。
 
 ### 3.5 记忆管理（memory）
 
@@ -642,6 +673,10 @@ PostgreSQL 版在启动时执行编译进程序的版本化 SQL 迁移。`agent_
 | `THREAD_HISTORY_MAX_MESSAGES` | `0` | 单个会话保留的消息上限，0 = 不限制（见 3.4.8） |
 | `THREAD_RETENTION` | `0` | 未使用多久的会话被清理，0 = 永久保留（见 3.4.8） |
 | `RUN_EVENT_RETENTION` | `168h` | 运行事件保留期，到期后接口返回 404 |
+| `MCP_SERVERS` | - | 外部 MCP 服务器，JSON 数组（`name` / `command` / `args` / `env`）；空 = 不启用（见 3.1.5） |
+| `MCP_REQUIRE_APPROVAL` | - | 需要人工审批的远端工具名，逗号分隔，忽略大小写（见 3.1.5） |
+| `MCP_ADMIN_TOOLS` | `*` | 授予 admin 的远端工具，`*` = 全部已发现工具 |
+| `MCP_VISITOR_TOOLS` | - | 授予 visitor 的远端工具，默认不授予任何远端工具 |
 
 ---
 

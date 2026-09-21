@@ -270,8 +270,27 @@ func (t *agentToolWrapper) InvokableRun(ctx context.Context, argumentsInJSON str
 	return result.Answer, nil
 }
 
+// ExtraSubAgent describes one additional sub-agent beyond the three built-in
+// ones. It exists for tools that only appear at runtime: external MCP servers are
+// discovered at startup, and a tool that belongs to no sub-agent is unreachable
+// because the dispatch table is built from each sub-agent's tool list.
+type ExtraSubAgent struct {
+	Name          string
+	Instruction   string
+	ToolNames     []string
+	Description   string
+	MaxIterations int
+}
+
 // BuildDefaultSupervisor creates a supervisor with the standard 3 sub-agents.
 func BuildDefaultSupervisor(ctx context.Context, chatModel model.ToolCallingChatModel, registry Registry) (*SupervisorAgent, error) {
+	return BuildSupervisorWithExtraAgent(ctx, chatModel, registry, nil)
+}
+
+// BuildSupervisorWithExtraAgent builds the default supervisor, optionally adding
+// one extra sub-agent. An extra agent with no tools is ignored, so callers can
+// pass the MCP agent unconditionally.
+func BuildSupervisorWithExtraAgent(ctx context.Context, chatModel model.ToolCallingChatModel, registry Registry, extra *ExtraSubAgent) (*SupervisorAgent, error) {
 	sup, err := NewSupervisorAgent(ctx, chatModel, registry)
 	if err != nil {
 		return nil, err
@@ -309,6 +328,20 @@ func BuildDefaultSupervisor(ctx context.Context, chatModel model.ToolCallingChat
 		"math_agent":    "数学计算助手。当用户需要计算、算术运算、数学问题时调用。可用工具：calculator。",
 		"search_agent":  "信息搜索助手。当用户需要查询天气、搜索日志、查找信息时调用。可用工具：weather（天气查询）、grep（日志搜索）。",
 		"general_agent": "通用业务助手。当用户需要查询订单、删除订单、发送邮件时调用。可用工具：query_order、delete_order（需审批）、send_email（需审批）。",
+	}
+
+	if extra != nil && len(extra.ToolNames) > 0 {
+		maxIter := extra.MaxIterations
+		if maxIter <= 0 {
+			maxIter = 10
+		}
+		agents = append(agents, ReactAgentConfig{
+			Name:          extra.Name,
+			Instruction:   extra.Instruction,
+			ToolNames:     extra.ToolNames,
+			MaxIterations: maxIter,
+		})
+		agentDescriptions[extra.Name] = extra.Description
 	}
 
 	for _, cfg := range agents {
