@@ -136,6 +136,13 @@
   3. **回退路径读了一个不存在的字段**：`data.memory`。非流式响应是 `ChatRunResult`，没有 memory 列表（只有 SSE 的 done 帧会附加）。它有 `setTimeout(refreshMemory, 500)` 兜底，所以没有可见症状，但读取是死代码。顺带删掉前端对 `error` SSE 事件的处理分支——服务端只发 `chunk`/`tool_call`/`done`，失败通过 `done.status` 表达，那个分支永远不可达（并在帧分发处写明帧集合）。
   新增 `TestIntegration_FrontendContract` 与 `TestIntegration_FrontendSSEContract`：用真实路由驱动每个端点，断言前端读取的每个键确实存在，**并且该键确实出现在 app.js 里**（防止清单腐化成断言一个没人用的契约）。这个自检第一次运行就抓出我列表里三个前端根本不读的键（`created_at`、`superseded_at`、`last_accessed_at`）。注入验证：把 `risk_level` 改名 → 报"does not contain risk_level, but the page reads it"；把 `has_api_key` 的 tag 改名 → 同样报错。
   另记录一处**未改的观感问题**：`acl-denied` 这个消息角色被用于两处通用请求失败（`pushMessage(threadId, 'acl-denied', '❌ 请求失败…')`），红色气泡的视觉效果合适但名字误导。改它要动 CSS 与调用点，属观感而非契约问题，故留着并记录。
+- 2026-09-21：补齐契约测试的缺口（被问"全盖完了吗"时自查发现）。上一提交只钉住了**响应**字段，以下都只是"读代码确认过"而没有守卫，现补上：
+  1. **请求体**（`TestIntegration_FrontendRequestContract`）。登录、聊天（含非流式回退的四个字段）、记忆写入、文档上传、切换模型、审批决策——用前端自己的载荷键名发一遍并断言服务端接受。**这个方向比响应方向更容易悄悄坏掉**：改一个请求字段名会让处理器解出空字符串，调用要么被拒要么静默做错事，而所有响应断言仍然全绿。
+  2. **interrupt 对象**的键（`interrupt_id`/`tool_name`/`message`/`arguments`/`type`），通过一次真实中断的聊天取到；`plan` 是 omitempty（节点级中断才有），只做"前端确实读它"的方向。
+  3. **`tool_call` 帧的字段**与 `phase` 取值集合。同时把 SSE 测试的输入从"你好"改成"计算 1+1"，因为问候只路由不调工具，不会产生 `tool_call` 帧。
+  4. **`/api/models/switch` 的响应** `current_model`。
+  自查过程中发现**自己的断言比以为的弱**：第一版只保留每种帧的**第一个**载荷，而 `tool_call` 帧是 route→start→end 顺序，改 start 的键不会被看到——注入验证因此"通过"了。改为收集每种帧的**全部**载荷逐个检查后，注入立刻被抓出（报 frame #1 缺 `tool`、phase 变成未知值）。这条记下来是因为它说明注入验证的价值：如果只跑一遍绿灯就收工，这个弱断言会一直留着。
+  注入验证（两条）：把 `risk_level` 改名 → 报 "does not contain risk_level, but the page reads it"；把 `has_api_key` 的 tag 改名 → 同样报错。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
