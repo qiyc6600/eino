@@ -117,9 +117,17 @@ func (r *Runner) ChatContext(parent context.Context, ac *auth.AuthContext, threa
 	// Messages so persisting this run never replaces the conversation with its
 	// summary — and so the next turn compacts the original text, not a summary
 	// of a summary.
-	full := sanitizeMessages(messages)
+	full, repaired := sanitizeMessages(messages)
 	compacted, tokens := r.compressMessages(ctx, full, recorder)
-	state := &SteppedRunState{RunID: id, ThreadID: thread, Messages: toSchemaMessages(full)}
+	state := &SteppedRunState{
+		RunID:      id,
+		ThreadID:   thread,
+		Messages:   toSchemaMessages(full),
+		// len(threadMessages) is what the store holds (history excludes the system
+		// prompt), so everything past it is this run's own contribution.
+		StoredCount:     len(threadMessages),
+		HistoryRepaired: repaired,
+	}
 	if tokens != nil && tokens.Compressed {
 		state.ModelContext = toSchemaMessages(compacted)
 	}
@@ -215,8 +223,40 @@ func (r *Runner) advance(ctx context.Context, ac *auth.AuthContext, state *Stepp
 	return ChatRunResult{RunID: state.RunID, Status: StatusCompleted, Answer: state.Answer, Events: recorder.Events(), RoutedAgent: "assistant"}, nil
 }
 
+// saveHistory persists the run's conversation. A run that only extended the
+// stored history is written as a suffix, so the store never rewrites the whole
+// conversation; anything else (a repaired prefix, a store without the append
+// capability, a length guard that does not match) falls back to a full replace.
 func (r *Runner) saveHistory(ctx context.Context, user string, state *SteppedRunState) error {
-	return r.replaceHistory(ctx, user, state.ThreadID, historyMessages(state))
+	all := historyMessages(state)
+	if state.extendsStoredHistory(len(all)) {
+		appended, err := r.appendHistory(ctx, user, state.ThreadID, state.StoredCount, all[state.StoredCount:])
+		if err != nil {
+			return err
+		}
+		if appended {
+			return nil
+		}
+	}
+	return r.replaceHistory(ctx, user, state.ThreadID, all)
+}
+
+// appendHistory writes only the new messages. It reports false when the store
+// cannot append or its guard rejected the prefix, in which case the caller must
+// replace instead.
+func (r *Runner) appendHistory(ctx context.Context, user, thread string, expectedLen int, messages []*schema.Message) (bool, error) {
+	appender, ok := r.threads.(ThreadHistoryAppender)
+	if !ok {
+		return false, nil
+	}
+	err := appender.AppendHistoryContext(ctx, user, thread, expectedLen, messages)
+	if errors.Is(err, ErrThreadAppendMismatch) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *Runner) replaceHistory(ctx context.Context, user, thread string, messages []*schema.Message) error {

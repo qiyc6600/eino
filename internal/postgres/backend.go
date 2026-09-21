@@ -237,6 +237,9 @@ func (s *ThreadStore) Append(userID, threadID string, messages ...*schema.Messag
 }
 
 func (s *ThreadStore) AppendContext(ctx context.Context, userID, threadID string, messages ...*schema.Message) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
 	data, err := json.Marshal(messages)
 	if err != nil {
 		return err
@@ -244,6 +247,54 @@ func (s *ThreadStore) AppendContext(ctx context.Context, userID, threadID string
 	_, err = s.db.ExecContext(ctx, `INSERT INTO agent_threads(user_id,thread_id,messages,updated_at) VALUES($1,$2,$3::jsonb,NOW())
 		ON CONFLICT(user_id,thread_id) DO UPDATE SET messages=agent_threads.messages || EXCLUDED.messages,updated_at=NOW()`, userID, threadID, data)
 	return err
+}
+
+// AppendHistoryContext appends only when the stored history still has the
+// expected length. The guard is evaluated inside the UPDATE, so the existing
+// blob is never read: the write cost is proportional to the new messages rather
+// than to the whole conversation.
+func (s *ThreadStore) AppendHistoryContext(ctx context.Context, userID, threadID string, expectedLen int, messages []*schema.Message) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+	data, err := json.Marshal(messages)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_threads
+		SET messages = messages || $3::jsonb, updated_at = NOW()
+		WHERE user_id=$1 AND thread_id=$2 AND jsonb_array_length(messages) = $4`,
+		userID, threadID, data, expectedLen)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+	if expectedLen != 0 {
+		// The stored history is not the prefix we assumed.
+		return agent.ErrThreadAppendMismatch
+	}
+	// First write for this thread. Insert only if it truly does not exist; a row
+	// that appeared in between (or already existed) must not be appended to
+	// blindly, so report a mismatch and let the caller replace instead.
+	inserted, err := s.db.ExecContext(ctx, `INSERT INTO agent_threads(user_id,thread_id,messages,updated_at)
+		VALUES($1,$2,$3::jsonb,NOW()) ON CONFLICT DO NOTHING`, userID, threadID, data)
+	if err != nil {
+		return err
+	}
+	n, err := inserted.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	return agent.ErrThreadAppendMismatch
 }
 
 func (s *ThreadStore) Create(userID, threadID string) error {

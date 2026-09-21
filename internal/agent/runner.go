@@ -97,8 +97,13 @@ type Interrupt struct {
 // from the LLM API ("An assistant message with 'tool_calls' must be followed
 // by tool messages") when a thread contains orphaned tool_calls from
 // interrupted runs.
-func sanitizeMessages(messages []*schema.Message) []*schema.Message {
+//
+// The bool reports whether anything was inserted. Callers that persist the
+// history need it: an insertion changes messages the store already holds, which
+// rules out appending and forces a full replace.
+func sanitizeMessages(messages []*schema.Message) ([]*schema.Message, bool) {
 	var result []*schema.Message
+	modified := false
 
 	for i, msg := range messages {
 		result = append(result, msg)
@@ -129,6 +134,7 @@ func sanitizeMessages(messages []*schema.Message) []*schema.Message {
 
 		// Insert placeholder tool results for any missing IDs
 		if len(neededIDs) > 0 {
+			modified = true
 			for id := range neededIDs {
 				placeholder := schema.ToolMessage(
 					"⏸️ 该操作已被中断，等待人工审批。如需继续，请在审批中心处理。",
@@ -139,7 +145,7 @@ func sanitizeMessages(messages []*schema.Message) []*schema.Message {
 		}
 	}
 
-	return result
+	return result, modified
 }
 
 // Runner is the main agent execution entry point.

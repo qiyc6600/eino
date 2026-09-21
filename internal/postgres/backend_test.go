@@ -202,8 +202,88 @@ func TestThreadStoreAppendAndAdvisoryLock(t *testing.T) {
 	}
 }
 
-func TestThreadStoreUsesDedicatedLockPool(t *testing.T) {
-	db, dbMock, err := sqlmock.New()
+// TestThreadStoreAppendHistoryGuard covers the length-guarded append: the guard
+// is evaluated inside the UPDATE, so a matching history is appended in place
+// while a stale one is reported for the caller to replace.
+func TestThreadStoreAppendHistoryGuard(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("matching prefix appends in place", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		mock.ExpectExec("UPDATE agent_threads.*messages \\|\\| \\$3::jsonb").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg(), 4).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		if err := backend.Threads.AppendHistoryContext(ctx, "u-1", "t-1", 4, []*schema.Message{schema.UserMessage("next")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("stale prefix reports a mismatch instead of appending", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		mock.ExpectExec("UPDATE agent_threads.*messages \\|\\| \\$3::jsonb").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg(), 2).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		err := backend.Threads.AppendHistoryContext(ctx, "u-1", "t-1", 2, []*schema.Message{schema.UserMessage("next")})
+		if !errors.Is(err, agent.ErrThreadAppendMismatch) {
+			t.Fatalf("expected ErrThreadAppendMismatch, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("first turn inserts only when the thread is absent", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		mock.ExpectExec("UPDATE agent_threads.*messages \\|\\| \\$3::jsonb").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg(), 0).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("INSERT INTO agent_threads.*ON CONFLICT DO NOTHING").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		if err := backend.Threads.AppendHistoryContext(ctx, "u-1", "t-1", 0, []*schema.Message{schema.UserMessage("first")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a thread that appeared in between is not appended to blindly", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		mock.ExpectExec("UPDATE agent_threads.*messages \\|\\| \\$3::jsonb").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg(), 0).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec("INSERT INTO agent_threads.*ON CONFLICT DO NOTHING").
+			WithArgs("u-1", "t-1", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		err := backend.Threads.AppendHistoryContext(ctx, "u-1", "t-1", 0, []*schema.Message{schema.UserMessage("first")})
+		if !errors.Is(err, agent.ErrThreadAppendMismatch) {
+			t.Fatalf("expected ErrThreadAppendMismatch, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("cross-user writes are refused by the store", func(t *testing.T) {
+		backend, mock := mockBackend(t)
+		// The identity in context belongs to another user, so the store must
+		// refuse before touching the database.
+		ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{UserID: "u-other"})
+		err := backend.Threads.AppendHistoryContext(ctx, "u-1", "t-1", 0, []*schema.Message{schema.UserMessage("x")})
+		if err == nil {
+			t.Fatal("expected a scope violation")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestThreadStoreUsesDedicatedLockPool(t *testing.T) {	db, dbMock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}

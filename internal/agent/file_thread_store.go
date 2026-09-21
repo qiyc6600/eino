@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -56,6 +57,19 @@ func (f *FileThreadStore) Replace(userID, threadID string, msgs []*schema.Messag
 }
 func (f *FileThreadStore) Append(userID, threadID string, msgs ...*schema.Message) error {
 	return f.update(func(s *threadStore) { s.Append(userID, threadID, msgs...) })
+}
+
+// AppendHistoryContext must be overridden explicitly. The embedded threadStore
+// would otherwise promote an append that only touches memory and never reaches
+// disk — a silent data loss on restart.
+//
+// The file backend cannot append in place: it rewrites the whole JSON file, so
+// this buys contract consistency rather than a cheaper write.
+func (f *FileThreadStore) AppendHistoryContext(_ context.Context, userID, threadID string, expectedLen int, msgs []*schema.Message) error {
+	if len(f.threadStore.Copy(userID, threadID)) != expectedLen {
+		return ErrThreadAppendMismatch
+	}
+	return f.Append(userID, threadID, msgs...)
 }
 func (f *FileThreadStore) Create(userID, threadID string) error {
 	return f.update(func(s *threadStore) { s.Create(userID, threadID) })

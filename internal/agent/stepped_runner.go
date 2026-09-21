@@ -76,6 +76,22 @@ type SteppedRunState struct {
 	// Usage accumulates provider-reported token counts across the run's model
 	// calls, when the provider reports them.
 	Usage *UsageInfo `json:"usage,omitempty"`
+	// StoredCount is how many history messages (excluding the system prompt) the
+	// thread store held when this run started. Messages past it are this run's own
+	// additions, which lets the store append instead of rewriting the whole
+	// history. A checkpoint written before this field existed decodes as 0, and
+	// the store's length guard then rejects the append in favour of a replace.
+	StoredCount int `json:"stored_count,omitempty"`
+	// HistoryRepaired is set when orphaned tool calls in the loaded history had to
+	// be repaired. That changes messages the store already holds, so the run can
+	// no longer be persisted by appending.
+	HistoryRepaired bool `json:"history_repaired,omitempty"`
+}
+
+// extendsStoredHistory reports whether everything this run produced can be
+// written as a suffix of the stored history.
+func (s *SteppedRunState) extendsStoredHistory(total int) bool {
+	return !s.HistoryRepaired && s.StoredCount <= total
 }
 
 // appendMessage records a message in the complete history and, when this run

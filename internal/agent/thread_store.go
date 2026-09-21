@@ -2,10 +2,28 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/cloudwego/eino/schema"
 )
+
+// ErrThreadAppendMismatch reports that the stored history was not the prefix the
+// caller assumed, so appending would corrupt it. Callers must fall back to a
+// full replace.
+var ErrThreadAppendMismatch = errors.New("stored thread history does not match the expected prefix")
+
+// ThreadHistoryAppender appends to a thread's stored history only when that
+// history still has the expected length.
+//
+// The guard is what makes the optimization self-correcting. A run that only
+// extended the conversation can append just its own messages — the write cost
+// becomes proportional to the new messages instead of the whole history — while
+// any unexpected state (a concurrent writer, or a checkpoint written before this
+// interface existed) degrades to a full replace instead of duplicating messages.
+type ThreadHistoryAppender interface {
+	AppendHistoryContext(ctx context.Context, userID, threadID string, expectedLen int, msgs []*schema.Message) error
+}
 
 // threadRecord is a conversation thread bound to its owning user.
 type threadRecord struct {
@@ -67,6 +85,7 @@ func newThreadStore() *threadStore {
 
 // Ensure the in-memory implementation satisfies the interface.
 var _ ThreadStore = (*threadStore)(nil)
+var _ ThreadHistoryAppender = (*threadStore)(nil)
 
 func (s *threadStore) record(userID, threadID string) *threadRecord {
 	key := threadKey{userID: userID, threadID: threadID}
@@ -105,6 +124,29 @@ func (s *threadStore) Append(userID, threadID string, msgs ...*schema.Message) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.record(userID, threadID)
+	rec.messages = append(rec.messages, msgs...)
+	return nil
+}
+
+// AppendHistoryContext appends only when the stored history still has the
+// expected length. A missing thread counts as length zero, which is how the
+// first turn of a conversation takes this path.
+func (s *threadStore) AppendHistoryContext(_ context.Context, userID, threadID string, expectedLen int, msgs []*schema.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := threadKey{userID: userID, threadID: threadID}
+	rec, ok := s.threads[key]
+	current := 0
+	if ok {
+		current = len(rec.messages)
+	}
+	if current != expectedLen {
+		return ErrThreadAppendMismatch
+	}
+	if !ok {
+		rec = &threadRecord{}
+		s.threads[key] = rec
+	}
 	rec.messages = append(rec.messages, msgs...)
 	return nil
 }
