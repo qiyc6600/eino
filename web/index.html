@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent Eino Demo</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=7">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/assets/styles.css?v=10">
 </head>
 <body>
     <!-- Login Page -->
@@ -15,18 +16,13 @@
             <div class="login-form">
                 <div class="form-group">
                     <label>用户名</label>
-                    <input type="text" id="loginUsername" placeholder="admin 或 visitor" value="admin">
+                    <input type="text" id="loginUsername" placeholder="用户名" autocomplete="username">
                 </div>
                 <div class="form-group">
                     <label>密码</label>
-                    <input type="password" id="loginPassword" placeholder="密码" value="admin123">
+                    <input type="password" id="loginPassword" placeholder="密码" autocomplete="current-password">
                 </div>
                 <button onclick="doLogin()" class="btn btn-primary">登录</button>
-                <div class="quick-login">
-                    <span>快速登录：</span>
-                    <button onclick="quickLogin('admin','admin123')" class="btn btn-sm">Admin</button>
-                    <button onclick="quickLogin('visitor','visitor123')" class="btn btn-sm">Visitor</button>
-                </div>
             </div>
         </div>
     </div>
@@ -37,12 +33,7 @@
             <!-- Left Sidebar -->
             <div class="sidebar">
                 <div class="sidebar-section">
-                    <h3>当前用户</h3>
                     <div id="currentUser" class="user-card"></div>
-                </div>
-                <div class="sidebar-section">
-                    <h3>角色与权限</h3>
-                    <div id="roleInfo" class="role-info"></div>
                 </div>
                 <div class="sidebar-section">
                     <h3>会话</h3>
@@ -50,10 +41,12 @@
                     <button onclick="newThread()" class="btn btn-sm btn-full">新建会话</button>
                 </div>
                 <div class="sidebar-section">
-                    <h3>🤖 AI 模型</h3>
-                    <div id="modelSelector" class="model-selector"></div>
+                    <details class="model-details">
+                        <summary>🤖 AI 模型</summary>
+                        <div id="modelSelector" class="model-selector"></div>
+                    </details>
                 </div>
-                <div class="sidebar-section">
+                <div class="sidebar-section sidebar-bottom">
                     <button onclick="doLogout()" class="btn btn-danger btn-full">退出登录</button>
                 </div>
             </div>
@@ -62,13 +55,15 @@
             <div class="chat-area">
                 <div class="chat-header">
                     <h2>💬 智能助手</h2>
-                    <div class="demo-buttons">
-                        <span class="demo-label">演示脚本：</span>
-                        <button onclick="runDemo('visitor_deny')" class="btn btn-sm btn-demo">Visitor越权</button>
-                        <button onclick="runDemo('admin_approve')" class="btn btn-sm btn-demo">Admin审批</button>
-                        <button onclick="runDemo('diff_tools')" class="btn btn-sm btn-demo">工具路由</button>
-                        <button onclick="runDemo('long_chat')" class="btn btn-sm btn-demo">长对话裁剪</button>
-                        <button onclick="runDemo('memory')" class="btn btn-sm btn-demo">记忆管理</button>
+                    <div class="demo-dropdown">
+                        <button onclick="toggleDemoMenu(event)" class="btn btn-sm btn-demo">🎬 演示 ▾</button>
+                        <div id="demoMenu" class="demo-menu" style="display:none;">
+                            <button onclick="runDemoFromMenu('visitor_deny')">🚫 Visitor 越权</button>
+                            <button onclick="runDemoFromMenu('admin_approve')">✅ Admin 审批</button>
+                            <button onclick="runDemoFromMenu('diff_tools')">🔀 工具路由</button>
+                            <button onclick="runDemoFromMenu('long_chat')">✂️ 长对话裁剪</button>
+                            <button onclick="runDemoFromMenu('memory')">🧠 记忆管理</button>
+                        </div>
                     </div>
                 </div>
                 <div id="chatMessages" class="chat-messages"></div>
@@ -93,31 +88,33 @@
 
             <!-- Right Sidebar -->
             <div class="right-sidebar">
-                <div class="sidebar-section">
-                    <h3>📋 审批中心</h3>
+                <div class="panel-tabs">
+                    <button id="tab-approvals" class="panel-tab active" onclick="switchPanelTab('approvals')">📋 审批<span id="approvalBadge" class="tab-badge" style="display:none;">0</span></button>
+                    <button id="tab-memory" class="panel-tab" onclick="switchPanelTab('memory')">🧠 记忆</button>
+                    <button id="tab-tools" class="panel-tab" onclick="switchPanelTab('tools')">🔧 工具</button>
+                    <button id="tab-events" class="panel-tab" onclick="switchPanelTab('events')">📝 事件</button>
+                </div>
+                <div id="panel-approvals" class="tab-panel active">
                     <div id="approvalList" class="approval-list"></div>
                 </div>
-                <div class="sidebar-section">
-                    <h3>🔧 可用工具</h3>
-                    <div id="toolList" class="tool-list"></div>
-                </div>
-                <div class="sidebar-section">
-                    <h3>📝 运行事件</h3>
-                    <div id="eventList" class="event-list"></div>
-                </div>
-                <div class="sidebar-section">
-                    <h3>🧠 用户记忆</h3>
+                <div id="panel-memory" class="tab-panel">
                     <div id="memoryList" class="memory-list"></div>
                     <div class="memory-actions">
                         <button onclick="refreshMemory()" class="btn btn-sm">刷新</button>
                         <button onclick="consolidateMemory()" class="btn btn-sm" title="归档低价值记忆，LLM 整合用户画像并沉淀新事实">🧹 整合记忆</button>
                     </div>
                 </div>
+                <div id="panel-tools" class="tab-panel">
+                    <div id="toolList" class="tool-list"></div>
+                </div>
+                <div id="panel-events" class="tab-panel">
+                    <div id="eventList" class="event-list"></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <script src="/assets/app.js?v=12"></script>
+    <script src="/assets/app.js?v=20"></script>
 
     <!-- API Key Modal -->
     <div id="apiKeyModal" class="modal-overlay" style="display:none;">
@@ -130,18 +127,6 @@
             <div class="modal-actions">
                 <button onclick="cancelApiKey()" class="btn btn-sm">取消</button>
                 <button onclick="confirmApiKey()" class="btn btn-sm btn-primary">确认</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Approval Modal -->
-    <div id="approvalModal" class="modal-overlay" style="display:none;">
-        <div class="modal-box approval-modal-box">
-            <h3>⏸️ 操作审批</h3>
-            <p>以下操作需要您确认后才会执行：</p>
-            <div id="approvalModalList" class="approval-list"></div>
-            <div class="modal-actions">
-                <button onclick="closeApprovalModal()" class="btn btn-sm">稍后处理</button>
             </div>
         </div>
     </div>

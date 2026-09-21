@@ -91,12 +91,6 @@ async function doLogin() {
     }
 }
 
-function quickLogin(username, password) {
-    document.getElementById('loginUsername').value = username;
-    document.getElementById('loginPassword').value = password;
-    doLogin();
-}
-
 async function doLogout() {
     try { await api('POST', '/api/auth/logout'); } catch (e) {}
     sessionId = '';
@@ -127,21 +121,18 @@ async function showMainApp() {
     currentThread = threads[0] || 't_default';
     renderThreads();
     renderChat();
+    refreshTokenBar(currentThread);
 }
 
 function renderUserInfo(me) {
     const userDiv = document.getElementById('currentUser');
+    const allowedTools = me.tools || [];
+    const allToolCount = 6;
     userDiv.innerHTML = `
         <div class="username">${me.user.username}</div>
         <div class="roles">${me.user.roles.map(r => `<span class="role-badge role-${r}">${r}</span>`).join(' ')}</div>
+        <div class="tool-count">可用工具 ${allowedTools.length}/${allToolCount}</div>
     `;
-    const roleDiv = document.getElementById('roleInfo');
-    const allTools = ['calculator', 'weather', 'grep', 'query_order', 'delete_order', 'send_email'];
-    const allowedTools = me.tools || [];
-    roleDiv.innerHTML = allTools.map(t => {
-        const allowed = allowedTools.includes(t);
-        return `<div class="perm-item ${allowed ? '' : 'deny'}">${allowed ? '✅' : '🚫'} ${t}</div>`;
-    }).join('');
 }
 
 // ========== Threads ==========
@@ -162,6 +153,7 @@ function switchThread(threadId) {
     currentThread = threadId;
     renderThreads();
     renderChat();
+    refreshTokenBar(threadId);
 }
 
 function newThread() {
@@ -172,6 +164,7 @@ function newThread() {
     currentThread = tid;
     renderThreads();
     renderChat();
+    refreshTokenBar(tid);
 }
 
 async function deleteThread(threadId) {
@@ -198,6 +191,7 @@ async function deleteThread(threadId) {
 
     renderThreads();
     renderChat();
+    refreshTokenBar(currentThread);
 }
 
 // ========== Chat Rendering ==========
@@ -212,6 +206,10 @@ function renderChat() {
 
     let html = '';
     for (const msg of msgs) {
+        if (msg.role === 'approval-card') {
+            html += renderApprovalCardMessage(msg);
+            continue;
+        }
         const escaped = escapeHtml(msg.content);
         const cls = msg.role === 'user' ? 'msg-user' :
                     msg.role === 'assistant' ? 'msg-assistant' :
@@ -226,6 +224,109 @@ function renderChat() {
 
     container.innerHTML = html;
     container.scrollTop = container.scrollHeight;
+}
+
+// Render an interactive approval card as a chat message.
+// Two visual states: pending (with 批准/拒绝 actions) and resolved (badge only).
+function renderApprovalCardMessage(m) {
+    const isPlan = !m.toolName;
+    const kind = isPlan ? '执行计划' : '工具调用';
+    const title = isPlan ? 'Agent 执行计划' : m.toolName;
+    const stateBadges = {
+        pending: '<span class="ac-state pending"><i></i>待审批</span>',
+        approved: '<span class="ac-state approved"><i></i>已批准</span>',
+        rejected: '<span class="ac-state rejected"><i></i>已拒绝</span>',
+        resolved: '<span class="ac-state resolved"><i></i>已处理</span>',
+    };
+
+    // Structured planned steps: explicit plan first, else the single tool call.
+    const steps = [];
+    if (Array.isArray(m.plan) && m.plan.length) {
+        for (const s of m.plan) steps.push(s);
+    } else if (m.toolName) {
+        steps.push({ name: m.toolName, arguments: m.args });
+    }
+
+    let html = `
+        <div class="msg msg-approval-card" data-interrupt-id="${m.interruptId}">
+            <div class="ac-header">
+                <span class="ac-icon">${isPlan ? '🗺️' : '🔧'}</span>
+                <div class="ac-titles">
+                    <div class="ac-title">${escapeHtml(title)}</div>
+                    <div class="ac-kind">${kind} · 需要人工审批</div>
+                </div>
+                ${stateBadges[m.status] || ''}
+            </div>`;
+    if (steps.length) {
+        html += `<div class="ac-plan">${steps.map(s => `
+            <div class="ac-step">
+                <span class="ac-step-name">${escapeHtml(s.name)}</span>
+                ${s.arguments ? `<code class="ac-step-args">${escapeHtml(s.arguments)}</code>` : ''}
+            </div>`).join('')}</div>`;
+    }
+    if (m.message) {
+        html += `<div class="ac-desc">${escapeHtml(m.message)}</div>`;
+    }
+    if (m.status === 'pending') {
+        html += `
+            <div class="ac-actions">
+                <input type="text" placeholder="拒绝原因（可选）" id="rr-${m.interruptId}">
+                <button class="btn-ac-reject" onclick="decideApproval('${m.interruptId}', false)">拒绝</button>
+                <button class="btn-ac-approve" onclick="decideApproval('${m.interruptId}', true)">✓ 批准</button>
+            </div>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+// Push an interactive approval card into the thread's chat.
+function pushApprovalCard(threadId, card) {
+    const msgs = loadMessages(threadId);
+    msgs.push({ role: 'approval-card', status: 'pending', ...card });
+    saveMessages(threadId, msgs);
+    renderChat();
+}
+
+// Keep chat cards in sync with the server-side pending approvals:
+// add cards for pending approvals missing from the chat, and mark pending
+// cards resolved when their interrupt is no longer pending (e.g. handled
+// in another tab).
+function syncThreadApprovalCards() {
+    const msgs = loadMessages(currentThread);
+    const pendingForThread = (currentApprovals || [])
+        .filter(a => a.Status === 'pending' && a.ThreadID === currentThread);
+    let changed = false;
+
+    for (const a of pendingForThread) {
+        const exists = msgs.some(m => m.role === 'approval-card' && m.interruptId === a.InterruptID);
+        if (!exists) {
+            msgs.push({
+                role: 'approval-card', status: 'pending',
+                interruptId: a.InterruptID,
+                toolName: a.ToolName, nodeName: a.NodeName,
+                riskLevel: a.RiskLevel, message: a.Message, args: a.Arguments,
+                plan: Array.isArray(a.Payload?.plan) ? a.Payload.plan : undefined,
+            });
+            changed = true;
+        }
+    }
+    for (const m of msgs) {
+        if (m.role === 'approval-card' && m.status === 'pending' &&
+            !pendingForThread.some(a => a.InterruptID === m.interruptId)) {
+            m.status = 'resolved';
+            changed = true;
+        }
+    }
+    if (changed) {
+        saveMessages(currentThread, msgs);
+        renderChat();
+    }
+}
+
+// Scroll the chat to the first approval card.
+function scrollToApprovalCards() {
+    const el = document.querySelector('#chatMessages [data-interrupt-id]');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function escapeHtml(text) {
@@ -292,8 +393,15 @@ async function sendMessage() {
                 confirmBeforeExecute: document.getElementById('confirmBeforeExecute')?.checked || false,
             });
             if (data.status === 'interrupted') {
-                pushMessage(currentThread, 'interrupt',
-                    `⏸️ 运行已中断，等待审批\n工具：${data.interrupt.tool_name}\n原因：${data.interrupt.message}`);
+                // Inline approval card in the chat instead of a static notice.
+                pushApprovalCard(currentThread, {
+                    interruptId: data.interrupt.interrupt_id,
+                    toolName: data.interrupt.tool_name,
+                    nodeName: data.interrupt.node_name,
+                    message: data.interrupt.message,
+                    args: data.interrupt.arguments,
+                    plan: data.interrupt.plan,
+                });
                 refreshApprovals();
             } else if (data.status === 'completed') {
                 pushMessage(currentThread, 'assistant', data.answer || '（无回复）');
@@ -383,22 +491,18 @@ async function chatStream(threadId, message) {
                             // Handle HITL interrupt: show interrupt message + refresh approval cards
                             if (data.status === 'interrupted' && data.interrupt) {
                                 const interruptInfo = data.interrupt;
-                                const interruptMsg = `⏸️ 运行已中断，等待审批\n工具：${interruptInfo.tool_name || interruptInfo.node_name || ''}\n原因：${interruptInfo.message || ''}`;
-                                finalizeStreamingMessage(threadId, interruptMsg);
-                                // Mark as interrupt type for distinct rendering
-                                const msgs = loadMessages(threadId);
-                                for (let i = msgs.length - 1; i >= 0; i--) {
-                                    if (!msgs[i]._streaming) {
-                                        msgs[i].role = 'interrupt';
-                                        break;
-                                    }
-                                }
-                                saveMessages(threadId, msgs);
-                                renderChat();
-                                // Show the approval modal immediately using the interrupt info
-                                // from the SSE response (don't wait for the approvals API round-trip).
-                                showApprovalModalFromInterrupt(interruptInfo);
-                                // Also refresh the full approvals list (async, updates sidebar + modal).
+                                // The assistant's pending text becomes a normal message;
+                                // the approval arrives as an interactive inline card.
+                                finalizeStreamingMessage(threadId, data.answer || '');
+                                pushApprovalCard(threadId, {
+                                    interruptId: interruptInfo.interrupt_id,
+                                    toolName: interruptInfo.tool_name,
+                                    nodeName: interruptInfo.node_name,
+                                    message: interruptInfo.message,
+                                    args: interruptInfo.arguments,
+                                    plan: interruptInfo.plan,
+                                });
+                                // Refresh approvals (updates badge + syncs cards).
                                 refreshApprovals();
                             } else {
                                 // Normal completion — save complete message
@@ -474,7 +578,6 @@ function finalizeStreamingMessage(threadId, content) {
 // ========== Approvals ==========
 // Track which pending interrupts the user has dismissed from the modal, so we
 // don't re-pop the modal for an item the user explicitly chose to handle later.
-let dismissedInterruptIds = new Set();
 
 async function refreshApprovals() {
     try {
@@ -485,107 +588,88 @@ async function refreshApprovals() {
 }
 
 function renderApprovals(approvals) {
-    // Sidebar: show a compact indicator with pending count
+    // Right panel: compact pending count; the interactive cards live in the chat.
     const listDiv = document.getElementById('approvalList');
     const pending = (approvals || []).filter(a => a.Status === 'pending');
+    updateApprovalBadge(pending.length);
+    syncThreadApprovalCards();
 
     if (pending.length === 0) {
         listDiv.innerHTML = '<div class="empty-state">无待审批项</div>';
-        closeApprovalModal();
-        dismissedInterruptIds.clear();
         return;
     }
 
     listDiv.innerHTML = `
-        <div class="approval-indicator" onclick="openApprovalModal()">
+        <div class="approval-indicator" onclick="scrollToApprovalCards()">
             <span class="indicator-dot"></span>
-            <span class="indicator-text">${pending.length} 个待审批</span>
+            <span class="indicator-text">${pending.length} 个待审批（在对话中处理）</span>
         </div>
-        <button onclick="openApprovalModal()" class="btn btn-sm btn-full" style="margin-top:6px;">查看并处理</button>
+        <button onclick="scrollToApprovalCards()" class="btn btn-sm btn-full" style="margin-top:6px;">跳转到审批卡片</button>
     `;
+}
 
-    // Auto-open the modal if there's a new pending interrupt the user hasn't
-    // dismissed yet. If all current pending items were already dismissed, keep
-    // the modal closed (user chose "稍后处理").
-    const hasNew = pending.some(a => !dismissedInterruptIds.has(a.InterruptID));
-    if (hasNew) {
-        openApprovalModal();
+// ========== Right Panel Tabs & Demo Dropdown ==========
+function switchPanelTab(name) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active', 'has-new'));
+    const panel = document.getElementById('panel-' + name);
+    if (panel) panel.classList.add('active');
+    const tab = document.getElementById('tab-' + name);
+    if (tab) tab.classList.add('active');
+}
+
+function updateApprovalBadge(pendingCount) {
+    const badge = document.getElementById('approvalBadge');
+    const tab = document.getElementById('tab-approvals');
+    if (!badge || !tab) return;
+    if (pendingCount > 0) {
+        badge.textContent = pendingCount;
+        badge.style.display = 'inline-block';
+        if (!tab.classList.contains('active')) {
+            tab.classList.add('has-new');
+        }
+    } else {
+        badge.style.display = 'none';
+        tab.classList.remove('has-new');
     }
 }
 
-function renderApprovalCards(containerId, approvals) {
-    const container = document.getElementById(containerId);
-    container.innerHTML = approvals.map(a => `
-        <div class="approval-card">
-            <div class="card-title">${a.Type === 'tool' ? '🔧 ' : '📋 '}${a.ToolName || a.NodeName}</div>
-            <div class="card-detail">
-                ${a.Arguments ? `参数：${a.Arguments}<br>` : ''}
-                风险：${a.RiskLevel || 'N/A'}<br>
-                原因：${a.Message || 'N/A'}
-            </div>
-            <div class="card-actions">
-                <input type="text" placeholder="拒绝原因（可选）" id="rr-${a.InterruptID}">
-                <button class="btn btn-sm btn-approve" onclick="decideApproval('${a.InterruptID}', true)">批准</button>
-                <button class="btn btn-sm btn-reject" onclick="decideApproval('${a.InterruptID}', false)">拒绝</button>
-            </div>
-        </div>
-    `).join('');
+function toggleDemoMenu(e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById('demoMenu');
+    if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
 }
 
-function openApprovalModal() {
-    const modal = document.getElementById('approvalModal');
-    const pending = currentApprovals.filter(a => a.Status === 'pending');
-    if (pending.length === 0) return;
-    renderApprovalCards('approvalModalList', pending);
-    modal.style.display = 'flex';
+function runDemoFromMenu(type) {
+    const menu = document.getElementById('demoMenu');
+    if (menu) menu.style.display = 'none';
+    runDemo(type);
 }
 
-// Show the approval modal immediately using interrupt info from the SSE
-// response, without waiting for the /api/approvals round-trip.
-function showApprovalModalFromInterrupt(info) {
-    const modal = document.getElementById('approvalModal');
-    const card = document.createElement('div');
-    card.className = 'approval-card';
-    card.innerHTML = `
-        <div class="card-title">${info.type === 'tool' ? '🔧 ' : '📋 '}${info.tool_name || info.node_name || ''}</div>
-        <div class="card-detail">
-            ${info.arguments ? '参数：' + info.arguments + '<br>' : ''}
-            风险：high<br>
-            原因：${info.message || 'N/A'}
-        </div>
-        <div class="card-actions">
-            <input type="text" placeholder="拒绝原因（可选）" id="rr-${info.interrupt_id}">
-            <button class="btn btn-sm btn-approve" onclick="decideApproval('${info.interrupt_id}', true)">批准</button>
-            <button class="btn btn-sm btn-reject" onclick="decideApproval('${info.interrupt_id}', false)">拒绝</button>
-        </div>
-    `;
-    const list = document.getElementById('approvalModalList');
-    list.innerHTML = '';
-    list.appendChild(card);
-    modal.style.display = 'flex';
-}
-
-function closeApprovalModal() {
-    const modal = document.getElementById('approvalModal');
-    if (modal.style.display === 'none') return;
-    modal.style.display = 'none';
-    // Mark all currently pending interrupts as dismissed so we don't auto-reopen
-    // for the same items.
-    currentApprovals.filter(a => a.Status === 'pending').forEach(a => {
-        dismissedInterruptIds.add(a.InterruptID);
-    });
-}
+// Close the demo menu when clicking anywhere outside it.
+document.addEventListener('click', (e) => {
+    const menu = document.getElementById('demoMenu');
+    if (menu && menu.style.display !== 'none' && !menu.contains(e.target)) {
+        menu.style.display = 'none';
+    }
+});
 
 async function decideApproval(interruptId, approved) {
     const reasonEl = document.getElementById(`rr-${interruptId}`);
     const reason = reasonEl ? reasonEl.value : '';
     try {
         const data = await api('POST', `/api/approvals/${interruptId}/decision`, { approved, reason });
+        // Flip the inline card to its resolved state.
+        const msgs = loadMessages(currentThread);
+        for (const m of msgs) {
+            if (m.role === 'approval-card' && m.interruptId === interruptId && m.status === 'pending') {
+                m.status = approved ? 'approved' : 'rejected';
+            }
+        }
+        saveMessages(currentThread, msgs);
         pushMessage(currentThread, 'approval',
             `${approved ? '✅' : '🚫'} 审批结果：${data.answer || (approved ? '已批准' : '已拒绝')}`);
         renderChat();
-        // This interrupt is resolved — no longer dismissed-tracking needed.
-        dismissedInterruptIds.delete(interruptId);
         await refreshApprovals();
     } catch (e) {
         alert('审批操作失败：' + e.message);
@@ -762,45 +846,48 @@ function renderEvents(events) {
 
 // ========== Demo Scripts ==========
 async function runDemo(type) {
+    // Pin the demo to the thread selected at start: switching to another
+    // thread mid-demo must not redirect the remaining scripted messages.
+    const demoThread = currentThread;
     switch (type) {
         // 场景 1：Visitor 越权 — ACL 拒绝
         case 'visitor_deny':
-            if (currentUser.username !== 'visitor') {
-                alert('请先用 visitor 账号登录（visitor / visitor123）');
+            if (!currentUser.roles.includes('visitor')) {
+                alert('请先使用 visitor 角色账号登录');
                 return;
             }
-            pushMessage(currentThread, 'system', '🎬 演示开始：visitor 尝试删除订单 → ACL 拒绝');
+            pushMessage(demoThread, 'system', '🎬 演示开始：visitor 尝试删除订单 → ACL 拒绝');
             renderChat();
             document.getElementById('chatInput').value = '删除订单A-1001';
-            await sendMessageAsync();
+            await sendMessageAsync(demoThread);
             break;
 
         // 场景 2：Admin 审批 — 高危工具审批
         case 'admin_approve':
-            if (currentUser.username !== 'admin') {
-                alert('请先用 admin 账号登录（admin / admin123）');
+            if (!currentUser.roles.includes('admin')) {
+                alert('请先使用 admin 角色账号登录');
                 return;
             }
-            pushMessage(currentThread, 'system', '🎬 演示开始：删除订单 → 触发审批弹窗 → 批准/拒绝');
+            pushMessage(demoThread, 'system', '🎬 演示开始：删除订单 → 对话内审批卡片 → 批准/拒绝');
             renderChat();
             document.getElementById('chatInput').value = '删除订单A-1001';
-            await sendMessageAsync();
+            await sendMessageAsync(demoThread);
             break;
 
         // 场景 3：不同工具路由 — Supervisor 路由到不同子 Agent
         case 'diff_tools':
-            pushMessage(currentThread, 'system', '🎬 演示开始：依次调用不同工具，展示 Supervisor 路由');
+            pushMessage(demoThread, 'system', '🎬 演示开始：依次调用不同工具，展示 Supervisor 路由');
             renderChat();
             for (const msg of ['计算 123*456', '上海天气怎么样', '查询我的订单']) {
                 document.getElementById('chatInput').value = msg;
-                await sendMessageAsync();
+                await sendMessageAsync(demoThread);
                 await sleep(500);
             }
             break;
 
         // 场景 4：长对话裁剪 — 上下文管理 + LLM 摘要压缩
         case 'long_chat':
-            pushMessage(currentThread, 'system', '🎬 演示开始：连续多轮对话 → 触发上下文裁剪 → 事件面板显示 summary_compress');
+            pushMessage(demoThread, 'system', '🎬 演示开始：连续多轮对话 → 触发上下文裁剪 → 事件面板显示 summary_compress');
             renderChat();
             const chatMsgs = [
                 '你好，我是admin',
@@ -816,47 +903,47 @@ async function runDemo(type) {
             ];
             for (let i = 0; i < chatMsgs.length; i++) {
                 document.getElementById('chatInput').value = chatMsgs[i];
-                await sendMessageAsync();
+                await sendMessageAsync(demoThread);
                 await sleep(300);
             }
             const eventItems = document.querySelectorAll('#eventList .event-item');
             const hasCompress = Array.from(eventItems).some(el => el.textContent.includes('compress'));
             if (hasCompress) {
-                pushMessage(currentThread, 'system', '✅ 上下文裁剪已触发！查看右侧运行事件面板的 📦 事件。');
+                pushMessage(demoThread, 'system', '✅ 上下文裁剪已触发！查看右侧运行事件面板的 📦 事件。');
             } else {
-                pushMessage(currentThread, 'system', '💡 当前消息量尚未超过裁剪阈值。可继续对话，或启动时设低阈值：MAX_TOKENS=1500 SUMMARIZE_THRESHOLD_RATIO=0.5 ./agent-server.exe');
+                pushMessage(demoThread, 'system', '💡 当前消息量尚未超过裁剪阈值。可继续对话，或启动时设低阈值：MAX_TOKENS=1500 SUMMARIZE_THRESHOLD_RATIO=0.5 ./agent-server.exe');
             }
             renderChat();
             break;
 
         // 场景 5：记忆管理 — 偏好保存 + 跨会话验证
         case 'memory':
-            pushMessage(currentThread, 'system', '🎬 演示开始：表达偏好 → 保存记忆 → 验证跨会话记忆');
+            pushMessage(demoThread, 'system', '🎬 演示开始：表达偏好 → 保存记忆 → 验证跨会话记忆');
             renderChat();
             document.getElementById('chatInput').value = '我喜欢用Python，偏好深色主题';
-            await sendMessageAsync();
+            await sendMessageAsync(demoThread);
             await sleep(500);
             document.getElementById('chatInput').value = '我的偏好吗？';
-            await sendMessageAsync();
+            await sendMessageAsync(demoThread);
             await sleep(500);
             await refreshMemory();
-            pushMessage(currentThread, 'system', '💡 查看右侧 🧠 用户记忆面板确认偏好已保存。切换会话后再次询问偏好可验证跨会话记忆。');
+            pushMessage(demoThread, 'system', '💡 查看右侧 🧠 用户记忆面板确认偏好已保存。切换会话后再次询问偏好可验证跨会话记忆。');
             renderChat();
             break;
     }
 }
 
-async function sendMessageAsync() {
+async function sendMessageAsync(threadId = currentThread) {
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
     if (!message) return;
     input.value = '';
-    pushMessage(currentThread, 'user', message);
+    pushMessage(threadId, 'user', message);
     renderChat();
     try {
-        await chatStream(currentThread, message);
+        await chatStream(threadId, message);
     } catch (e) {
-        pushMessage(currentThread, 'acl-denied', `❌ ${e.message}`);
+        pushMessage(threadId, 'acl-denied', `❌ ${e.message}`);
         renderChat();
     }
 }
@@ -986,6 +1073,22 @@ function cancelApiKey() {
 }
 
 // ========== Context Token Bar ==========
+// Refresh the token bar with a thread's own usage (read-only recount on the
+// server), so switching conversations shows that conversation's numbers
+// instead of stale values from the last active thread.
+async function refreshTokenBar(threadId = currentThread) {
+    try {
+        const info = await api('GET', `/api/chat/${threadId}/tokens`);
+        if (info && typeof info.current === 'number') {
+            updateTokenBar(info);
+        }
+    } catch (e) {
+        // Visible in console: usually means the server predates this endpoint
+        // (needs rebuild/restart) or the session expired.
+        console.warn('[TokenBar] refresh failed for', threadId, e.message || e);
+    }
+}
+
 function updateTokenBar(info) {
     const fill = document.getElementById('tokenBarFill');
     const text = document.getElementById('tokenBarText');
