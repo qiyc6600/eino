@@ -886,3 +886,36 @@ body {
 }
 
 .btn-ac-reject:hover { background: #fef2f2; }
+
+/* Documents panel */
+.doc-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.doc-form input[type="text"] {
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 12px;
+}
+.doc-form textarea {
+    height: 96px;
+    padding: 6px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+    resize: vertical;
+}
+.doc-form-actions { display: flex; gap: 6px; align-items: center; }
+/* The file input is hidden behind a label so it matches the other buttons. */
+.doc-file-label { position: relative; overflow: hidden; cursor: pointer; }
+.doc-file-label input[type="file"] { display: none; }
+.document-list { font-size: 12px; }
+.document-item {
+    padding: 6px 8px;
+    background: #f3f4f6;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+.document-title { font-weight: 600; color: #4f46e5; }
+.document-meta { color: #6b7280; display: flex; justify-content: space-between; align-items: center; }
+.document-delete { cursor: pointer; color: #ef4444; padding: 0 4px; }
+.doc-hint { margin-top: 8px; font-size: 11px; color: #9ca3af; line-height: 1.5; }

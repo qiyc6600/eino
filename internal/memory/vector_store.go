@@ -23,11 +23,16 @@ type VectorResult struct {
 // Implementations store text content with embedding vectors and support
 // similarity-based queries. All methods are namespaced by userID for isolation.
 type VectorStore interface {
-	// Store saves a memory entry with its embedding vector.
+	// Store saves a memory entry with its embedding vector under a generated id.
 	Store(ctx context.Context, userID, content string, metadata map[string]any) error
+	// StoreWithID saves an entry under a caller-supplied id, so it can be
+	// removed again later (document chunks are re-indexed and deleted by id).
+	StoreWithID(ctx context.Context, userID, id, content string, metadata map[string]any) error
 	// Query returns the top-K most similar memories for a given query text.
 	Query(ctx context.Context, userID, query string, topK int) ([]VectorResult, error)
-	// Delete removes all vector entries for a user (e.g. on privacy request).
+	// Delete removes the named entries. Unknown ids are ignored.
+	Delete(ctx context.Context, userID string, ids ...string) error
+	// DeleteUser removes all vector entries for a user (e.g. on privacy request).
 	DeleteUser(ctx context.Context, userID string) error
 }
 
@@ -37,6 +42,7 @@ type VectorStore interface {
 // For proper semantic search, use the chromem-go implementation.
 
 type vectorEntry struct {
+	id       string
 	content  string
 	vector   []float32
 	metadata map[string]any
@@ -61,8 +67,17 @@ func NewInMemoryVectorStore() *InMemoryVectorStore {
 
 // Store saves a text entry with a hash-based pseudo-embedding.
 func (s *InMemoryVectorStore) Store(ctx context.Context, userID, content string, metadata map[string]any) error {
+	return s.StoreWithID(ctx, userID, fmt.Sprintf("mem_%d", time.Now().UnixNano()), content, metadata)
+}
+
+// StoreWithID saves a text entry under the given id, replacing any entry that
+// already uses it.
+func (s *InMemoryVectorStore) StoreWithID(ctx context.Context, userID, id, content string, metadata map[string]any) error {
 	if err := auth.CheckUserScope(ctx, userID); err != nil {
 		return err
+	}
+	if id == "" {
+		return fmt.Errorf("vector entry id must not be empty")
 	}
 
 	vector := hashEmbed(content, s.dim)
@@ -70,12 +85,50 @@ func (s *InMemoryVectorStore) Store(ctx context.Context, userID, content string,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.entries[userID] = append(s.entries[userID], vectorEntry{
+	// Re-using an id replaces the previous entry rather than duplicating it, so
+	// re-indexing a document is idempotent.
+	entries := s.entries[userID]
+	for i := range entries {
+		if entries[i].id == id {
+			entries[i] = vectorEntry{id: id, content: content, vector: vector, metadata: metadata, addedAt: time.Now()}
+			s.entries[userID] = entries
+			return nil
+		}
+	}
+	s.entries[userID] = append(entries, vectorEntry{
+		id:       id,
 		content:  content,
 		vector:   vector,
 		metadata: metadata,
 		addedAt:  time.Now(),
 	})
+	return nil
+}
+
+// Delete removes the named entries for a user. Unknown ids are ignored.
+func (s *InMemoryVectorStore) Delete(ctx context.Context, userID string, ids ...string) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	drop := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := s.entries[userID]
+	kept := entries[:0]
+	for _, e := range entries {
+		if !drop[e.id] {
+			kept = append(kept, e)
+		}
+	}
+	s.entries[userID] = kept
 	return nil
 }
 
@@ -251,23 +304,27 @@ var _ VectorStore = (*InMemoryVectorStore)(nil)
 
 // FormatVectorResults formats vector query results as readable text for system prompt injection.
 func FormatVectorResults(results []VectorResult) string {
-	return FormatVectorResultsWithin(results, 0)
+	return FormatVectorResultsWithin(results, 0, 0)
 }
 
 // FormatVectorResultsWithin formats vector results for injection, skipping the
-// entries that would push the text past maxTokens (0 = no limit).
+// entries that would push the text past maxTokens (0 = no limit) or that score
+// below minScore (0 = use the default threshold).
 //
-// Without a cap the recalled text can exceed the whole memory budget on its own,
-// which used to leave the deterministic KV entries with nothing while the
-// injected memory was already over budget.
+// The threshold has to match the embedder's score scale: real embeddings put a
+// relevant pair around 0.6-0.9, while the hash fallback compresses everything
+// into roughly 0.15-0.4, so one fixed cut-off cannot serve both.
 //
 // Whole entries are skipped rather than truncating the text: a recalled episode
 // cut in half reads as a different fact. Results arrive ranked, so higher-ranked
 // entries claim the budget first; an oversized entry is skipped in favour of
 // shorter ones instead of wasting the remaining budget.
-func FormatVectorResultsWithin(results []VectorResult, maxTokens int) string {
+func FormatVectorResultsWithin(results []VectorResult, maxTokens int, minScore float64) string {
 	if len(results) == 0 {
 		return ""
+	}
+	if minScore <= 0 {
+		minScore = minVectorRelevance
 	}
 
 	const header = "用户历史相关记忆：\n"
@@ -278,7 +335,7 @@ func FormatVectorResultsWithin(results []VectorResult, maxTokens int) string {
 
 	var lines []string
 	for _, r := range results {
-		if r.Score < minVectorRelevance {
+		if float64(r.Score) < minScore {
 			continue
 		}
 		ts := ""

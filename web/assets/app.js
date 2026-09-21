@@ -125,6 +125,7 @@ async function showMainApp(quiet = false) {
     loadModels();
     refreshApprovals();
     refreshMemory();
+    refreshDocuments();
     threads = loadThreadList();
     currentThread = threads[0] || 't_default';
     renderThreads();
@@ -1046,6 +1047,84 @@ async function deleteMemory(key) {
     } catch (e) {
         alert('删除失败：' + e.message);
     }
+}
+
+// ========== Documents (per-user RAG corpus) ==========
+
+async function refreshDocuments() {
+    const listDiv = document.getElementById('documentList');
+    if (!listDiv) return;
+    listDiv.innerHTML = '<div class="empty-state">加载中...</div>';
+    try {
+        renderDocuments(await api('GET', '/api/documents'));
+    } catch (e) {
+        listDiv.innerHTML = '<div class="empty-state">加载失败，点击刷新重试</div>';
+    }
+    const hint = document.getElementById('docHint');
+    if (hint) {
+        hint.textContent = '提示：检索质量取决于 EMBEDDING_PROVIDER。默认的 hash 伪嵌入只能做词面匹配，接入 openai 或 ollama 后才是真正的语义检索。';
+    }
+}
+
+// loadDocumentFile reads a .txt/.md file in the browser and fills the textarea, so
+// the upload stays a plain JSON request — no multipart handling on either side.
+function loadDocumentFile(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        document.getElementById('docContent').value = String(reader.result || '');
+        const nameField = document.getElementById('docName');
+        if (!nameField.value) nameField.value = file.name.replace(/\.(txt|md)$/i, '');
+    };
+    reader.onerror = () => alert('读取文件失败');
+    reader.readAsText(file);
+    input.value = ''; // allow re-selecting the same file
+}
+
+async function uploadDocument() {
+    const name = document.getElementById('docName').value.trim();
+    const content = document.getElementById('docContent').value.trim();
+    if (!name || !content) {
+        alert('请填写文档名称与内容');
+        return;
+    }
+    try {
+        const doc = await api('POST', '/api/documents', { name, content });
+        document.getElementById('docName').value = '';
+        document.getElementById('docContent').value = '';
+        pushMessage(currentThread, 'system', `📄 已上传文档《${doc.name}》，切分为 ${doc.chunks} 个片段`);
+        renderChat();
+        refreshDocuments();
+    } catch (e) {
+        alert('上传失败：' + e.message);
+    }
+}
+
+async function deleteDocument(id, name) {
+    if (!confirm(`确定删除文档《${name}》吗？`)) return;
+    try {
+        await api('DELETE', '/api/documents/' + id);
+        refreshDocuments();
+    } catch (e) {
+        alert('删除失败：' + e.message);
+    }
+}
+
+function renderDocuments(docs) {
+    const listDiv = document.getElementById('documentList');
+    if (!listDiv) return;
+    if (!docs || docs.length === 0) {
+        listDiv.innerHTML = '<div class="empty-state">还没有文档。上传一份资料后提问，回答会引用其中的片段。</div>';
+        return;
+    }
+    listDiv.innerHTML = docs.map(d => `
+        <div class="document-item">
+            <div class="document-title">${escapeHtml(d.name)}</div>
+            <div class="document-meta">${d.chunks} 个片段 · ${d.chars} 字
+                <span class="document-delete" onclick="deleteDocument('${d.id}', '${escapeHtml(d.name)}')" title="删除文档">✕</span>
+            </div>
+        </div>`).join('');
 }
 
 // ========== Events ==========

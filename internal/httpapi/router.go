@@ -22,6 +22,7 @@ type Router struct {
 	agentHandler    *AgentHandler
 	approvalHandler *ApprovalHandler
 	memoryHandler   *MemoryHandler
+	documentHandler *DocumentHandler
 	userHandler     *UserHandler
 	modelHandler    *ModelHandler
 	healthHandler   *HealthHandler
@@ -44,6 +45,7 @@ func NewRouter(
 		agentHandler:    NewAgentHandler(runner, memSvc),
 		approvalHandler: NewApprovalHandler(hitlSvc, runner),
 		memoryHandler:   NewMemoryHandler(memSvc),
+		documentHandler: NewDocumentHandler(memSvc),
 		userHandler:     NewUserHandler(registry),
 		modelHandler:    NewModelHandler(modelSwitcher),
 		healthHandler:   NewHealthHandler(readinessChecker),
@@ -110,6 +112,10 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/memory/consolidate", authMw(http.HandlerFunc(r.memoryHandler.ConsolidateMemory)))
 	mux.Handle("/api/memory/settings", authMw(http.HandlerFunc(r.memoryHandler.MemorySettings)))
 	mux.Handle("/api/memory/", authMw(http.HandlerFunc(r.memoryHandler.DeleteMemory)))
+
+	// Documents (per-user RAG corpus)
+	mux.Handle("/api/documents", authMw(http.HandlerFunc(r.handleDocuments)))
+	mux.Handle("/api/documents/", authMw(http.HandlerFunc(r.documentHandler.DeleteDocument)))
 
 	// Model switching
 	mux.Handle("/api/models", authMw(http.HandlerFunc(r.modelHandler.ListModels)))
@@ -182,6 +188,17 @@ func (r *Router) handleMemory(w http.ResponseWriter, req *http.Request) {
 		r.memoryHandler.ListMemory(w, req)
 	case http.MethodPost:
 		r.memoryHandler.PutMemory(w, req)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (r *Router) handleDocuments(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		r.documentHandler.ListDocuments(w, req)
+	case http.MethodPost:
+		r.documentHandler.IngestDocument(w, req)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}

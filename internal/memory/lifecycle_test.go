@@ -246,7 +246,11 @@ type stubVectorStore struct {
 }
 
 func (s *stubVectorStore) Store(context.Context, string, string, map[string]any) error { return nil }
-func (s *stubVectorStore) DeleteUser(context.Context, string) error                    { return nil }
+func (s *stubVectorStore) StoreWithID(context.Context, string, string, string, map[string]any) error {
+	return nil
+}
+func (s *stubVectorStore) Delete(context.Context, string, ...string) error { return nil }
+func (s *stubVectorStore) DeleteUser(context.Context, string) error        { return nil }
 func (s *stubVectorStore) Query(context.Context, string, string, int) ([]VectorResult, error) {
 	return s.results, nil
 }
@@ -328,7 +332,7 @@ func TestRetrieveRelevant_KeepsRecalledEntriesThatFit(t *testing.T) {
 		t.Fatalf("injected memory exceeds the budget: %d > %d tokens", got, budget)
 	}
 	// The cap must be doing work: all entries together would not fit.
-	all := FormatVectorResultsWithin(vec.results, 0)
+	all := FormatVectorResultsWithin(vec.results, 0, 0)
 	if estimateTokens(all) <= budget {
 		t.Fatalf("test setup is wrong: the uncapped recall (%d tokens) fits the %d budget",
 			estimateTokens(all), budget)

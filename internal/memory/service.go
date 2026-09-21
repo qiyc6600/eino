@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -16,10 +17,18 @@ type Service struct {
 	store           MemoryStore
 	checkpointStore CheckpointStore     // for conversation state snapshots
 	vectorStore     VectorStore         // for semantic memory retrieval
+	docStore        VectorStore         // for document chunk retrieval (separate index)
 	chatModel       model.BaseChatModel // 用于 LLM 提取偏好（可为 nil，走规则降级）
 
-	budgetTokens         int // token budget for RetrieveRelevant injection
-	consolidateThreshold int // active entries before consolidation pays off
+	budgetTokens         int     // token budget for RetrieveRelevant injection
+	documentBudgetTokens int     // token budget for the document section (0 = disabled)
+	vectorMinScore       float64 // relevance cut-off; its scale depends on the embedder
+	consolidateThreshold int     // active entries before consolidation pays off
+
+	// indexMu guards indexedUsers. The vector backends are in-process only, so
+	// the index is rebuilt from the KV store the first time a user needs it.
+	indexMu      sync.Mutex
+	indexedUsers map[string]bool
 }
 
 // NewService creates a new memory service.
@@ -33,8 +42,18 @@ func NewService(store MemoryStore, checkpointStore CheckpointStore, vectorStore 
 		vectorStore:          vectorStore,
 		chatModel:            chatModel,
 		budgetTokens:         DefaultBudgetTokens,
+		documentBudgetTokens: DefaultDocumentBudgetTokens,
 		consolidateThreshold: DefaultConsolidateThresh,
+		indexedUsers:         make(map[string]bool),
 	}
+}
+
+// SetDocumentStore attaches the index used for document chunks. It is a separate
+// store from the memory index on purpose: sharing one per-user collection would
+// rank document chunks against memory episodes and let either crowd the other out
+// of the top-K.
+func (s *Service) SetDocumentStore(vs VectorStore) {
+	s.docStore = vs
 }
 
 // SetChatModel replaces the chat model (used for runtime model switching).
@@ -570,7 +589,7 @@ func (s *Service) QueryVectorMemory(ctx context.Context, userID, query string, t
 		return ""
 	}
 
-	return FormatVectorResultsWithin(results, maxTokens)
+	return FormatVectorResultsWithin(results, maxTokens, s.vectorMinScore)
 }
 
 // SaveSnapshot saves a conversation state snapshot to the CheckpointStore.

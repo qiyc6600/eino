@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	chromem "github.com/philippgille/chromem-go"
@@ -66,34 +67,49 @@ func NewChromemVectorStoreWithOpenAI(modelName, baseURL, apiKey string) (*Chrome
 
 // Store saves a memory entry with its embedding vector via chromem-go.
 func (s *ChromemVectorStore) Store(ctx context.Context, userID, content string, metadata map[string]any) error {
+	return s.StoreWithID(ctx, userID, fmt.Sprintf("mem_%d", time.Now().UnixNano()), content, metadata)
+}
+
+// StoreWithID saves an entry under the given id, replacing any document that
+// already uses it (chromem overwrites on a repeated id, which makes re-indexing
+// idempotent).
+func (s *ChromemVectorStore) StoreWithID(ctx context.Context, userID, id, content string, metadata map[string]any) error {
 	if err := auth.CheckUserScope(ctx, userID); err != nil {
 		return err
 	}
+	if id == "" {
+		return fmt.Errorf("vector entry id must not be empty")
+	}
 
-	collectionName := fmt.Sprintf("user_%s", userID)
-
-	// Get or create collection for this user
-	collection, err := s.db.GetOrCreateCollection(collectionName, nil, s.embedFunc)
+	collection, err := s.db.GetOrCreateCollection(s.collectionName(userID), nil, s.embedFunc)
 	if err != nil {
 		return fmt.Errorf("failed to get/create collection: %w", err)
 	}
 
-	// Generate a unique document ID
-	docID := fmt.Sprintf("mem_%d", time.Now().UnixNano())
-
-	// Convert metadata to string map for chromem
-	chromemMeta := make(map[string]string)
-	for k, v := range metadata {
-		chromemMeta[k] = fmt.Sprintf("%v", v)
-	}
-
 	doc := chromem.Document{
-		ID:       docID,
+		ID:       id,
 		Content:  content,
-		Metadata: chromemMeta,
+		Metadata: chromemMetadata(metadata),
 	}
 
 	return collection.AddDocuments(ctx, []chromem.Document{doc}, 1)
+}
+
+// Delete removes the named entries. Unknown ids are ignored.
+func (s *ChromemVectorStore) Delete(ctx context.Context, userID string, ids ...string) error {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	collection, err := s.db.GetOrCreateCollection(s.collectionName(userID), nil, s.embedFunc)
+	if err != nil {
+		return fmt.Errorf("failed to get collection: %w", err)
+	}
+	// chromem requires at least one selector; ids alone is the precise form.
+	return collection.Delete(ctx, nil, nil, ids...)
 }
 
 // Query returns the top-K most similar memories for a query string.
@@ -101,15 +117,28 @@ func (s *ChromemVectorStore) Query(ctx context.Context, userID, query string, to
 	if err := auth.CheckUserScope(ctx, userID); err != nil {
 		return nil, err
 	}
+	// chromem rejects an empty query text, and the token-bar path calls with an
+	// empty query — returning nothing is the correct answer there.
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
 
-	collectionName := fmt.Sprintf("user_%s", userID)
-
-	collection, err := s.db.GetOrCreateCollection(collectionName, nil, s.embedFunc)
+	collection, err := s.db.GetOrCreateCollection(s.collectionName(userID), nil, s.embedFunc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get collection: %w", err)
 	}
 
-	// chromem Query returns []chromem.Result
+	// chromem errors when nResults exceeds the number of stored documents, which
+	// a small corpus hits immediately. Clamping here keeps recall working instead
+	// of failing the whole query.
+	count := collection.Count()
+	if count == 0 {
+		return nil, nil
+	}
+	if topK > count {
+		topK = count
+	}
+
 	results, err := collection.Query(ctx, query, topK, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("vector query failed: %w", err)
@@ -132,8 +161,24 @@ func (s *ChromemVectorStore) Query(ctx context.Context, userID, query string, to
 
 // DeleteUser removes all vector entries for a user by deleting their collection.
 func (s *ChromemVectorStore) DeleteUser(ctx context.Context, userID string) error {
-	// chromem-go doesn't have a DeleteCollection method in v0.7.0
-	return fmt.Errorf("DeleteUser not supported by chromem-go; use InMemoryVectorStore for full deletion support")
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return err
+	}
+	return s.db.DeleteCollection(s.collectionName(userID))
+}
+
+// collectionName scopes a chromem collection to one user.
+func (s *ChromemVectorStore) collectionName(userID string) string {
+	return fmt.Sprintf("user_%s", userID)
+}
+
+// chromemMetadata flattens metadata to the string map chromem requires.
+func chromemMetadata(metadata map[string]any) map[string]string {
+	out := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 // Ensure ChromemVectorStore implements VectorStore

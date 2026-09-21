@@ -220,6 +220,29 @@ Supervisor Agent 根据用户问题语义路由到三个子 Agent：
 
 ---
 
+## 📄 文档 RAG
+
+每个用户可以上传自己的文档，提问时相关片段会带编号注入提示词，回答据此引用来源。
+
+| 能力 | 实现 |
+|------|------|
+| 归属 | 按 `userId` 隔离，与记忆、会话同一套隔离红线；跨用户不可见、不可删 |
+| 摄入 | 界面粘贴文本，或选择 `.txt` / `.md` 文件（浏览器内读为文本后随 JSON 提交，无 multipart） |
+| 分块 | 段落优先，目标约 400 字/块、约 80 字重叠；超长段落硬切；裁剪后保证 tool 配对不被破坏 |
+| 存储 | 复用记忆存储的保留键（`__doc_*` / `__chunk_*`），因此自动获得内存/文件/PostgreSQL 三种后端持久化，且不出现在记忆列表、检索与整合中 |
+| 索引 | 独立的文档向量库（与记忆向量库分开，避免两者在同一 top-K 里互相挤占） |
+| 注入 | `【文档片段】` 段落，每条形如 `[1] 文档名 · 片段 3：内容`，预算由 `DOCUMENT_BUDGET_TOKENS` 单独控制 |
+| 引用 | 系统提示词要求模型使用文档内容时以 `[n]` 标注来源 |
+| 重启 | 向量索引是进程内的，重启后首次检索会从存储里的分块**懒重建**；同一机制也修复了情景记忆重启后失去向量召回的问题 |
+
+接口：`GET /api/documents`（列表，不含分块原文）、`POST /api/documents`（`{name, content}`）、`DELETE /api/documents/{id}`。
+
+> **检索质量取决于 embedding 提供方。** 默认的 `EMBEDDING_PROVIDER=hash` 是哈希伪嵌入，只做词面匹配；实测中文查询对**正确**文档的相似度只有 0.168，低于为真实 embedding 标定的 0.3 阈值——所以应用会为 hash 模式自动把阈值降到 0.1，否则中文检索会完全失效。即便如此，hash 模式的排序质量有限：想要真正的语义检索请配置 `EMBEDDING_PROVIDER=openai`（或 `ollama`），此时阈值自动用 0.3。
+>
+> **未做**：PDF / DOCX 解析（只接受纯文本与 `.txt`/`.md`）；共享知识库（文档按用户隔离）；同名文档重复上传会新建一份而非覆盖。
+
+---
+
 ## 📐 上下文管理
 
 长对话自动裁剪，确保不超出 LLM 窗口：
@@ -339,6 +362,8 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | `LOGIN_FAILURE_WINDOW` | `15m` | 登录失败计数窗口 |
 | `LOGIN_LOCKOUT` | `15m` | 达到阈值后的锁定时长 |
 | `MEMORY_BUDGET_TOKENS` | `400` | 每轮注入 system prompt 的记忆 token 预算 |
+| `DOCUMENT_BUDGET_TOKENS` | `800` | 文档片段的 token 预算，与记忆预算独立；`0` 关闭文档检索 |
+| `VECTOR_MIN_SCORE` | `0`（自动） | 向量召回的相关度下限；自动时按 embedding 提供方选值（hash → 0.1，真实 embedding → 0.3） |
 | `MEMORY_CONSOLIDATE_THRESHOLD` | `30` | 触发 LLM 记忆整合的活跃条目数阈值 |
 | `MAX_TOKENS` | `8000` | 上下文窗口上限（进度条满刻度） |
 | `MAX_MESSAGES` | `0` | 送给模型的消息条数上限，0 = 不按条数裁剪 |

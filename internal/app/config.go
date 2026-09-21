@@ -69,6 +69,14 @@ type Config struct {
 	// Memory retrieval & lifecycle
 	MemoryBudgetTokens         int // token budget for memory injection per turn
 	MemoryConsolidateThreshold int // active entries before consolidation pays off
+	// DocumentBudgetTokens caps the document section of the injected context.
+	// It is separate from the memory budget so the two cannot crowd each other
+	// out; 0 disables document retrieval.
+	DocumentBudgetTokens int
+	// VectorMinScore is the relevance cut-off for vector recall. 0 = auto, which
+	// picks a value matching the embedder's score scale (the hash fallback scores
+	// far lower than real embeddings).
+	VectorMinScore float64
 
 	// Thread history governance. Both default to preserving everything: a
 	// conversation store that silently drops data is a product decision, not a
@@ -203,6 +211,8 @@ func LoadConfig() *Config {
 		MaxToolResultChars:         getEnvInt("MAX_TOOL_RESULT_CHARS", 8000),
 		MemoryBudgetTokens:         getEnvInt("MEMORY_BUDGET_TOKENS", 400),
 		MemoryConsolidateThreshold: getEnvInt("MEMORY_CONSOLIDATE_THRESHOLD", 30),
+		DocumentBudgetTokens:       getEnvInt("DOCUMENT_BUDGET_TOKENS", 800),
+		VectorMinScore:             getEnvFloat("VECTOR_MIN_SCORE", 0),
 		ThreadHistoryMaxMessages:   getEnvInt("THREAD_HISTORY_MAX_MESSAGES", 0),
 		ThreadRetention:            getEnvDuration("THREAD_RETENTION", 0),
 		SessionCookieSecure:        getEnvBool("SESSION_COOKIE_SECURE", true),

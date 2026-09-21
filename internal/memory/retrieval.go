@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -32,10 +33,146 @@ func (s *Service) SetRetrievalConfig(budgetTokens, consolidateThreshold int) {
 	}
 }
 
+// SetDocumentBudgetTokens overrides the token budget for the document section of
+// the injected context. 0 disables document retrieval.
+func (s *Service) SetDocumentBudgetTokens(tokens int) {
+	if tokens < 0 {
+		tokens = 0
+	}
+	s.documentBudgetTokens = tokens
+}
+
+// SetVectorMinScore overrides the relevance cut-off applied to vector results.
+//
+// It exists because the cut-off is only meaningful relative to the embedder's
+// score scale: real embeddings place a relevant pair around 0.6-0.9, while the
+// hash fallback compresses everything into roughly 0.15-0.4 — with the default
+// 0.3, a genuinely relevant Chinese document (measured at 0.168) is discarded
+// while an unrelated one can slip through. 0 restores the default.
+func (s *Service) SetVectorMinScore(score float64) {
+	if score < 0 {
+		score = 0
+	}
+	s.vectorMinScore = score
+}
+
+// MinVectorScore reports the effective cut-off, so callers can log it.
+func (s *Service) MinVectorScore() float64 {
+	if s.vectorMinScore <= 0 {
+		return minVectorRelevance
+	}
+	return s.vectorMinScore
+}
+
 // scoredEntry pairs a memory entry with its retrieval score.
 type scoredEntry struct {
 	entry MemoryEntry
 	score float64
+}
+
+// DefaultDocumentBudgetTokens is the token budget for the document section of the
+// injected context. It is separate from the memory budget so documents and
+// memories cannot crowd each other out; 0 disables document retrieval.
+const DefaultDocumentBudgetTokens = 800
+
+// ensureVectorIndex rebuilds the in-process vector index for a user from the KV
+// store the first time it is needed.
+//
+// Both vector backends live in process memory, so without this a restart would
+// silently drop semantic recall for documents and episodes even though their text
+// is still stored: the KV entries survive, their vectors do not. Rebuilding is
+// per user and lazy, so startup pays nothing and idle users are never indexed.
+func (s *Service) ensureVectorIndex(ctx context.Context, userID string) {
+	s.indexMu.Lock()
+	if s.indexedUsers[userID] {
+		s.indexMu.Unlock()
+		return
+	}
+	// Marked before the work so concurrent callers do not all rebuild at once.
+	s.indexedUsers[userID] = true
+	s.indexMu.Unlock()
+
+	if s.vectorStore == nil && s.docStore == nil {
+		return
+	}
+	entries, err := s.store.List(ctx, userID)
+	if err != nil {
+		// Leave the flag set: a failing store would fail again immediately, and
+		// retrieval still works without the vector half.
+		return
+	}
+
+	names := make(map[string]string)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Key, documentKeyPrefix) {
+			continue
+		}
+		var doc Document
+		if json.Unmarshal([]byte(e.Value), &doc) == nil {
+			names[doc.ID] = doc.Name
+		}
+	}
+
+	for _, e := range entries {
+		switch {
+		case strings.HasPrefix(e.Key, chunkKeyPrefix):
+			if s.docStore == nil {
+				continue
+			}
+			docID, index, ok := parseChunkKey(e.Key)
+			if !ok {
+				continue
+			}
+			_ = s.docStore.StoreWithID(ctx, userID, chunkVectorID(docID, index), e.Value, map[string]any{
+				"type":        "document",
+				"document_id": docID,
+				"name":        names[docID],
+				"chunk":       index + 1,
+			})
+		case e.Type == MemoryTypeEpisode && s.vectorStore != nil:
+			_ = s.vectorStore.StoreWithID(ctx, userID, e.Key, e.Value, map[string]any{
+				"timestamp": e.UpdatedAt,
+				"type":      string(MemoryTypeEpisode),
+				"key":       e.Key,
+			})
+		}
+	}
+}
+
+// retrieveDocuments returns the document section of the injected context, with a
+// citation number per chunk so the model can name its source.
+func (s *Service) retrieveDocuments(ctx context.Context, userID, query string, budgetTokens int) string {
+	if s.docStore == nil || budgetTokens <= 0 || strings.TrimSpace(query) == "" {
+		return ""
+	}
+	results, err := s.docStore.Query(ctx, userID, query, retrievalVectorTopK)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+
+	const header = "【文档片段】\n"
+	used := estimateTokens(header)
+	var lines []string
+	for _, r := range results {
+		if float64(r.Score) < s.MinVectorScore() {
+			continue
+		}
+		name, _ := r.Metadata["name"].(string)
+		if name == "" {
+			name = "未命名文档"
+		}
+		line := fmt.Sprintf("[%d] %s · 片段 %v：%s", len(lines)+1, name, r.Metadata["chunk"], r.Content)
+		cost := estimateTokens(line)
+		if used+cost > budgetTokens {
+			continue
+		}
+		used += cost
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return header + strings.Join(lines, "\n")
 }
 
 // RetrieveRelevant is the single memory-injection entry point. It scores the
@@ -55,6 +192,9 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	if budgetTokens <= 0 {
 		budgetTokens = s.budgetTokens
 	}
+	// The vector index is in-process, so a restart leaves the stored text without
+	// its vectors; rebuild once per user before the first query.
+	s.ensureVectorIndex(ctx, userID)
 
 	entries, err := s.store.List(ctx, userID)
 	if err != nil {
@@ -126,6 +266,12 @@ func (s *Service) RetrieveRelevant(ctx context.Context, userID, query string, bu
 	}
 	if len(otherLines) > 0 {
 		parts = append(parts, "相关历史记忆：\n"+strings.Join(otherLines, "\n"))
+	}
+	// Documents come last and on their own budget: they answer "what does the
+	// material say", which is a different question from "what do I know about
+	// this user", and neither should displace the other.
+	if docText := s.retrieveDocuments(ctx, userID, query, s.documentBudgetTokens); docText != "" {
+		parts = append(parts, docText)
 	}
 	return strings.Join(parts, "\n\n")
 }

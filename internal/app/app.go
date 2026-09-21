@@ -139,42 +139,23 @@ func NewApp(cfg *Config) *App {
 	if err != nil {
 		panic(fmt.Errorf("initialize memory store: %w", err))
 	}
-	var vectorStore memory.VectorStore
-	switch cfg.EmbeddingProvider {
-	case "openai":
-		embedModel := cfg.EmbeddingModel
-		if embedModel == "" {
-			embedModel = "text-embedding-3-small"
-		}
-		baseURL := cfg.OpenAIBaseURL
-		apiKey := cfg.OpenAIAPIKey
-		vs, err := memory.NewChromemVectorStoreWithOpenAI(embedModel, baseURL, apiKey)
-		if err != nil {
-			log.Printf("Warning: Failed to create OpenAI vector store: %v, falling back to hash-based", err)
-			vectorStore = memory.NewInMemoryVectorStore()
-		} else {
-			vectorStore = vs
-			log.Printf("Using ChromemVectorStore with OpenAI embeddings (model=%s)", embedModel)
-		}
-	case "ollama":
-		embedModel := cfg.EmbeddingModel
-		if embedModel == "" {
-			embedModel = "nomic-embed-text"
-		}
-		vs, err := memory.NewChromemVectorStoreWithOllama(embedModel)
-		if err != nil {
-			log.Printf("Warning: Failed to create Ollama vector store: %v, falling back to hash-based", err)
-			vectorStore = memory.NewInMemoryVectorStore()
-		} else {
-			vectorStore = vs
-			log.Printf("Using ChromemVectorStore with Ollama embeddings (model=%s)", embedModel)
-		}
-	default:
-		vectorStore = memory.NewInMemoryVectorStore()
-		log.Printf("Using InMemoryVectorStore (hash-based pseudo-embeddings)")
-	}
+	// Two independent indexes: memories and document chunks. Sharing one per-user
+	// collection would rank them against each other and let either crowd the other
+	// out of the top-K.
+	vectorStore := newVectorStore(cfg, "memory")
+	docVectorStore := newVectorStore(cfg, "documents")
 	memorySvc := memory.NewService(memoryStore, checkpointStore, vectorStore, chatModel)
 	memorySvc.SetRetrievalConfig(cfg.MemoryBudgetTokens, cfg.MemoryConsolidateThreshold)
+	memorySvc.SetDocumentBudgetTokens(cfg.DocumentBudgetTokens)
+	memorySvc.SetDocumentStore(docVectorStore)
+	// The relevance cut-off only means something relative to the embedder's score
+	// scale, so an unset VECTOR_MIN_SCORE follows the provider.
+	if cfg.VectorMinScore > 0 {
+		memorySvc.SetVectorMinScore(cfg.VectorMinScore)
+	} else if cfg.EmbeddingProvider == "hash" || cfg.EmbeddingProvider == "" {
+		memorySvc.SetVectorMinScore(hashEmbeddingMinScore)
+	}
+	log.Printf("Vector relevance cut-off: %.2f (embedding provider %q)", memorySvc.MinVectorScore(), cfg.EmbeddingProvider)
 
 	// 6. Context management
 	tokenCounter := contextmgr.NewSimpleTokenCounter()
@@ -500,6 +481,46 @@ func newCheckpointStore(cfg *Config, pg *pgstore.Backend) (memory.CheckpointStor
 }
 
 // newMemoryStore builds the MemoryStore backend selected by MEMORY_STORE.
+// hashEmbeddingMinScore is the relevance cut-off for the hash-based fallback.
+// Its cosine scores are compressed into roughly 0.15-0.4, so the 0.3 used for
+// real embeddings would discard genuinely relevant matches — a correct Chinese
+// document scores about 0.17 against its own topic.
+const hashEmbeddingMinScore = 0.1
+
+// newVectorStore builds one embedding-backed index. The label only distinguishes
+// the two indexes in logs (memories vs document chunks).
+func newVectorStore(cfg *Config, label string) memory.VectorStore {
+	switch cfg.EmbeddingProvider {
+	case "openai":
+		embedModel := cfg.EmbeddingModel
+		if embedModel == "" {
+			embedModel = "text-embedding-3-small"
+		}
+		vs, err := memory.NewChromemVectorStoreWithOpenAI(embedModel, cfg.OpenAIBaseURL, cfg.OpenAIAPIKey)
+		if err != nil {
+			log.Printf("Warning: Failed to create OpenAI vector store for %s: %v, falling back to hash-based", label, err)
+			return memory.NewInMemoryVectorStore()
+		}
+		log.Printf("Using ChromemVectorStore with OpenAI embeddings for %s (model=%s)", label, embedModel)
+		return vs
+	case "ollama":
+		embedModel := cfg.EmbeddingModel
+		if embedModel == "" {
+			embedModel = "nomic-embed-text"
+		}
+		vs, err := memory.NewChromemVectorStoreWithOllama(embedModel)
+		if err != nil {
+			log.Printf("Warning: Failed to create Ollama vector store for %s: %v, falling back to hash-based", label, err)
+			return memory.NewInMemoryVectorStore()
+		}
+		log.Printf("Using ChromemVectorStore with Ollama embeddings for %s (model=%s)", label, embedModel)
+		return vs
+	default:
+		log.Printf("Using InMemoryVectorStore (hash-based pseudo-embeddings) for %s", label)
+		return memory.NewInMemoryVectorStore()
+	}
+}
+
 func newMemoryStore(cfg *Config, pg *pgstore.Backend) (memory.MemoryStore, error) {
 	switch cfg.MemoryStoreKind {
 	case "file":

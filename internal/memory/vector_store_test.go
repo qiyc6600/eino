@@ -105,7 +105,7 @@ func TestFormatVectorResultsWithin(t *testing.T) {
 	}
 
 	t.Run("no cap keeps everything", func(t *testing.T) {
-		got := FormatVectorResultsWithin(results, 0)
+		got := FormatVectorResultsWithin(results, 0, 0)
 		if !containsStr(got, "Python") || !containsStr(got, "北京") {
 			t.Fatalf("uncapped formatting dropped entries: %q", got)
 		}
@@ -114,7 +114,7 @@ func TestFormatVectorResultsWithin(t *testing.T) {
 	t.Run("an oversized entry does not consume the whole budget", func(t *testing.T) {
 		// The first entry alone blows the cap, so it is skipped in favour of the
 		// shorter, slightly less relevant ones that still fit.
-		got := FormatVectorResultsWithin(results, 40)
+		got := FormatVectorResultsWithin(results, 40, 0)
 		if containsStr(got, long) {
 			t.Fatalf("the oversized entry should have been skipped: %q", got)
 		}
@@ -124,7 +124,7 @@ func TestFormatVectorResultsWithin(t *testing.T) {
 	})
 
 	t.Run("entries are dropped whole, never cut in half", func(t *testing.T) {
-		got := FormatVectorResultsWithin(results, 25)
+		got := FormatVectorResultsWithin(results, 25, 0)
 		// Whatever survives must be a complete line: every content piece that
 		// appears in the output must appear in full.
 		if containsStr(got, long[:len(long)/2]) && !containsStr(got, long) {
