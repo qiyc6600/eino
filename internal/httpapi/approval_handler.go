@@ -20,6 +20,33 @@ func NewApprovalHandler(hitlSvc *hitl.Service, runner *agent.Runner) *ApprovalHa
 	return &ApprovalHandler{hitlSvc: hitlSvc, runner: runner}
 }
 
+// approvalView is an ApprovalRequest plus the display label for whatever it
+// interrupts.
+//
+// The embedded struct's fields marshal inline (it carries no JSON tags, so the
+// wire format is unchanged), and Label is added alongside them. Resolving the
+// label here rather than in the page means one table of names: the page cannot
+// label the same tool differently from the chat progress line, and it does not
+// need to know that a node interrupt is called "plan_review" internally.
+type approvalView struct {
+	*hitl.ApprovalRequest
+	Label string
+}
+
+func toApprovalViews(reqs []*hitl.ApprovalRequest) []approvalView {
+	views := make([]approvalView, 0, len(reqs))
+	for _, req := range reqs {
+		// State and Result are large and irrelevant to a list row.
+		req.State = nil
+		req.Result = nil
+		views = append(views, approvalView{
+			ApprovalRequest: req,
+			Label:           agent.DisplayLabelFor(agent.InterruptTargetName(req.ToolName, req.NodeName)),
+		})
+	}
+	return views
+}
+
 // ListApprovals handles GET /api/approvals
 func (h *ApprovalHandler) ListApprovals(w http.ResponseWriter, r *http.Request) {
 	ac := auth.FromContext(r.Context())
@@ -29,11 +56,7 @@ func (h *ApprovalHandler) ListApprovals(w http.ResponseWriter, r *http.Request) 
 	}
 
 	pending := h.hitlSvc.ListPending(r.Context(), ac.UserID)
-	for _, req := range pending {
-		req.State = nil
-		req.Result = nil
-	}
-	writeJSON(w, http.StatusOK, pending)
+	writeJSON(w, http.StatusOK, toApprovalViews(pending))
 }
 
 // ListHistory handles GET /api/approvals/history.
@@ -54,13 +77,7 @@ func (h *ApprovalHandler) ListHistory(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// State and Result are large and irrelevant to a history row; drop them the
-	// same way the pending list does.
-	for _, r := range decided {
-		r.State = nil
-		r.Result = nil
-	}
-	writeJSON(w, http.StatusOK, decided)
+	writeJSON(w, http.StatusOK, toApprovalViews(decided))
 }
 
 // approvalHistoryLimit bounds the history: it is a record of recent activity, not
@@ -87,7 +104,7 @@ func (h *ApprovalHandler) GetApproval(w http.ResponseWriter, r *http.Request) {
 
 	req.State = nil
 	req.Result = nil
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, toApprovalViews([]*hitl.ApprovalRequest{req})[0])
 }
 
 // DecisionRequest is the request body for POST /api/approvals/{interruptId}/decision

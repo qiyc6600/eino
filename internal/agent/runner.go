@@ -73,7 +73,9 @@ func (u *UsageInfo) recordUsage(usage *schema.TokenUsage) {
 
 // InterruptPlanStep is one planned action shown on node-level approval cards.
 type InterruptPlanStep struct {
-	Name      string `json:"name"`
+	Name string `json:"name"`
+	// Label is the display name for Name; the card shows this one.
+	Label     string `json:"label,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 }
 
@@ -82,9 +84,13 @@ type Interrupt struct {
 	InterruptID string `json:"interrupt_id"`
 	ToolName    string `json:"tool_name,omitempty"`
 	NodeName    string `json:"node_name,omitempty"`
-	Arguments   string `json:"arguments,omitempty"`
-	Message     string `json:"message"`
-	Type        string `json:"type"`
+	// Label is what the approval card shows: ToolName is a routing key and
+	// NodeName is an internal node identifier ("plan_review"), neither of which
+	// belongs in front of a person. Resolved here so the page needs no table.
+	Label     string `json:"label,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Message   string `json:"message"`
+	Type      string `json:"type"`
 	// Plan carries the structured planned steps for node-level (plan review)
 	// interrupts, so the UI can render them without parsing message text.
 	Plan []InterruptPlanStep `json:"plan,omitempty"`
@@ -693,7 +699,7 @@ func (r *Runner) compressMessages(ctx context.Context, messages []*schema.Messag
 
 	// Record the compression event
 	if recorder != nil {
-		recorder.Record(EventSummaryCompress, fmt.Sprintf("Context compressed: %d -> %d messages, %d -> %d tokens", len(ctxMsgs), len(compressed), currentTokens, compressedTokens), map[string]any{
+		recorder.Record(EventSummaryCompress, fmt.Sprintf("上下文压缩：%d → %d 条消息，%d → %d token", len(ctxMsgs), len(compressed), currentTokens, compressedTokens), map[string]any{
 			"before":        len(ctxMsgs),
 			"after":         len(compressed),
 			"tokens_before": currentTokens,
@@ -820,38 +826,22 @@ func (r *Runner) buildSystemPrompt(roles []string) string {
 // The supervisor LLM sees sub-agent names (not real tools) and routes user
 // requests to the appropriate sub-agent.
 func (r *Runner) buildSupervisorPrompt(roles []string) string {
-	// Build sub-agent descriptions filtered by RBAC
-	type agentInfo struct {
-		name string
-		desc string
-	}
-
-	allAgents := map[string]agentInfo{
-		"math_agent":    {name: "math_agent", desc: "数学计算助手。处理计算、算术运算、数学问题。内部工具：calculator。"},
-		"search_agent":  {name: "search_agent", desc: "信息搜索助手。处理天气查询、日志搜索、信息查找。内部工具：weather（天气查询）、grep（日志搜索）。"},
-		"general_agent": {name: "general_agent", desc: "通用业务助手。处理订单查询、删除订单（需审批）、发送邮件（需审批）。内部工具：query_order、delete_order、send_email。"},
-	}
-
-	// Map sub-agents to the tools they contain, so we can filter by RBAC
-	agentToolDeps := map[string][]string{
-		"math_agent":    {"calculator"},
-		"search_agent":  {"weather", "grep"},
-		"general_agent": {"query_order", "delete_order", "send_email"},
-	}
-
+	// The sub-agent table is the same one the supervisor is built from
+	// (subagents.go). This function used to carry its own copy of the names,
+	// descriptions and tool lists, which had drifted from the real definitions.
 	var agentLines []string
-	for agentName, info := range allAgents {
-		// Check if the user has permission for at least one tool in this agent
-		deps := agentToolDeps[agentName]
+	for _, spec := range BuiltinSubAgents() {
+		// A role can only reach a sub-agent if it can invoke at least one of the
+		// tools that sub-agent owns.
 		hasAccess := false
-		for _, toolName := range deps {
+		for _, toolName := range spec.ToolNames {
 			if r.rbac != nil && r.rbac.CanInvokeTool(nil, roles, toolName) {
 				hasAccess = true
 				break
 			}
 		}
 		if hasAccess {
-			agentLines = append(agentLines, fmt.Sprintf("  - %s：%s", agentName, info.desc))
+			agentLines = append(agentLines, fmt.Sprintf("  - %s：%s", spec.Name, spec.Description))
 		}
 	}
 

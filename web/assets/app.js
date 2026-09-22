@@ -381,7 +381,10 @@ function isPreformatted(text) {
 function renderApprovalCardMessage(m) {
     const isPlan = !m.toolName;
     const kind = isPlan ? '执行计划' : '工具调用';
-    const title = isPlan ? 'Agent 执行计划' : m.toolName;
+    // The label is resolved server-side; the internal name stays as a tooltip so
+    // the demo can still show which tool a role was granted.
+    const title = isPlan ? 'Agent 执行计划' : (m.toolLabel || m.toolName);
+    const titleAttr = !isPlan && m.toolLabel && m.toolLabel !== m.toolName ? ` title="${escapeHtml(m.toolName)}"` : '';
     const stateBadges = {
         pending: '<span class="ac-state pending"><i></i>待审批</span>',
         approved: '<span class="ac-state approved"><i></i>已批准</span>',
@@ -394,7 +397,7 @@ function renderApprovalCardMessage(m) {
     if (Array.isArray(m.plan) && m.plan.length) {
         for (const s of m.plan) steps.push(s);
     } else if (m.toolName) {
-        steps.push({ name: m.toolName, arguments: m.args });
+        steps.push({ name: m.toolName, label: m.toolLabel, arguments: m.args });
     }
 
     let html = `
@@ -402,7 +405,7 @@ function renderApprovalCardMessage(m) {
             <div class="ac-header">
                 <span class="ac-icon">${isPlan ? '🗺️' : '🔧'}</span>
                 <div class="ac-titles">
-                    <div class="ac-title">${escapeHtml(title)}</div>
+                    <div class="ac-title"${titleAttr}>${escapeHtml(title)}</div>
                     <div class="ac-kind">${kind} · 需要人工审批</div>
                 </div>
                 ${stateBadges[m.status] || ''}
@@ -410,7 +413,7 @@ function renderApprovalCardMessage(m) {
     if (steps.length) {
         html += `<div class="ac-plan">${steps.map(s => `
             <div class="ac-step">
-                <span class="ac-step-name">${escapeHtml(s.name)}</span>
+                <span class="ac-step-name">${escapeHtml(s.label || s.name)}</span>
                 ${s.arguments ? `<code class="ac-step-args">${escapeHtml(s.arguments)}</code>` : ''}
             </div>`).join('')}</div>`;
     }
@@ -453,7 +456,7 @@ function syncThreadApprovalCards() {
             msgs.push({
                 role: 'approval-card', status: 'pending',
                 interruptId: a.InterruptID,
-                toolName: a.ToolName, nodeName: a.NodeName,
+                toolName: a.ToolName, nodeName: a.NodeName, toolLabel: a.Label,
                 riskLevel: a.RiskLevel, message: a.Message, args: a.Arguments,
                 plan: Array.isArray(a.Payload?.plan) ? a.Payload.plan : undefined,
             });
@@ -554,6 +557,7 @@ async function sendMessage() {
                     interruptId: data.interrupt.interrupt_id,
                     toolName: data.interrupt.tool_name,
                     nodeName: data.interrupt.node_name,
+                    toolLabel: data.interrupt.label,
                     message: data.interrupt.message,
                     args: data.interrupt.arguments,
                     plan: data.interrupt.plan,
@@ -621,7 +625,9 @@ function setStreamProgress(text) {
 }
 
 function progressTextForToolFrame(data) {
-    const tool = data.tool || '工具';
+    // label is what a person reads; tool is the internal name, kept because the
+    // progress line's identity (and the demo scripts' assertions) key off it.
+    const tool = data.label || data.tool || '工具';
     switch (data.phase) {
         case 'route': return `🔀 路由到 ${tool}`;
         case 'start': return `🔧 正在调用 ${tool}…`;
@@ -720,6 +726,7 @@ async function chatStream(threadId, message) {
                                         interruptId: interruptInfo.interrupt_id,
                                         toolName: interruptInfo.tool_name,
                                         nodeName: interruptInfo.node_name,
+                                        toolLabel: interruptInfo.label,
                                         message: interruptInfo.message,
                                         args: interruptInfo.arguments,
                                         plan: interruptInfo.plan,
@@ -854,7 +861,7 @@ function renderApprovalHistory() {
         const reason = a.Decision && a.Decision.reason ? ` · ${escapeHtml(a.Decision.reason)}` : '';
         const when = a.DecidedAt ? new Date(a.DecidedAt).toLocaleString() : '';
         return `<div class="history-item ${cls}">
-            <span class="history-tool">${escapeHtml(a.ToolName || a.NodeName || '计划审批')}</span>
+            <span class="history-tool">${escapeHtml(a.Label || a.ToolName || a.NodeName || '计划审批')}</span>
             <span class="history-state">${label}</span>
             <span class="history-when">${when}${reason}</span>
         </div>`;
@@ -1036,6 +1043,7 @@ async function decideApproval(interruptId, approved) {
             interruptId: interrupted.interrupt_id,
             toolName: interrupted.tool_name,
             nodeName: interrupted.node_name,
+            toolLabel: interrupted.label,
             message: interrupted.message,
             args: interrupted.arguments,
             plan: interrupted.plan,
@@ -1064,8 +1072,14 @@ function renderTools(tools) {
     listDiv.innerHTML = tools.map(t => {
         const available = allowedTools.includes(t.name);
         const riskClass = t.risk_level || 'low';
+        // display_name is resolved server-side (the page has no table, and could
+        // not have one for MCP tools discovered at runtime). The internal name
+        // stays reachable as a tooltip: it is what the ACL and the API use, and
+        // the demo is partly about which of these a role was granted.
+        const label = t.display_name || t.name;
+        const titleAttr = label !== t.name ? ` title="${escapeHtml(t.name)}"` : '';
         return `<div class="tool-item ${available ? 'available' : 'unavailable'}">
-            <span>${available ? '✅' : '🚫'} ${t.name}</span>
+            <span${titleAttr}>${available ? '✅' : '🚫'} ${escapeHtml(label)}</span>
             <span class="tool-risk ${riskClass}">${t.risk_level}</span>
         </div>`;
     }).join('');

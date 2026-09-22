@@ -212,17 +212,23 @@ func sseFrameForEvent(event agent.Event) (string, map[string]any, bool) {
 		target = event.AgentName
 	}
 
+	// label is what the chat shows; tool stays the internal name because the
+	// frontend keys its own state (and the ACL/routing story) off it. Resolving
+	// it here rather than in the page keeps one table of labels, and means MCP
+	// tools — discovered at runtime, so unmappable in the page — are covered.
+	label := agent.DisplayLabelFor(target)
+
 	switch event.Type {
 	case agent.EventSupervisorRoute:
-		return "tool_call", map[string]any{"phase": "route", "tool": target, "detail": event.Detail}, true
+		return "tool_call", map[string]any{"phase": "route", "tool": target, "label": label, "detail": event.Detail}, true
 	case agent.EventToolCallStart:
-		return "tool_call", map[string]any{"phase": "start", "tool": target, "detail": event.Detail}, true
+		return "tool_call", map[string]any{"phase": "start", "tool": target, "label": label, "detail": event.Detail}, true
 	case agent.EventToolCallEnd:
-		return "tool_call", map[string]any{"phase": "end", "tool": target, "detail": event.Detail, "result": event.Metadata["result"]}, true
+		return "tool_call", map[string]any{"phase": "end", "tool": target, "label": label, "detail": event.Detail, "result": event.Metadata["result"]}, true
 	case agent.EventACLDenied:
-		return "tool_call", map[string]any{"phase": "denied", "tool": target, "detail": event.Detail}, true
+		return "tool_call", map[string]any{"phase": "denied", "tool": target, "label": label, "detail": event.Detail}, true
 	case agent.EventHITLInterrupt:
-		return "tool_call", map[string]any{"phase": "approval", "tool": target, "detail": event.Detail}, true
+		return "tool_call", map[string]any{"phase": "approval", "tool": target, "label": label, "detail": event.Detail}, true
 	}
 	return "", nil, false
 }

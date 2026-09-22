@@ -361,6 +361,7 @@ func prepareInterrupt(ac *auth.AuthContext, state *SteppedRunState, in *Interrup
 	}
 	result := ChatRunResult{RunID: state.RunID, Status: StatusInterrupted, Interrupt: &Interrupt{
 		InterruptID: req.InterruptID, Type: string(in.Type), ToolName: in.ToolName, NodeName: in.NodeName, Arguments: in.Arguments, Message: in.Message, Plan: in.Plan,
+		Label: DisplayLabelFor(InterruptTargetName(in.ToolName, in.NodeName)),
 	}}
 	return result, &InterruptPublication{
 		Checkpoint: memory.Checkpoint{

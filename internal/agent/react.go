@@ -68,20 +68,20 @@ func (a *ReactAgent) Run(ctx context.Context, messages []*schema.Message, record
 		recorder = NewEventRecorder("unknown")
 	}
 
-	recorder.Record(EventAgentStart, fmt.Sprintf("Agent %s started", a.config.Name), map[string]any{
+	recorder.Record(EventAgentStart, fmt.Sprintf("%s 开始处理", DisplayLabelFor(a.config.Name)), map[string]any{
 		"agent": a.config.Name, "max_iterations": a.config.MaxIterations,
 	})
 
 	result, err := a.agent.Generate(ctx, messages)
 	if err != nil {
-		recorder.Record(EventAgentEnd, fmt.Sprintf("Agent %s error: %v", a.config.Name, err), nil)
+		recorder.Record(EventAgentEnd, fmt.Sprintf("%s 出错：%v", DisplayLabelFor(a.config.Name), err), nil)
 		return RunResult{
 			Answer: fmt.Sprintf("Agent 执行出错：%v", err),
 			Events: recorder.Events(),
 		}
 	}
 
-	recorder.Record(EventAgentEnd, fmt.Sprintf("Agent %s finished: %s", a.config.Name, result.Content), nil)
+	recorder.Record(EventAgentEnd, fmt.Sprintf("%s 处理完成", DisplayLabelFor(a.config.Name)), nil)
 	return RunResult{
 		Answer: result.Content,
 		Events: recorder.Events(),

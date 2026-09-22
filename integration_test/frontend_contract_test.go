@@ -82,7 +82,46 @@ func TestIntegration_FrontendContract(t *testing.T) {
 		if len(tools) == 0 {
 			t.Fatal("no tools registered")
 		}
-		assertKeys(t, appJS, "GET /api/tools[]", tools[0], "name", "risk_level")
+		assertKeys(t, appJS, "GET /api/tools[]", tools[0], "name", "risk_level", "display_name")
+		// The panel shows display_name; a tool whose label is missing or equal to
+		// the internal name puts "calculator" back on screen.
+		for _, tool := range tools {
+			name, _ := tool["name"].(string)
+			label, _ := tool["display_name"].(string)
+			if label == "" {
+				t.Errorf("tool %q has no display_name", name)
+			}
+			if label == name {
+				t.Errorf("tool %q is labelled with its internal name", name)
+			}
+		}
+	})
+
+	t.Run("tool label on the progress frame", func(t *testing.T) {
+		// The chat progress line renders label, not the routing key. Driven
+		// through a real stream so the assertion covers what the server sends.
+		frames := streamChat(t, server.URL, sessionID, "1+4")
+		var sawToolFrame bool
+		for _, frame := range frames {
+			if frame.event != "tool_call" {
+				continue
+			}
+			sawToolFrame = true
+			label, _ := frame.data["label"].(string)
+			tool, _ := frame.data["tool"].(string)
+			if label == "" {
+				t.Errorf("tool_call frame for %q carries no label; the chat would show the internal name", tool)
+			}
+			if label == tool {
+				t.Errorf("tool_call frame labels %q with its internal name", tool)
+			}
+		}
+		if !sawToolFrame {
+			t.Fatal("no tool_call frames in the stream; this test would pass vacuously")
+		}
+		if !strings.Contains(appJS, "data.label") {
+			t.Error("the page no longer reads data.label; drop it from this test")
+		}
 	})
 
 	t.Run("memory and settings", func(t *testing.T) {

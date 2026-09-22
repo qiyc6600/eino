@@ -125,9 +125,9 @@ func (s *SupervisorAgent) Run(ctx context.Context, messages []*schema.Message, r
 
 	// Single agent mode — delegate directly
 	if agent, ok := s.agents["assistant"]; ok {
-		recorder.Record(EventAgentStart, "Single agent started", nil)
+		recorder.Record(EventAgentStart, "单 Agent 模式启动", nil)
 		result := agent.Run(ctx, messages, recorder)
-		recorder.Record(EventAgentEnd, fmt.Sprintf("Agent finished: %s", result.Answer), nil)
+		recorder.Record(EventAgentEnd, "处理完成", nil)
 		return SupervisorRunResult{
 			Answer:      result.Answer,
 			Interrupted: result.Interrupted,
@@ -159,11 +159,11 @@ func (s *SupervisorAgent) Stream(ctx context.Context, messages []*schema.Message
 
 // runSupervisor is the original Run logic for compiled supervisor mode.
 func (s *SupervisorAgent) runSupervisor(ctx context.Context, messages []*schema.Message, recorder *EventRecorder) SupervisorRunResult {
-	recorder.Record(EventAgentStart, "Supervisor started", nil)
+	recorder.Record(EventAgentStart, "调度模式启动", nil)
 
 	result, err := s.supAgent.Generate(ctx, messages)
 	if err != nil {
-		recorder.Record(EventAgentEnd, fmt.Sprintf("Supervisor error: %v", err), nil)
+		recorder.Record(EventAgentEnd, fmt.Sprintf("调度出错：%v", err), nil)
 		return SupervisorRunResult{
 			Answer: fmt.Sprintf("Supervisor 执行出错：%v", err),
 			Events: recorder.Events(),
@@ -175,10 +175,10 @@ func (s *SupervisorAgent) runSupervisor(ctx context.Context, messages []*schema.
 		routedAgent = result.ToolCalls[0].Function.Name
 	}
 
-	recorder.Record(EventSupervisorRoute, fmt.Sprintf("Routed to %s", routedAgent), map[string]any{
+	recorder.Record(EventSupervisorRoute, fmt.Sprintf("路由到 %s", DisplayLabelFor(routedAgent)), map[string]any{
 		"agent": routedAgent,
 	})
-	recorder.Record(EventAgentEnd, fmt.Sprintf("Supervisor finished: %s", result.Content), nil)
+	recorder.Record(EventAgentEnd, "调度完成", nil)
 
 	return SupervisorRunResult{
 		Answer:      result.Content,
@@ -296,38 +296,21 @@ func BuildSupervisorWithExtraAgent(ctx context.Context, chatModel model.ToolCall
 		return nil, err
 	}
 
-	agents := []ReactAgentConfig{
-		{
-			Name:          "math_agent",
-			Instruction:   "你是一个数学助手，擅长数学计算。请使用 calculator 工具来帮助用户完成计算。",
-			ToolNames:     []string{"calculator"},
-			MaxIterations: 10,
-		},
-		{
-			Name:          "search_agent",
-			Instruction:   "你是一个搜索助手，擅长查询天气和搜索日志信息。请使用 weather 和 grep 工具来帮助用户。",
-			ToolNames:     []string{"weather", "grep"},
-			MaxIterations: 10,
-		},
-		{
-			Name: "general_agent",
-			Instruction: "你是一个通用业务助手，负责处理订单查询、删除订单、发送邮件。可用工具：query_order（查询订单）、delete_order（删除订单）、send_email（发送邮件）。\n\n" +
-				"核心规则（必须严格遵守）：\n" +
-				"- 必须直接调用工具完成任务，禁止用文字要求用户确认。系统内置审批机制：delete_order、send_email 等高危操作在工具执行前会自动触发人工审批，无需你自行询问用户。\n" +
-				"- 当用户要求删除订单时，从用户消息中提取订单号（如 A-1001、B-2003），立即调用 delete_order 工具，参数为 {\"order_id\": \"<订单号>\"}。不要回复\"是否确认删除\"之类的话。\n" +
-				"- 当用户要求发送邮件时，提取收件人邮箱和内容，立即调用 send_email 工具。\n" +
-				"- 当用户要求查询订单时，调用 query_order 工具。\n" +
-				"- 调用工具后，根据工具返回结果用自然语言回复用户。",
-			ToolNames:     []string{"query_order", "delete_order", "send_email"},
-			MaxIterations: 10,
-		},
-	}
+	agents := make([]ReactAgentConfig, 0, len(BuiltinSubAgents())+1)
+	// Descriptions tell the supervisor LLM when to route. Both the agent configs
+	// and these descriptions come from the same table (subagents.go), so they
+	// cannot disagree — they used to live in two separate maps that had already
+	// drifted apart in wording.
+	agentDescriptions := map[string]string{}
 
-	// Detailed tool descriptions for the supervisor — tells the LLM exactly when to route
-	agentDescriptions := map[string]string{
-		"math_agent":    "数学计算助手。当用户需要计算、算术运算、数学问题时调用。可用工具：calculator。",
-		"search_agent":  "信息搜索助手。当用户需要查询天气、搜索日志、查找信息时调用。可用工具：weather（天气查询）、grep（日志搜索）。",
-		"general_agent": "通用业务助手。当用户需要查询订单、删除订单、发送邮件时调用。可用工具：query_order、delete_order（需审批）、send_email（需审批）。",
+	for _, spec := range BuiltinSubAgents() {
+		agents = append(agents, ReactAgentConfig{
+			Name:          spec.Name,
+			Instruction:   spec.Instruction,
+			ToolNames:     spec.ToolNames,
+			MaxIterations: 10,
+		})
+		agentDescriptions[spec.Name] = spec.Description
 	}
 
 	if extra != nil && len(extra.ToolNames) > 0 {

@@ -21,6 +21,7 @@ func (h *UserHandler) ListTools(w http.ResponseWriter, r *http.Request) {
 	toolList := h.registry.List()
 	type toolInfo struct {
 		Name             string `json:"name"`
+		DisplayName      string `json:"display_name"`
 		Description      string `json:"description"`
 		RiskLevel        string `json:"risk_level"`
 		RequiresApproval bool   `json:"requires_approval"`
@@ -30,7 +31,10 @@ func (h *UserHandler) ListTools(w http.ResponseWriter, r *http.Request) {
 	result := make([]toolInfo, 0, len(toolList))
 	for _, t := range toolList {
 		result = append(result, toolInfo{
-			Name:             t.Meta.Name,
+			Name: t.Meta.Name,
+			// Falls back to the internal name for tools with no label (external
+			// MCP tools), so the page never has to decide what to show.
+			DisplayName:      tools.DisplayLabel(t.Meta.Name),
 			Description:      t.Meta.Description,
 			RiskLevel:        string(t.Meta.RiskLevel),
 			RequiresApproval: t.Meta.RequiresApproval,
@@ -52,6 +56,7 @@ func (h *UserHandler) GetTool(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":              t.Meta.Name,
+		"display_name":      tools.DisplayLabel(t.Meta.Name),
 		"description":       t.Meta.Description,
 		"risk_level":        string(t.Meta.RiskLevel),
 		"requires_approval": t.Meta.RequiresApproval,

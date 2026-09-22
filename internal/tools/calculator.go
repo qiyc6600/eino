@@ -55,6 +55,11 @@ func executeCalculator(_ *auth.ToolIdentity, arguments string) ToolResult {
 // This is a basic implementation for demo purposes.
 func evalSimpleExpression(expr string) (float64, error) {
 	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		// Without this the failure fell through to the final parse and reported
+		// "unsupported expression: " — a message whose detail is empty.
+		return 0, fmt.Errorf("expression is empty")
+	}
 
 	// Handle multiplication and division first
 	parts := strings.Split(expr, "*")

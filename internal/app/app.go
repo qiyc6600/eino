@@ -91,12 +91,9 @@ func NewApp(cfg *Config) *App {
 	if err != nil {
 		panic(fmt.Errorf("initialize business stores: %w", err))
 	}
-	toolRegistry.Register(tools.NewCalculatorTool())
-	toolRegistry.Register(tools.NewWeatherTool())
-	toolRegistry.Register(tools.NewGrepTool())
-	toolRegistry.Register(tools.NewQueryOrderTool(orderStore))
-	toolRegistry.Register(tools.NewDeleteOrderTool(orderStore))
-	toolRegistry.Register(tools.NewSendEmailTool(emailStore))
+	for _, tool := range builtinTools(orderStore, emailStore) {
+		toolRegistry.Register(tool)
+	}
 
 	// External MCP tools are registered BEFORE the ACL wrapping below, which is
 	// what puts them under exactly the same interception as the built-in tools.
@@ -255,6 +252,23 @@ func (a *App) Close() error {
 		return a.Postgres.Close()
 	}
 	return nil
+}
+
+// builtinTools is the compiled-in tool set, in one list.
+//
+// It is a function rather than six statements inline so the label-coverage test
+// can walk exactly what the app registers: a seventh built-in added here without
+// a display label fails that test instead of reaching the UI as a bare internal
+// name.
+func builtinTools(orderStore tools.OrderRepository, emailStore tools.EmailRepository) []tools.RegisteredTool {
+	return []tools.RegisteredTool{
+		tools.NewCalculatorTool(),
+		tools.NewWeatherTool(),
+		tools.NewGrepTool(),
+		tools.NewQueryOrderTool(orderStore),
+		tools.NewDeleteOrderTool(orderStore),
+		tools.NewSendEmailTool(emailStore),
+	}
 }
 
 // mcpSubAgent describes the sub-agent that owns the external MCP tools, or nil

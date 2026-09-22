@@ -333,7 +333,11 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 		// by the UI — never dumped into the message text).
 		var plan []InterruptPlanStep
 		for _, tc := range resp.ToolCalls {
-			plan = append(plan, InterruptPlanStep{Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+			plan = append(plan, InterruptPlanStep{
+				Name:      tc.Function.Name,
+				Label:     DisplayLabelFor(tc.Function.Name),
+				Arguments: tc.Function.Arguments,
+			})
 		}
 
 		interruptMsg := "Agent 已生成执行计划，等待确认后继续执行"
@@ -352,7 +356,7 @@ func (r *SteppedRunner) RunStep(ctx context.Context, state *SteppedRunState, rec
 
 		// Save state to checkpoint so Resume can restore it
 		if recorder != nil {
-			recorder.Record(EventHITLInterrupt, fmt.Sprintf("Plan review requested at %s", "plan_review"), map[string]any{
+			recorder.Record(EventHITLInterrupt, "已生成执行计划，等待人工确认", map[string]any{
 				"node":         "plan_review",
 				"tool_calls":   len(resp.ToolCalls),
 				"interrupt_id": interruptReq.InterruptID,
@@ -425,7 +429,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 					}
 					state.appendMessage(toolMsg)
 					if recorder != nil {
-						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied sub-agent %s", tc.Name), map[string]any{
+						recorder.Record(EventACLDenied, fmt.Sprintf("权限拦截：无权调用 %s", DisplayLabelFor(tc.Name)), map[string]any{
 							"agent":  tc.Name,
 							"denied": true,
 						})
@@ -445,7 +449,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 					}
 					state.appendMessage(toolMsg)
 					if recorder != nil {
-						recorder.Record(EventACLDenied, fmt.Sprintf("ACL denied tool %s", toolName), map[string]any{
+						recorder.Record(EventACLDenied, fmt.Sprintf("权限拦截：无权调用 %s", DisplayLabelFor(toolName)), map[string]any{
 							"tool":   toolName,
 							"denied": true,
 						})
@@ -464,7 +468,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		// Real tool dispatch: check HITL gate
 		if entry.RequiresApproval {
 			if recorder != nil {
-				recorder.Record(EventHITLInterrupt, fmt.Sprintf("Tool %s requires approval", tc.Name), map[string]any{
+				recorder.Record(EventHITLInterrupt, fmt.Sprintf("%s 需要人工审批", DisplayLabelFor(tc.Name)), map[string]any{
 					"tool":   tc.Name,
 					"reason": "high_risk_tool",
 				})
@@ -475,7 +479,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 				Type:        hitl.InterruptTypeTool,
 				ToolName:    tc.Name,
 				Arguments:   tc.Arguments,
-				Message:     fmt.Sprintf("高危工具 %s 需要审批", tc.Name),
+				Message:     fmt.Sprintf("高危操作「%s」需要人工审批", DisplayLabelFor(tc.Name)),
 				RunID:       state.RunID,
 				ThreadID:    state.ThreadID,
 			}, nil
@@ -483,7 +487,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 
 		// Execute the real tool directly
 		if recorder != nil {
-			recorder.Record(EventToolCallStart, fmt.Sprintf("Calling tool %s", tc.Name), map[string]any{
+			recorder.Record(EventToolCallStart, fmt.Sprintf("正在调用 %s", DisplayLabelFor(tc.Name)), map[string]any{
 				"tool": tc.Name,
 				"step": state.Step,
 			})
@@ -505,7 +509,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 		state.appendMessage(toolMsg)
 
 		if recorder != nil {
-			recorder.Record(EventToolCallEnd, fmt.Sprintf("Tool %s executed", tc.Name), map[string]any{
+			recorder.Record(EventToolCallEnd, fmt.Sprintf("%s 执行完成", DisplayLabelFor(tc.Name)), map[string]any{
 				"tool":   tc.Name,
 				"step":   state.Step,
 				"result": truncate(toolResult, 200),
@@ -523,7 +527,7 @@ func (r *SteppedRunner) executePendingTools(ctx context.Context, state *SteppedR
 // the interrupt is propagated up rather than swallowed as an error.
 func (r *SteppedRunner) executeSubAgentTool(ctx context.Context, state *SteppedRunState, tc ToolCallInfo, entry *DispatchEntry, recorder *EventRecorder) (*SteppedRunState, *InterruptRequest, error) {
 	if recorder != nil {
-		recorder.Record(EventSupervisorRoute, "Routing to sub-agent "+tc.Name, map[string]any{"agent": tc.Name})
+		recorder.Record(EventSupervisorRoute, "路由到 "+DisplayLabelFor(tc.Name), map[string]any{"agent": tc.Name})
 	}
 	childRunner := entry.AgentWrapper.steppedRunner
 	if childRunner == nil {
@@ -599,7 +603,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 	if interrupt.Type == hitl.InterruptTypeNode {
 		if !approved {
 			for _, tc := range state.PendingToolCalls {
-				state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: "用户拒绝执行计划：" + reason})
+				state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: "用户拒绝执行计划" + conditionalReason(reason)})
 			}
 			state.PendingToolCalls = nil
 		}
@@ -619,10 +623,10 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 		if tc.ID != interrupt.ToolCallID || tc.Name != interrupt.ToolName || tc.Arguments != interrupt.Arguments {
 			continue
 		}
-		content := "用户拒绝执行该操作：" + reason
+		content := "用户拒绝执行该操作" + conditionalReason(reason)
 		if approved {
 			if recorder != nil {
-				recorder.Record(EventToolCallStart, fmt.Sprintf("Calling approved tool %s", tc.Name), map[string]any{
+				recorder.Record(EventToolCallStart, fmt.Sprintf("审批通过，正在调用 %s", DisplayLabelFor(tc.Name)), map[string]any{
 					"tool":     tc.Name,
 					"step":     state.Step,
 					"approved": true,
@@ -636,7 +640,7 @@ func (r *SteppedRunner) HandleApproval(ctx context.Context, state *SteppedRunSta
 		}
 		state.appendMessage(SchemaMessage{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: r.capToolResult(content)})
 		if approved && recorder != nil {
-			recorder.Record(EventToolCallEnd, fmt.Sprintf("Tool %s executed after approval", tc.Name), map[string]any{
+			recorder.Record(EventToolCallEnd, fmt.Sprintf("审批通过，%s 执行完成", DisplayLabelFor(tc.Name)), map[string]any{
 				"tool":   tc.Name,
 				"step":   state.Step,
 				"result": truncate(content, 200),
@@ -658,7 +662,7 @@ func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message
 			return nil, err
 		}
 		if recorder != nil {
-			recorder.Record(EventModelCallStart, fmt.Sprintf("Model call (attempt %d)", attempt+1), map[string]any{
+			recorder.Record(EventModelCallStart, fmt.Sprintf("模型调用（第 %d 次尝试）", attempt+1), map[string]any{
 				"attempt": attempt + 1,
 			})
 		}
@@ -676,7 +680,7 @@ func (r *SteppedRunner) generate(ctx context.Context, messages []*schema.Message
 					meta["prompt_tokens"] = usage.PromptTokens
 					meta["completion_tokens"] = usage.CompletionTokens
 				}
-				recorder.Record(EventModelCallEnd, "Model call finished", meta)
+				recorder.Record(EventModelCallEnd, "模型调用完成", meta)
 			}
 			return response, err
 		}
@@ -883,4 +887,14 @@ func estimateToolSchemaTokens(infos []*schema.ToolInfo) int {
 		total += counter.CountMessage(contextmgr.Message{Role: "system", Content: string(raw)})
 	}
 	return total
+}
+
+// conditionalReason appends a rejection reason only when there is one. Without
+// it, rejecting without typing a reason produced "用户拒绝执行该操作：" — a colon
+// promising a reason that never arrives, sent to the model as the tool result.
+func conditionalReason(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return "：" + reason
 }

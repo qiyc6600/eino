@@ -56,6 +56,7 @@
 | 46 | MCP 外部工具接入 | 模块 03 | ✅ | stdio 传输，适配层 `eino-ext/components/tool/mcp`（客户端 `mark3labs/mcp-go`）；启动时握手并发现工具，转成 `RegisteredTool` 注册。**注册插在 `WrapAllTools` 之前**，因此与内置工具走同一条 ACL 拦截；授权按角色配置（未授予的远端工具对所有人被拒，含 admin）；审批只认本地 `MCP_REQUIRE_APPROVAL`，不读远端 annotations；自动新增 `mcp_agent` 子 Agent 承载远端工具；单个服务器连不上只记日志不阻止启动，`Close()` 终止子进程。仓库自带 `cmd/mcp-demo-server` 供离线演示与测试 |
 | 47 | 审批面板显示已处理记录 | 模块 02 | ✅ | 面板此前只列**待审批**，一旦做出决定就空了。新增 `ListDecided`（接口 + 内存/文件管理器 + PostgreSQL，`status <> 'pending'` 按决定时间倒序）与 `GET /api/approvals/history`（每用户、上限 20、剔除 `State`/`Result`）；前端"最近处理"区显示工具名、批准/拒绝与原因 |
 | 48 | 天气工具失败时不再编造数据 | 模块 03 | ✅ | API 不可用时原本返回硬编码假数据（北京 32°C 晴…）**并标成成功**，调用方按状态分支看不见它。改为返回 `business_error` 并带上城市与原因；顺带删除死代码 `queryWttrIn` 与不生效的 `lang=zh`，补上此前完全没有的测试（`weather_test.go`，桩 transport） |
+| 49 | 界面不再暴露内部接口名 | 模块 03/05 | ✅ | 一处标签表（`tools.DisplayLabel`）+ 子 Agent 标签（`agent.DisplayLabelFor`），解析在服务端完成（MCP 工具是运行时发现的，前端写死映射覆盖不到）。覆盖六处出口：回答正文、进度行、审批卡片、审批历史、工具面板、事件面板；并把 `supervisor.go` / `runner.go` 里两份已漂移的子 Agent 表合并为一处 |
 
 ---
 
@@ -263,6 +264,17 @@
   **注入验证**：把编造数据的降级加回去 → `TestWeather_FailuresNeverFabricateWeather` 的 4 个子用例全部变红（"a failed lookup must report an error"），取消那条仍通过——正是预期（取消路径在降级之前就返回了）。
   实机：`curl` 直接打 API 确认去掉 `lang=zh` 后返回结构不变，且数据在变（26°C/02:32 AM → 28°C/04:02 AM，证明是实时数据）。全量 `check.sh` 通过。
   **未做**：没给天气加缓存降级（"上一次成功观测 + 时间戳"是唯一诚实的降级形式），因为那会引入状态与过期策略，超出本次范围；运行中的实例需要重启才会生效。
+
+- 2026-09-22：界面不再暴露内部接口名（用户："一直在暴露代码接口名"）。
+  **问题的形状**：用户看到的原话是 `根据工具执行结果——math_agent：根据工具执行结果——calculator：unsupported expression`。三个问题叠在一起：① 内部名（`math_agent`/`calculator`）是路由键与 ACL 主体，不是给人看的；② 工具错误串是英文机器文本（`unsupported expression: `）；③ **嵌套是结构决定的**——子 Agent 是 `AgentAsTool`，内层 ReAct 的最终答案会变成外层工具调用的 content，外层再包一层，所以每多一层 Agent 就多套一层壳，读起来像栈回溯。查下来一共**六处**出口：回答正文、进度行、审批卡片、审批历史、工具面板、事件面板。
+  **做法：标签解析放在服务端**。理由是 MCP 工具是运行时发现的，前端写死一张映射表覆盖不到它们。`internal/tools/labels.go` 一张表（六个内置工具 → 数学计算/天气查询/日志搜索/订单查询/删除订单/邮件发送）+ `DisplayLabel(name)`；`internal/agent/subagents.go` 管子 Agent 与节点名（`plan_review` → 执行计划审批）；`DisplayLabelFor` 依次解析子 Agent → 节点 → 工具，**回退到原名**（外部 MCP 工具的名字来自第三方，替它编中文名是猜测）。`/api/tools` 增加 `display_name`，SSE 帧、`interrupt` 载荷、计划步骤各增加 `label`，前端六处只读 label；工具面板与审批卡标题把内部名放进 `title` 悬停可见——演示需要看到"哪个工具被授权"，但不该怼在脸上。
+  **顺带合并了一份重复**：子 Agent 的 name/描述/工具清单原本在 `supervisor.go` 和 `runner.go` 各有一份，且描述文字已经不一致（一处写"内部工具："、一处写"可用工具："）。现在 `BuiltinSubAgents()` 是唯一定义，两处消费同一张表，测试断言 supervisor 提示词里的描述与表一致。附带修好一个小问题：提示词里子 Agent 的顺序原本来自 map 遍历，**每次启动都不同**，现在是稳定的。
+  **mock 叙述重写**（`summarizeToolResults`）：单个结果直接原样返回（那本来就是工具面向用户的文本，也正是不再套壳的关键），多个结果用中文标签加换行拼接；已知的机器错误串翻译成人话（`unsupported expression` → "这个表达式我算不出来"），**未识别的内容原样透传**，不猜。旧格式的壳也会被剥掉，且只剥已知内部名（避免吃掉正文里合法的冒号）。
+  **顺手修掉两个"空细节"缺陷**（同一类：冒号后面什么都没有）：`evalSimpleExpression` 对空表达式报 `unsupported expression: `（后面是空的），现在单独报 `expression is empty`；拒绝审批时没填原因会产出 `用户拒绝执行该操作：`，现在只在有原因时才加冒号。
+  **测试**：`labels_test.go`（回退行为、六个内置标签齐全且为中文、标签互不重复）、`app/tool_labels_test.go`（**遍历 `builtinTools()` 实际注册的列表**断言每个都有标签——为此把 app.go 里六行 Register 抽成一个函数，否则这个测试只能测一份会漂移的副本）、`subagents_test.go`（表的结构不变量、提示词与表一致、三个命名空间的解析）、`mock_model_narration_test.go`（九个内部名不得出现在答案里、嵌套折叠、单结果原样、多结果用中文标签、已知错误翻译、未知内容透传、只取本轮结果）。契约测试补 `/api/tools` 的 `display_name` 与 `tool_call` 帧的 `label` 两个方向。
+  **注入验证三处**：删掉 `calculator` 的标签 → 两个标签测试变红；让子 Agent 标签回退到内部名 → 解析测试变红；把 mock 叙述改回套壳 → 叙述测试变红。
+  **实机**（独立实例 8098 验证，不动正在使用的 8099）：问"计算 1+4"→ 答案 `1 + 4 = 5`（无壳无内部名）、工具面板六项全中文、事件面板"正在调用 数学计算"；删除订单 → 卡片显示"删除订单"（悬停可见 `delete_order`）、"高危操作「删除订单」需要人工审批"；勾选执行前确认 → 计划卡片步骤显示"信息搜索"。全量 `check.sh` 通过。
+  **发现但未修**：首次访问（无 cookie）时页面探测会话拿到 401，会显示"会话已过期，请重新登录"——从未登录过的人被告知会话过期，与本次同一类问题（说了不真实的话），但属于会话提示而非接口名，单独提出。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

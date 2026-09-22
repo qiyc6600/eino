@@ -367,6 +367,21 @@ func generateFinalAnswer(lower, raw, preferredLang string) string {
 	}
 }
 
+// summarizeToolResults turns this turn's tool results into the answer the mock
+// returns.
+//
+// It used to emit "根据工具执行结果——<internal name>：<raw content>" for every
+// result. Three things were wrong with that: the internal name (calculator,
+// math_agent) is a routing key, not something to show a person; the raw content
+// could be a machine-shaped error string ("unsupported expression:"); and
+// because a sub-agent is itself a tool call, its answer became the *content* of
+// the outer call and got wrapped again — one wrapper per agent layer, so a
+// single arithmetic question produced a nested stack of them.
+//
+// A single result is now returned as-is: it is already the tool's user-facing
+// text (a computed value, a weather block, a confirmation), and passing it
+// through unwrapped is what collapses the nesting. Several results are labelled
+// and joined.
 func summarizeToolResults(messages []*schema.Message) string {
 	// Only this turn's tool results. The message list carries the whole thread, so
 	// summarizing all of it made every answer repeat every earlier result: a
@@ -381,20 +396,99 @@ func summarizeToolResults(messages []*schema.Message) string {
 		}
 	}
 
-	var parts []string
+	type result struct{ label, content string }
+	var results []result
 	for _, m := range messages[start:] {
-		if m.Role == schema.Tool {
-			name := m.Name
-			if name == "" {
-				name = "工具"
-			}
-			parts = append(parts, fmt.Sprintf("%s：%s", name, m.Content))
+		if m.Role != schema.Tool {
+			continue
+		}
+		content := strings.TrimSpace(unwrapToolSummary(m.Content))
+		if content == "" {
+			continue
+		}
+		if phrase, ok := naturalToolFailure(content); ok {
+			content = phrase
+		}
+		results = append(results, result{label: DisplayLabelFor(m.Name), content: content})
+	}
+
+	switch len(results) {
+	case 0:
+		return "工具执行完成。"
+	case 1:
+		return results[0].content
+	}
+
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		parts = append(parts, fmt.Sprintf("%s：%s", r.label, r.content))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// legacySummaryPrefix is the wrapper this function used to emit. A run that was
+// in flight across the upgrade can still hand it back as a sub-agent's answer,
+// so it is stripped rather than displayed.
+const legacySummaryPrefix = "根据工具执行结果——"
+
+// unwrapToolSummary removes the old wrapper and the internal name it put in front
+// of every result: "根据工具执行结果——calculator：1 + 4 = 5" becomes "1 + 4 = 5".
+// Stripping only the wrapper left the name behind, which is the leak this is
+// meant to close.
+func unwrapToolSummary(content string) string {
+	if !strings.HasPrefix(content, legacySummaryPrefix) {
+		return content
+	}
+	body := strings.TrimPrefix(content, legacySummaryPrefix)
+
+	// The old format joined several results with "；", each prefixed by its name.
+	segments := strings.Split(body, "；")
+	for i, segment := range segments {
+		segments[i] = stripLegacyNamePrefix(strings.TrimSpace(segment))
+	}
+	return strings.Join(segments, "；")
+}
+
+// stripLegacyNamePrefix drops a leading "<name>：" when — and only when — name is
+// an internal execution name. Checking against the known names rather than
+// cutting at the first "：" keeps a legitimate colon in the result text intact.
+func stripLegacyNamePrefix(segment string) string {
+	name, rest, found := strings.Cut(segment, "：")
+	if !found || !isInternalExecutionName(name) {
+		return segment
+	}
+	return rest
+}
+
+// naturalToolFailures maps the error text the built-in tools actually produce to
+// something a person would say.
+//
+// Tool errors are English and log-shaped by convention — they are read by the
+// model and by operators, and a real model paraphrases them. The mock cannot
+// paraphrase, so quoting them verbatim put raw fragments like
+// "unsupported expression:" into Chinese answers. Only shapes listed here are
+// translated; anything else passes through untouched rather than being guessed
+// at, and the technical detail stays visible in the events panel and the logs.
+var naturalToolFailures = []struct{ marker, phrase string }{
+	{"unsupported expression", "这个表达式我算不出来"},
+	{"expression is empty", "没有可计算的表达式"},
+	{"division by zero", "除数不能为零"},
+	{"invalid number", "算式里的数字我看不懂"},
+	{"city is required", "没有指定要查询的城市"},
+	{"weather lookup failed", "天气服务暂时不可用"},
+	{"not found for current user", "没有找到对应的订单"},
+	{"to and subject are required", "收件人和主题都不能为空"},
+	{"invalid arguments", "请求参数不对"},
+}
+
+func naturalToolFailure(content string) (string, bool) {
+	lower := strings.ToLower(content)
+	for _, f := range naturalToolFailures {
+		if strings.Contains(lower, f.marker) {
+			return "抱歉，" + f.phrase + "。", true
 		}
 	}
-	if len(parts) == 0 {
-		return "工具执行完成。"
-	}
-	return fmt.Sprintf("根据工具执行结果——%s", joinStrings(parts, "；"))
+	return "", false
 }
 
 // ---- Helper functions ----
