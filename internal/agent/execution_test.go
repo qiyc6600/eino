@@ -243,7 +243,7 @@ func TestExecution_CompactionKeepsFullHistory(t *testing.T) {
 	// A very low trigger ratio forces compaction on the third turn; the window
 	// itself stays generous so the summary survives the final token trim and
 	// actually reaches the model.
-	r.maxTokens = 500
+	r.SetMaxTokens(500)
 	r.summarizer = contextmgr.NewSummarizer(contextmgr.NewSimpleTokenCounter(), 0.05, 20, m)
 
 	turns := []string{

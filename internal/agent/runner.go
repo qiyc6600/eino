@@ -169,7 +169,10 @@ type Runner struct {
 	interruptPublisher InterruptPublisher
 	resumePublisher    ResumePublisher
 	threads            ThreadStore // per-user conversation threads
-	maxTokens          int
+	// maxTokens is the configured context window. Atomic because it is adjustable
+	// at runtime, like the budget knobs below: the token bar, the trimming and the
+	// compaction threshold all read it on the request path.
+	maxTokens atomic.Int64
 	// toolSchemaTokens is the request overhead of the tool definitions bound to
 	// the model. It is resent on every call, so it is counted once per runner and
 	// refreshed when the model (and therefore the binding) is swapped. Atomic so
@@ -233,11 +236,76 @@ func (r *Runner) baseContextTokens() int {
 // usableContextTokens is the share of the window available to messages, and the
 // budget trimming and compaction are measured against.
 func (r *Runner) usableContextTokens() int {
-	usable := r.maxTokens - r.baseContextTokens()
+	usable := r.MaxTokens() - r.baseContextTokens()
 	if usable < minUsableContextTokens {
 		usable = minUsableContextTokens
 	}
 	return usable
+}
+
+// MaxTokens reports the configured context window.
+func (r *Runner) MaxTokens() int { return int(r.maxTokens.Load()) }
+
+// Summarizer exposes the compaction knobs the runner was built with, so a caller
+// that adjusts them at runtime reaches the same instance the runs use.
+func (r *Runner) Summarizer() *contextmgr.Summarizer { return r.summarizer }
+
+// BaseContextTokens is the request overhead that is spent before any message is
+// considered: the bound tool schemas plus the reserve held back for the answer.
+func (r *Runner) BaseContextTokens() int { return r.baseContextTokens() }
+
+// UsableContextTokens is the share of the window left for messages, floored so a
+// window smaller than the overhead still leaves room to work.
+func (r *Runner) UsableContextTokens() int { return r.usableContextTokens() }
+
+// CompactionThreshold is the context size at which old messages are summarised,
+// in the same unit the token bar reports: overhead plus the trigger share of the
+// usable budget. The overhead is added rather than scaled because it is spent
+// regardless of how much history there is.
+//
+// It is the single definition of the threshold — tokenInfo and the settings
+// endpoint both call it, so the number a user adjusts and the number the bar draws
+// cannot drift apart.
+func (r *Runner) CompactionThreshold() int {
+	if r.summarizer == nil {
+		return r.MaxTokens()
+	}
+	threshold := r.baseContextTokens() +
+		int(float64(r.usableContextTokens())*r.summarizer.ThresholdRatio())
+	// Capped at the window. A window smaller than the request overhead would
+	// otherwise produce a trigger past the end of the very window it sits in — the
+	// usable share has a floor while the overhead does not scale down, so the sum
+	// can exceed max. Compaction cannot fire later than the whole window, and a
+	// marker beyond the bar's scale is not a number anyone can act on.
+	if max := r.MaxTokens(); threshold > max {
+		return max
+	}
+	return threshold
+}
+
+// WindowBelowOverhead reports that the configured window cannot even hold the
+// request overhead (tool schemas plus the answer reserve). Compaction then fires
+// as soon as there is any history, and the effective window is the floor rather
+// than the configured value — worth saying out loud rather than leaving the user
+// to infer it from the numbers.
+func (r *Runner) WindowBelowOverhead() bool {
+	return r.MaxTokens() <= r.baseContextTokens()
+}
+
+// SetMaxTokens changes the context window at runtime. It is the knob behind the
+// token bar's full scale and, through usableContextTokens, behind the compaction
+// threshold: lowering it makes compaction fire sooner, raising it gives a long
+// conversation more room before anything is summarised.
+//
+// A value below the request overhead is accepted and then floored: the usable
+// budget can never fall below minUsableContextTokens, so the effective window
+// bottoms out rather than collapsing to zero. Callers that need to know what
+// actually took effect should read back MaxTokens and usableContextTokens.
+func (r *Runner) SetMaxTokens(n int) {
+	if n < minUsableContextTokens {
+		n = minUsableContextTokens
+	}
+	r.maxTokens.Store(int64(n))
 }
 
 // SetReserveOutputTokens sets how much of the window is held back for the model's
@@ -275,8 +343,8 @@ func NewRunner(
 		runRetention:  7 * 24 * time.Hour,
 		threadLocks:   make(map[threadKey]*runLock),
 		threads:       newThreadStore(),
-		maxTokens:     maxTokens,
 	}
+	r.maxTokens.Store(int64(maxTokens))
 	r.refreshToolSchemaTokens()
 	return r
 }
@@ -559,8 +627,8 @@ func (r *Runner) tokenInfo(messageTokens int, compressed bool) *TokenInfo {
 	base := r.baseContextTokens()
 	return &TokenInfo{
 		Current:    messageTokens + base,
-		Threshold:  base + int(float64(r.usableContextTokens())*r.summarizer.ThresholdRatio()),
-		Max:        r.maxTokens,
+		Threshold:  r.CompactionThreshold(),
+		Max:        r.MaxTokens(),
 		Compressed: compressed,
 	}
 }

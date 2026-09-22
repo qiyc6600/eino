@@ -70,6 +70,11 @@ func (s *Service) EnsureBootstrapAdmin(ctx context.Context, username, password s
 	return nil
 }
 
+// HasRole reports whether the role list contains the target role.
+func HasRole(roles []string, target string) bool {
+	return hasRole(roles, target)
+}
+
 func hasRole(roles []string, target string) bool {
 	for _, role := range roles {
 		if role == target {

@@ -88,6 +88,21 @@
                     </div>
                     <div class="token-bar-label">
                         <span id="tokenBarText">上下文: 0 / 8000 tokens</span>
+                        <!-- Administrators can move the two knobs behind the threshold;
+                             the label above is the derived number they add up to. -->
+                        <button id="contextSettingsToggle" class="token-bar-settings"
+                                onclick="toggleContextSettings()" style="display:none"
+                                title="调整上下文窗口与压缩阈值">⚙</button>
+                    </div>
+                    <div id="contextSettings" class="context-settings" style="display:none">
+                        <label>上下文窗口 <input type="number" id="ctxMaxTokens" min="256" step="256"></label>
+                        <label>压缩触发比例 <input type="number" id="ctxRatio" min="0.05" max="1" step="0.05"></label>
+                        <label>摘要目标 tokens <input type="number" id="ctxTarget" min="1" step="50"></label>
+                        <div id="ctxDerived" class="context-derived"></div>
+                        <div class="context-settings-actions">
+                            <span class="context-hint">重启后恢复配置文件的值</span>
+                            <button class="btn btn-sm btn-primary" onclick="saveContextSettings()">应用</button>
+                        </div>
                     </div>
                 </div>
                 <div id="streamProgress" class="stream-progress" style="display:none;"></div>

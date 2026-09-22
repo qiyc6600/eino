@@ -224,6 +224,7 @@ async function showMainApp(quiet = false) {
         currentUser = me.user;
         allowedTools = me.tools || [];
         renderUserInfo(me);
+        renderContextSettingsToggle();
     } catch (e) {
         if (!quiet) {
             alert('获取用户信息失败：' + e.message);
@@ -1447,10 +1448,16 @@ function renderModels() {
             : m.has_api_key ? '🔑 已配置'
             : '⚠️ 需Key';
         // For models with a configured key, show an edit icon to update it
-        const editKeyBtn = m.needs_api_key && m.has_api_key
+        const editKeyBtn = isAdmin() && m.needs_api_key && m.has_api_key
             ? `<span class="model-edit-key" onclick="event.stopPropagation(); editApiKey('${m.id}')" title="修改 API Key">✏️</span>`
             : '';
-        return `<div class="model-item ${isActive ? 'active' : ''}" onclick="switchModel('${m.id}')">
+        // Switching changes the model for every user of the server, so only an
+        // administrator may do it. Everyone still sees which model is active — the
+        // server enforces the rule, this only avoids offering an action that would
+        // come back 403.
+        const click = isAdmin() ? ` onclick="switchModel('${m.id}')"` : '';
+        const title = isAdmin() ? '' : ' title="切换模型需要管理员权限"';
+        return `<div class="model-item ${isActive ? 'active' : ''}${isAdmin() ? '' : ' model-readonly'}"${click}${title}>
             <span class="model-dot ${m.id}"></span>
             <span class="model-name">${m.name}${isActive ? ' ✓' : ''}</span>
             <span class="model-key-status ${keyStatus}">${keyLabel}</span>
@@ -1534,6 +1541,92 @@ function confirmApiKey() {
 function cancelApiKey() {
     document.getElementById('apiKeyModal').style.display = 'none';
     pendingSwitchProfileId = null;
+}
+
+// ========== Context Budget ==========
+// The threshold on the token bar is derived from two knobs — the window and the
+// compaction ratio — so the editor shows both and reports the threshold they add
+// up to. Setting "the threshold" directly would mean back-solving the ratio, and
+// the number the user typed would then not be the number they saw.
+//
+// The values live on the server and do not survive a restart: they are the same
+// settings the configuration file supplies at startup.
+
+function isAdmin() {
+    return !!(currentUser && currentUser.roles && currentUser.roles.includes('admin'));
+}
+
+// renderContextSettingsToggle shows the gear only to administrators. The server
+// enforces the same rule; hiding it here is about not offering an action that
+// would be refused.
+function renderContextSettingsToggle() {
+    const btn = document.getElementById('contextSettingsToggle');
+    if (btn) btn.style.display = isAdmin() ? 'inline-block' : 'none';
+}
+
+function toggleContextSettings() {
+    const panel = document.getElementById('contextSettings');
+    if (!panel) return;
+    const opening = panel.style.display === 'none';
+    panel.style.display = opening ? 'block' : 'none';
+    if (opening) loadContextSettings();
+}
+
+async function loadContextSettings() {
+    try {
+        const s = await api('GET', '/api/context/settings');
+        document.getElementById('ctxMaxTokens').value = s.max_tokens;
+        document.getElementById('ctxRatio').value = s.threshold_ratio;
+        document.getElementById('ctxTarget').value = s.summary_target_tokens;
+        renderDerivedThreshold(s);
+    } catch (e) {
+        setDerivedText('读取失败：' + e.message);
+    }
+}
+
+async function saveContextSettings() {
+    const body = {
+        max_tokens: Number(document.getElementById('ctxMaxTokens').value),
+        threshold_ratio: Number(document.getElementById('ctxRatio').value),
+        summary_target_tokens: Number(document.getElementById('ctxTarget').value),
+    };
+    if (Object.values(body).some(v => !Number.isFinite(v))) {
+        setDerivedText('请填写有效的数字');
+        return;
+    }
+    try {
+        const s = await api('PUT', '/api/context/settings', body);
+        document.getElementById('ctxMaxTokens').value = s.max_tokens;
+        document.getElementById('ctxRatio').value = s.threshold_ratio;
+        document.getElementById('ctxTarget').value = s.summary_target_tokens;
+        renderDerivedThreshold(s);
+        // The bar's scale and marker come from the server, so re-read it rather
+        // than recomputing here — one definition of the threshold, not two.
+        refreshTokenBar(currentThread);
+    } catch (e) {
+        setDerivedText(e.status === 403 ? '需要管理员权限' : '保存失败：' + e.message);
+    }
+}
+
+// renderDerivedThreshold explains what the two knobs add up to, and says so when
+// the server changed a value to bring it into range — otherwise the user sees a
+// number they did not ask for with no explanation.
+function renderDerivedThreshold(s) {
+    const parts = [
+        `阈值 = ${s.overhead} + (${s.max_tokens} − ${s.overhead}) × ${s.threshold_ratio} = ${s.threshold}`,
+    ];
+    if (s.clamped && s.clamped.length) {
+        parts.push(`已调整到可用范围：${s.clamped.join('、')}`);
+    }
+    if (s.window_below_overhead) {
+        parts.push('窗口小于固定开销，压缩会在任何历史出现时触发，请把窗口调大');
+    }
+    setDerivedText(parts.join('　·　'));
+}
+
+function setDerivedText(text) {
+    const el = document.getElementById('ctxDerived');
+    if (el) el.textContent = text;
 }
 
 // ========== Context Token Bar ==========

@@ -31,6 +31,7 @@ type Router struct {
 	modelHandler    *ModelHandler
 	healthHandler   *HealthHandler
 	authMiddleware  func(http.Handler) http.Handler
+	contextHandler  *ContextSettingsHandler
 }
 
 // NewRouter creates a new Router with all handlers.
@@ -54,6 +55,7 @@ func NewRouter(
 		modelHandler:    NewModelHandler(modelSwitcher),
 		healthHandler:   NewHealthHandler(readinessChecker),
 		authMiddleware:  auth.AuthMiddleware(authSvc, cookie),
+		contextHandler:  NewContextSettingsHandler(runner),
 	}
 }
 
@@ -109,9 +111,13 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/auth/me", authMw(http.HandlerFunc(r.authHandler.Me)))
 	mux.Handle("/api/auth/logout", authMw(http.HandlerFunc(r.authHandler.Logout)))
 
-	// Users & Roles
-	mux.Handle("/api/users", authMw(http.HandlerFunc(r.handleUsers)))
-	mux.Handle("/api/users/", authMw(http.HandlerFunc(r.handleUsersSub)))
+	// Users & Roles. Creating a user takes an arbitrary role list, so these are
+	// administration: without the guard any signed-in account could mint an
+	// administrator or promote itself.
+	adminMw := func(h http.Handler) http.Handler { return authMw(requireAdmin(h)) }
+	mux.Handle("/api/users", adminMw(http.HandlerFunc(r.handleUsers)))
+	mux.Handle("/api/users/", adminMw(http.HandlerFunc(r.handleUsersSub)))
+	// The role list itself is not sensitive; the UI needs it to render.
 	mux.Handle("/api/roles", authMw(http.HandlerFunc(r.authHandler.ListRoles)))
 
 	// Agent chat
@@ -142,8 +148,14 @@ func (r *Router) Handler() http.Handler {
 	mux.Handle("/api/documents/", authMw(http.HandlerFunc(r.documentHandler.DeleteDocument)))
 
 	// Model switching
+	// Listing is harmless and the selector needs it; switching changes the model for
+	// every user of the server, so it is administration.
 	mux.Handle("/api/models", authMw(http.HandlerFunc(r.modelHandler.ListModels)))
-	mux.Handle("/api/models/switch", authMw(http.HandlerFunc(r.modelHandler.SwitchModel)))
+	mux.Handle("/api/models/switch", adminMw(http.HandlerFunc(r.modelHandler.SwitchModel)))
+
+	// Context budget: readable by anyone who can see the token bar, adjustable only
+	// by an administrator, since the window is shared by every user.
+	mux.Handle("/api/context/settings", authMw(http.HandlerFunc(r.handleContextSettings)))
 
 	// The body limit wraps the whole mux, so it covers the public login route as
 	// well as every authenticated one — login is the only decode site reachable
@@ -191,6 +203,19 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// handleContextSettings routes the context budget: reading it is open to any
+// authenticated user so the token bar can explain itself, changing it is not.
+func (r *Router) handleContextSettings(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		r.contextHandler.Get(w, req)
+	case http.MethodPut:
+		requireAdmin(http.HandlerFunc(r.contextHandler.Update)).ServeHTTP(w, req)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 func (r *Router) handleUsers(w http.ResponseWriter, req *http.Request) {

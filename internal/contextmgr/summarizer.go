@@ -3,10 +3,24 @@ package contextmgr
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
+	"sync/atomic"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+)
+
+// Bounds for the two runtime-adjustable knobs.
+//
+// The asymmetry is deliberate. The ratio is clamped into a working range because
+// getting it wrong fails silently — above 1 the trigger sits past the window and
+// compaction simply never fires, which nothing reports. The summary target is only
+// floored at 1: a summary that is too short is visible in the output, so a small
+// value is the caller's choice rather than something to override.
+const (
+	minThresholdRatio      = 0.05
+	minSummaryTargetTokens = 1
 )
 
 // Summarizer provides LLM-based summary compression for old messages.
@@ -19,10 +33,15 @@ import (
 //   - 摘要压缩是上下文管理模块的核心能力，任务要求"使用 LLM 进行摘要压缩"
 //   - LLM 摘要失败时自动降级到规则提取，保证 Agent 运行不中断
 type Summarizer struct {
-	counter             TokenCounter
-	chatModel           model.BaseChatModel // 用于 LLM 摘要压缩（可以是 ChatModel 或 ToolCallingChatModel）
-	summarizeThreshold  float64             // 触发摘要的阈值比例（如 0.8 表示 80%）
-	summaryTargetTokens int                 // 摘要目标 token 数
+	counter   TokenCounter
+	chatModel model.BaseChatModel // 用于 LLM 摘要压缩（可以是 ChatModel 或 ToolCallingChatModel）
+	// summarizeThreshold is the share of the usable budget at which compaction
+	// fires (0.8 = 80%). Atomic because it is adjustable at runtime: the threshold
+	// the user sees on the token bar is derived from it, and it is read on every
+	// turn. The float is carried as its bit pattern, since atomic has no float64.
+	summarizeThreshold atomic.Uint64
+	// summaryTargetTokens is the size the summary is asked to come down to.
+	summaryTargetTokens atomic.Int64
 }
 
 // NewSummarizer creates a new Summarizer.
@@ -34,18 +53,21 @@ func (s *Summarizer) SetChatModel(chatModel model.BaseChatModel) {
 }
 
 func NewSummarizer(counter TokenCounter, thresholdRatio float64, targetTokens int, chatModel model.BaseChatModel) *Summarizer {
-	return &Summarizer{
-		counter:             counter,
-		chatModel:           chatModel,
-		summarizeThreshold:  thresholdRatio,
-		summaryTargetTokens: targetTokens,
+	s := &Summarizer{
+		counter:   counter,
+		chatModel: chatModel,
 	}
+	// Stored through the setters rather than set in the literal: atomic types must
+	// not be copied, and a struct literal would carry them by value.
+	s.SetThresholdRatio(thresholdRatio)
+	s.SetSummaryTargetTokens(targetTokens)
+	return s
 }
 
 // ShouldSummarize checks whether the message history exceeds the threshold.
 func (s *Summarizer) ShouldSummarize(messages []Message, maxTokens int) bool {
 	currentTokens := s.counter.CountMessages(messages)
-	threshold := int(float64(maxTokens) * s.summarizeThreshold)
+	threshold := int(float64(maxTokens) * s.ThresholdRatio())
 	return currentTokens > threshold
 }
 
@@ -55,9 +77,49 @@ func (s *Summarizer) CountTokens(messages []Message) int {
 }
 
 // ThresholdRatio returns the configured summarization threshold ratio.
-func (s *Summarizer) ThresholdRatio() float64 {
-	return s.summarizeThreshold
+// clampThresholdRatio keeps the ratio inside (0, 1], where compaction can actually
+// fire. Above 1 the trigger sits past the window and never trips; at or below 0 it
+// would trip on every turn.
+func clampThresholdRatio(ratio float64) float64 {
+	if math.IsNaN(ratio) || ratio <= 0 {
+		return minThresholdRatio
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
 }
+
+func clampSummaryTarget(n int) int {
+	if n < minSummaryTargetTokens {
+		return minSummaryTargetTokens
+	}
+	return n
+}
+
+func (s *Summarizer) ThresholdRatio() float64 {
+	return math.Float64frombits(s.summarizeThreshold.Load())
+}
+
+// SetThresholdRatio changes the compaction trigger at runtime. The ratio is the
+// share of the *usable* budget (window minus request overhead) at which old
+// messages are summarised.
+//
+// It is clamped into (0, 1]: a ratio of 0 would compact on every turn, and one
+// above 1 would place the trigger past the window, where it can never fire — the
+// same trap the count window has, where a setting small enough silently disables
+// compaction entirely.
+func (s *Summarizer) SetThresholdRatio(ratio float64) {
+	s.summarizeThreshold.Store(math.Float64bits(clampThresholdRatio(ratio)))
+}
+
+// SetSummaryTargetTokens changes the size the summary is asked to reach.
+func (s *Summarizer) SetSummaryTargetTokens(n int) {
+	s.summaryTargetTokens.Store(int64(clampSummaryTarget(n)))
+}
+
+// SummaryTargetTokens reports the configured summary target.
+func (s *Summarizer) SummaryTargetTokens() int { return int(s.summaryTargetTokens.Load()) }
 
 // SummarizeOldMessages takes old messages and produces a summary string.
 // When chatModel is available, calls the LLM to generate a semantic summary.

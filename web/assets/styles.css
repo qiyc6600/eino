@@ -79,6 +79,60 @@ body {
 
 .build-notice button:hover { background: #d97706; }
 
+/* A model row a non-administrator cannot act on: readable, not clickable. */
+.model-item.model-readonly { cursor: default; }
+.model-item.model-readonly:hover { background: transparent; }
+
+/* Context budget editor, opened from the gear on the token bar. */
+.token-bar-label { display: flex; align-items: center; gap: 6px; }
+.token-bar-settings {
+    border: none;
+    background: transparent;
+    color: #6b7280;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 2px;
+    line-height: 1;
+}
+.token-bar-settings:hover { color: #4f46e5; }
+
+.context-settings {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #f9fafb;
+    font-size: 13px;
+}
+.context-settings label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.context-settings input {
+    width: 110px;
+    padding: 4px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 13px;
+}
+.context-derived {
+    margin-top: 6px;
+    color: #4b5563;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.context-settings-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+}
+.context-hint { color: #9ca3af; font-size: 12px; }
+
 /* Buttons */
 .btn {
     padding: 8px 16px;
