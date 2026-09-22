@@ -195,9 +195,36 @@ body {
     padding: 12px;
     border-radius: 8px;
     font-size: 14px;
+    /* Identity on the left, the logout control on the right. */
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
 }
+.user-card-info { min-width: 0; }
 .user-card .username { font-weight: 600; font-size: 16px; }
 .user-card .roles { margin-top: 4px; color: #6b7280; font-size: 13px; }
+
+/* Deliberately quiet: signing out is a rare action, and it should not compete
+   with the conversation for attention. It turns red on hover, where the intent
+   is already clear. */
+.btn-logout {
+    flex: none;
+    padding: 2px 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #fff;
+    color: #6b7280;
+    font-size: 12px;
+    line-height: 1.6;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.btn-logout:hover {
+    border-color: #ef4444;
+    background: #fef2f2;
+    color: #dc2626;
+}
 
 /* Role Info */
 .role-info { font-size: 13px; }
@@ -819,8 +846,6 @@ body {
     font-size: 12px;
     color: #9ca3af;
 }
-
-.sidebar-bottom { margin-top: auto; }
 
 /* Slimmer token bar */
 .token-bar { padding: 3px 16px; }

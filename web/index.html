@@ -47,7 +47,14 @@
             <!-- Left Sidebar -->
             <div class="sidebar">
                 <div class="sidebar-section">
-                    <div id="currentUser" class="user-card"></div>
+                    <!-- The logout control sits in the identity card rather than as a
+                         full-width button below it: it acts on the signed-in account,
+                         so it belongs with the account, and a session that ends
+                         rarely does not need the most prominent control on the page. -->
+                    <div class="user-card">
+                        <div id="currentUser" class="user-card-info"></div>
+                        <button onclick="doLogout()" class="btn-logout" title="退出登录">退出</button>
+                    </div>
                 </div>
                 <div class="sidebar-section">
                     <h3>会话</h3>
@@ -59,9 +66,6 @@
                         <summary>🤖 AI 模型</summary>
                         <div id="modelSelector" class="model-selector"></div>
                     </details>
-                </div>
-                <div class="sidebar-section sidebar-bottom">
-                    <button onclick="doLogout()" class="btn btn-danger btn-full">退出登录</button>
                 </div>
             </div>
 
