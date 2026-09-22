@@ -648,6 +648,34 @@ func (s *ApprovalStore) ListPending(ctx context.Context, userID string) ([]*hitl
 	return result, rows.Err()
 }
 
+// ListDecided mirrors ListPending for the decided rows, newest decision first.
+func (s *ApprovalStore) ListDecided(ctx context.Context, userID string, limit int) ([]*hitl.ApprovalRequest, error) {
+	if err := auth.CheckUserScope(ctx, userID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+approvalColumns+` FROM agent_approvals
+		 WHERE user_id=$1 AND status <> 'pending'
+		 ORDER BY COALESCE(decided_at, created_at) DESC
+		 LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*hitl.ApprovalRequest
+	for rows.Next() {
+		req, _, err := scanApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, req)
+	}
+	return result, rows.Err()
+}
+
 func (s *ApprovalStore) Claim(ctx context.Context, id, userID string, decision hitl.ApprovalDecision, token string) (*hitl.ApprovalRequest, bool, error) {
 	status := hitl.StatusRejected
 	if decision.Approved {

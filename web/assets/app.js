@@ -826,6 +826,39 @@ async function refreshApprovals() {
         currentApprovals = data || [];
         renderApprovals(currentApprovals);
     } catch (e) {}
+    // Fetched separately: the pending list is what the chat cards sync against, so
+    // a failure here must not leave that list stale.
+    try {
+        approvalHistory = (await api('GET', '/api/approvals/history')) || [];
+        renderApprovalHistory();
+    } catch (e) {}
+}
+
+let approvalHistory = [];
+
+// renderApprovalHistory lists recent decisions. Without it the panel went blank as
+// soon as an approval was handled — a to-do list that forgets what was done.
+function renderApprovalHistory() {
+    const el = document.getElementById('approvalHistory');
+    if (!el) return;
+    if (!approvalHistory.length) {
+        el.innerHTML = '';
+        return;
+    }
+    el.innerHTML = '<div class="history-title">最近处理</div>' + approvalHistory.map(a => {
+        const approved = a.Status === 'approved';
+        const label = approved ? '已批准' : '已拒绝';
+        const cls = approved ? 'approved' : 'rejected';
+        // Lowercase: ApprovalDecision carries JSON tags even though the request
+        // around it does not. See the note in the frontend contract test.
+        const reason = a.Decision && a.Decision.reason ? ` · ${escapeHtml(a.Decision.reason)}` : '';
+        const when = a.DecidedAt ? new Date(a.DecidedAt).toLocaleString() : '';
+        return `<div class="history-item ${cls}">
+            <span class="history-tool">${escapeHtml(a.ToolName || a.NodeName || '计划审批')}</span>
+            <span class="history-state">${label}</span>
+            <span class="history-when">${when}${reason}</span>
+        </div>`;
+    }).join('');
 }
 
 function renderApprovals(approvals) {
@@ -847,6 +880,7 @@ function renderApprovals(approvals) {
         </div>
         <button onclick="scrollToApprovalCards()" class="btn btn-sm btn-full" style="margin-top:6px;">跳转到审批卡片</button>
     `;
+    renderApprovalHistory();
 }
 
 // ========== Right Panel Tabs & Demo Dropdown ==========

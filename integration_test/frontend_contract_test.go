@@ -321,6 +321,44 @@ func TestIntegration_FrontendRequestContract(t *testing.T) {
 		}
 	})
 
+	t.Run("approval history", func(t *testing.T) {
+		// Drive one approval to a decision so the history has a row.
+		interrupt := interruptingChat(t, server.URL, sessionID, "t_history_contract")
+		id, _ := interrupt["interrupt_id"].(string)
+		resp := postJSON(t, server.URL, "/api/approvals/"+id+"/decision", sessionID, map[string]any{
+			"approved": false, "reason": "contract", "stream": false,
+		})
+		resp.Body.Close()
+
+		rows := decodeArray(t, doGet(t, server.URL, "/api/approvals/history", sessionID))
+		if len(rows) == 0 {
+			t.Fatal("the decision did not reach the history")
+		}
+		// The capitalised names come from ApprovalRequest having no JSON tags.
+		assertKeys(t, appJS, "GET /api/approvals/history[]", rows[0], "InterruptID", "Status", "ToolName", "DecidedAt")
+		// The decision is the exception: it does carry tags, so it is lowercase.
+		// A Go struct cannot pin this — encoding/json matches field names
+		// case-insensitively, so `json:"Reason"` decodes `reason` and the test
+		// passes while the page reads undefined.
+		decision, ok := rows[0]["Decision"].(map[string]any)
+		if !ok {
+			t.Fatalf("Decision is not an object: %v", rows[0]["Decision"])
+		}
+		assertKeys(t, appJS, "GET /api/approvals/history[] Decision", decision, "approved", "reason")
+		if _, mixed := decision["Reason"]; mixed {
+			t.Error("Decision now also carries a capitalised Reason; the page reads the lowercase one")
+		}
+		// The case has to be asserted on the expression, not on the word: "reason"
+		// appears throughout app.js, so a substring check passes whether the page
+		// reads Decision.reason or Decision.Reason — and only one of those works.
+		if !strings.Contains(appJS, "Decision.reason") {
+			t.Error("the page does not read Decision.reason; the reason would render as nothing")
+		}
+		if strings.Contains(appJS, "Decision.Reason") {
+			t.Error("the page reads Decision.Reason, but the server sends it lowercase")
+		}
+	})
+
 	t.Run("model switch response", func(t *testing.T) {
 		// The page reads current_model back to update its selector.
 		resp := postJSON(t, server.URL, "/api/models/switch", sessionID, map[string]any{"profile_id": "mock"})

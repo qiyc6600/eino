@@ -499,20 +499,56 @@ data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","t
 ```json
 [
   {
-    "interrupt_id": "i_9a0b1c2d",
-    "type": "tool",
-    "run_id": "r_e5f6g7h8",
-    "user_id": "u_admin",
-    "thread_id": "t_default",
-    "tool_name": "delete_order",
-    "arguments": "{\"order_id\":\"A-1001\"}",
-    "risk_level": "high",
-    "message": "删除订单 A-1001",
-    "status": "pending",
-    "created_at": "2026-07-30T12:00:00Z"
+    "InterruptID": "i_9a0b1c2d",
+    "Type": "tool",
+    "RunID": "r_e5f6g7h8",
+    "UserID": "u_admin",
+    "ThreadID": "t_default",
+    "ToolName": "delete_order",
+    "Arguments": "{\"order_id\":\"A-1001\"}",
+    "RiskLevel": "high",
+    "Message": "删除订单 A-1001",
+    "Status": "pending",
+    "CreatedAt": "2026-07-30T12:00:00Z",
+    "DecidedAt": null,
+    "Decision": null
   }
 ]
 ```
+
+> **字段名是大写的**（`InterruptID`、`ToolName`…），因为 `hitl.ApprovalRequest` 大多数字段没有 JSON tag，Go 默认输出字段名。唯一的例外是内嵌的 `Decision`：`hitl.ApprovalDecision` **有** tag，所以它返回小写的 `{"approved":…,"reason":…}`——同一个对象里大小写混用。前端读大写、`Decision.reason` 读小写。
+>
+> `State` / `Result` 两个大字段（完整可恢复状态与幂等结果）不出现在列表响应里，只在数据库里。
+
+---
+
+### GET /api/approvals/history
+
+列出当前用户**最近已处理**的审批，最新在前，最多 20 条。
+
+待审批列表会在做出决定后立刻变空，所以它只回答"现在要处理什么"；这个接口回答"刚才处理了什么"，让右侧面板在决定之后仍有内容。它是近期活动记录，不是审计日志（无上限会随每次审批无限增长）。
+
+**请求头**：`Authorization: Bearer <sessionId>`
+
+**成功响应** (200)：字段与待审批列表相同，`Status` 为 `approved` / `rejected`，`DecidedAt` 与 `Decision` 非空：
+
+```json
+[
+  {
+    "InterruptID": "i_9a0b1c2d",
+    "Type": "tool",
+    "ToolName": "delete_order",
+    "Status": "approved",
+    "CreatedAt": "2026-07-30T12:00:00Z",
+    "DecidedAt": "2026-07-30T12:00:04Z",
+    "Decision": { "approved": true, "reason": "确认删除" }
+  }
+]
+```
+
+**筛选条件是 `status <> 'pending'`，不是 `status = 'approved'`**：被认领但执行失败的审批保持 `Phase="running"`，那是"结果不确定"的记录，恰恰最需要留在面板上。
+
+只返回调用者自己的审批（每用户在 SQL 与内存两条路径上过滤）。
 
 ---
 
@@ -526,13 +562,13 @@ data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","t
 
 ```json
 {
-  "interrupt_id": "i_9a0b1c2d",
-  "type": "tool",
-  "run_id": "r_e5f6g7h8",
-  "tool_name": "delete_order",
-  "arguments": "{\"order_id\":\"A-1001\"}",
-  "risk_level": "high",
-  "status": "pending"
+  "InterruptID": "i_9a0b1c2d",
+  "Type": "tool",
+  "RunID": "r_e5f6g7h8",
+  "ToolName": "delete_order",
+  "Arguments": "{\"order_id\":\"A-1001\"}",
+  "RiskLevel": "high",
+  "Status": "pending"
 }
 ```
 
@@ -541,6 +577,8 @@ data: {"detail":"Tool calculator executed","phase":"end","result":"1 + 1 = 2","t
 ```json
 {"error": "approval not found"}
 ```
+
+其他用户的审批同样返回 404（不确认 interrupt ID 是否存在）。
 
 ---
 

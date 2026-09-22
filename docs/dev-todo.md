@@ -54,6 +54,7 @@
 | 44 | 修复 chromem 包装层的三个缺陷 | 模块 05 | ✅ | ① `Query` 在 `topK` 大于集合文档数时直接报错，而调用方吞掉错误 → 小语料下向量召回静默消失（文档库天然是小语料）；② 空查询词报错，而 token 条正是用空查询调用的；③ `DeleteUser` 以"v0.7.0 无此 API"为由不支持，实测 `DeleteCollection` 存在。该包装层此前完全没有测试，现已补上桩 embedding 的离线测试 |
 | 45 | 相关度阈值按 embedding 尺度自动取值 | 模块 05 | ✅ | 真实 embedding 的相关结果在 0.6–0.9，hash 伪嵌入低一个量级；用同一个 0.3 会让 hash 模式下的中文检索完全失效。新增 `VECTOR_MIN_SCORE`，未设置时按提供方自动取值（**hash → 0.02，真实 → 0.3**）。该阈值是**噪声下限而非相关性判据**：相关中文片段实测 0.043–0.19、无关中文片段 0.000，所以 0.02 保留全部相关召回并丢掉纯碰撞噪声；英文无关片段仍有约 0.11（任意两段英文都共用虚词），那里靠排序区分。维度与阈值的实测过程见 2026-09-22 记录 |
 | 46 | MCP 外部工具接入 | 模块 03 | ✅ | stdio 传输，适配层 `eino-ext/components/tool/mcp`（客户端 `mark3labs/mcp-go`）；启动时握手并发现工具，转成 `RegisteredTool` 注册。**注册插在 `WrapAllTools` 之前**，因此与内置工具走同一条 ACL 拦截；授权按角色配置（未授予的远端工具对所有人被拒，含 admin）；审批只认本地 `MCP_REQUIRE_APPROVAL`，不读远端 annotations；自动新增 `mcp_agent` 子 Agent 承载远端工具；单个服务器连不上只记日志不阻止启动，`Close()` 终止子进程。仓库自带 `cmd/mcp-demo-server` 供离线演示与测试 |
+| 47 | 审批面板显示已处理记录 | 模块 02 | ✅ | 面板此前只列**待审批**，一旦做出决定就空了。新增 `ListDecided`（接口 + 内存/文件管理器 + PostgreSQL，`status <> 'pending'` 按决定时间倒序）与 `GET /api/approvals/history`（每用户、上限 20、剔除 `State`/`Result`）；前端"最近处理"区显示工具名、批准/拒绝与原因 |
 
 ---
 
@@ -242,6 +243,14 @@
   **测试**：`TestIntegration_AdminOnlyEndpoints`（visitor 创建管理员被拒且账号未创建、自我提权被拒、切模型被拒、改上下文被拒；读设置仍开放；管理员四项均可）；`TestIntegration_ContextBudgetIsAdjustableAtRuntime`（阈值随两个旋钮变化且与 token 条报告的一致、改动跨请求保持、越界值被钳制并在 `clamped` 里回显、部分更新不动其他旋钮）。注入验证：去掉 `requireAdmin` → visitor 创建管理员得 **201**、自我提权得 **200**（后两条报 401 是提权成功的连锁反应——改角色会撤销该用户的会话）。
   实机验证：`GET /api/context/settings` 返回 `overhead 1238 / usable 762 / threshold 1733`，与 token 条显示的 1733 一致；浏览器里以 admin 打开齿轮，面板显示 `阈值 = 1238 + (2000 − 1238) × 0.65 = 1733`，改为 `6000 / 0.5` 并应用后条与面板同时变为 `1423 / 6000（阈值 3619）`、标记移到 60%；以 visitor 登录后齿轮隐藏、4 个模型项全部不可点。
   **过程记录**：第一次验证 visitor 视角时我量到"齿轮仍可见、模型项仍可点"，差点当成缺陷——实际是**运行中的实例没有 visitor 用户**（`createTestApp` 里种的那个只存在于测试），登录失败后我量到的是上一次以 admin 渲染的**残留 DOM**。建好 visitor 再测即正确。又一次"测量方法本身出错"。
+
+- 2026-09-22：审批面板补上"最近处理"（用户实机报"右边的审批里面什么都没有"）。
+  **诊断**：面板本身没坏。有中断时它显示徽标与"1 个待审批（在对话中处理）"，**做出决定后就空了**——因为它只列待审批项，而审批一旦被处理就从待审批列表里消失。决定本身是留痕的（对话里的审批卡片、运行事件），但**面板作为"待办清单"忘掉了刚做完的事**，所以看起来像坏了。这不是显示缺陷，是面板的语义缺了一半。
+  **实现**：`ListDecided(ctx, userID, limit)` 三层落地——`ApprovalStore` 接口、`InterruptManager`（内存 map 与存储两条路径，内存路径按 `DecidedAt` 倒序、缺失时退回 `CreatedAt`）、`postgres.ApprovalStore`（`WHERE user_id=$1 AND status <> 'pending' ORDER BY COALESCE(decided_at, created_at) DESC LIMIT $2`）。**`status <> 'pending'` 而不是 `= 'approved'`**：被认领但执行失败的审批保持 `Phase="running"`，那是"结果不确定"的记录，恰恰最需要留在面板上。新增 `GET /api/approvals/history`（每用户、上限 20 条——这是近期活动记录不是审计日志，无上限会随每次审批无限增长；沿用待审批列表的做法剔除 `State`/`Result` 两个大字段）。前端 `renderApprovalHistory()` 渲染"最近处理"：工具名、已批准/已拒绝（绿/红）、时间与决定原因。
+  **前端读到空字段的陷阱**（本次唯一一个真实缺陷，由我自己引入）：原因一直不显示。`ApprovalRequest` 没有 JSON 标签（字段是大写开头的 `Status`/`ToolName`/`DecidedAt`），而它内嵌的 `ApprovalDecision` **有**标签（`json:"approved"` / `json:"reason"`），于是响应里是 `{"Status":…,"Decision":{"approved":…,"reason":…}}` —— 大小写混在同一个对象里。前端按大写的 `Decision.Reason` 读，拿到 `undefined`，原因静默消失。**我的 Go 契约测试当时是绿的**：`encoding/json` 解码时大小写不敏感，`json:"Reason"` 也能解出 `reason`，所以**Go 侧无论哪种写法都测不出这个错误**。修法是两条：前端改读 `Decision.reason`；契约测试改为断言**表达式本身**——`app.js` 必须包含 `Decision.reason` 且不得包含 `Decision.Reason`（对 "reason" 这个词做子串检查没有判别力，它在 app.js 里到处出现）。
+  **测试与注入验证**（三个测试，每处守卫都注入缺陷确认变红）：`TestIntegration_ApprovalHistory`（决定后出现在历史里、字段齐全、待审批列表同时为空、`State`/`Result` 已剔除）；`TestIntegration_ApprovalHistoryIsPerUser`（另一个用户看不到——**注入**：去掉 `userID` 过滤 → 报"visitor 看到了 admin 的审批历史"）；`TestPostgresApprovalHistory`（真实库上的倒序与上限，**注入**：SQL 的 `status <> 'pending'` 改成无条件 → 待审批项混进历史，测试变红）。契约测试的大小写断言同样做了注入验证：改回 `Decision.Reason` → 报 "the page reads Decision.Reason, but the server sends it lowercase"。
+  **实机验证**（重建重启后种入两条决定）：`无待审批项` + `最近处理 | delete_order | 已批准 | 2026/9/22 11:38:49 · 确认删除 | delete_order | 已拒绝 | 2026/9/22 11:38:48 · 先别删，我要核对一下`——最新在前，原因正确显示；截图确认绿/红状态与时间格式。
+  全量 `scripts/check.sh` 与带真实 PostgreSQL 的 `-race` 均通过。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。

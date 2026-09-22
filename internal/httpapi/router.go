@@ -269,6 +269,11 @@ func (r *Router) handleChatThreadSub(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleApprovalsSub(w http.ResponseWriter, req *http.Request) {
+	// Checked before the id path, or "history" would be read as an interrupt id.
+	if strings.HasSuffix(req.URL.Path, "/history") {
+		r.approvalHandler.ListHistory(w, req)
+		return
+	}
 	if strings.HasSuffix(req.URL.Path, "/decision") {
 		r.approvalHandler.MakeDecision(w, req)
 		return

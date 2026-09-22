@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -86,6 +87,52 @@ func (m *InterruptManager) GetPendingForUserE(ctx context.Context, userID string
 	}
 	m.mu.RUnlock()
 	return store.ListPending(ctx, userID)
+}
+
+// ListDecided returns this user's decided approvals, newest first.
+//
+// A decision is durable: a claimed approval carries Phase "running" until it
+// completes, and one whose execution failed keeps that phase as the record of an
+// uncertain outcome. Both are decisions, so both appear here.
+func (m *InterruptManager) ListDecided(ctx context.Context, userID string, limit int) ([]*ApprovalRequest, error) {
+	m.mu.RLock()
+	store := m.store
+	if store == nil {
+		defer m.mu.RUnlock()
+		var result []*ApprovalRequest
+		for _, req := range m.pending {
+			if req.Status == StatusPending || req.UserID != userID {
+				continue
+			}
+			result = append(result, cloneApproval(req))
+		}
+		sortByDecidedDesc(result)
+		return limitApprovals(result, limit), nil
+	}
+	m.mu.RUnlock()
+	return store.ListDecided(ctx, userID, limit)
+}
+
+// sortByDecidedDesc orders newest first, falling back to creation time for a
+// decision whose timestamp is missing.
+func sortByDecidedDesc(reqs []*ApprovalRequest) {
+	sort.SliceStable(reqs, func(i, j int) bool {
+		return decidedAt(reqs[i]).After(decidedAt(reqs[j]))
+	})
+}
+
+func decidedAt(req *ApprovalRequest) time.Time {
+	if req.DecidedAt != nil {
+		return *req.DecidedAt
+	}
+	return req.CreatedAt
+}
+
+func limitApprovals(reqs []*ApprovalRequest, limit int) []*ApprovalRequest {
+	if limit > 0 && len(reqs) > limit {
+		return reqs[:limit]
+	}
+	return reqs
 }
 
 func (m *InterruptManager) GetRequest(interruptID string) (*ApprovalRequest, bool) {

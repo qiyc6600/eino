@@ -54,6 +54,11 @@ func (s *Service) ListPendingE(ctx context.Context, userID string) ([]*ApprovalR
 	return s.manager.GetPendingForUserE(ctx, userID)
 }
 
+// ListDecided returns the caller's recently decided approvals.
+func (s *Service) ListDecided(ctx context.Context, userID string, limit int) ([]*ApprovalRequest, error) {
+	return s.manager.ListDecided(ctx, userID, limit)
+}
+
 // GetApproval returns a specific approval request.
 func (s *Service) GetApproval(interruptID string) (*ApprovalRequest, bool) {
 	return s.manager.GetRequest(interruptID)

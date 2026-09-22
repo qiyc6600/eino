@@ -36,6 +36,37 @@ func (h *ApprovalHandler) ListApprovals(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, pending)
 }
 
+// ListHistory handles GET /api/approvals/history.
+//
+// The pending list empties as approvals are handled, which left the panel with
+// nothing to show the moment a decision was made. This is the other half: what was
+// decided, newest first, so the panel stays a record rather than a to-do list that
+// forgets.
+func (h *ApprovalHandler) ListHistory(w http.ResponseWriter, req *http.Request) {
+	ac := auth.FromContext(req.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	decided, err := h.hitlSvc.ListDecided(req.Context(), ac.UserID, approvalHistoryLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// State and Result are large and irrelevant to a history row; drop them the
+	// same way the pending list does.
+	for _, r := range decided {
+		r.State = nil
+		r.Result = nil
+	}
+	writeJSON(w, http.StatusOK, decided)
+}
+
+// approvalHistoryLimit bounds the history: it is a record of recent activity, not
+// an audit log, and an unbounded list would grow with every approval ever made.
+const approvalHistoryLimit = 20
+
 // GetApproval handles GET /api/approvals/{interruptId}
 // Only the requesting user can see the approval; other users' approvals
 // return 404 so interrupt IDs are not confirmed to exist cross-user.

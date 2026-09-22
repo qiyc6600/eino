@@ -168,6 +168,8 @@ SSE 部分另外断言服务端发出的帧名恰好是前端处理的那几个�
 新增前端读取字段时把它加进清单；改后端 JSON tag 时，测试会先于用户发现。
 
 > 一处**看似不匹配其实正确**的地方，避免后人"顺手改坏"：`/api/approvals` 返回的字段是大写的（`InterruptID`、`Status`、`ThreadID`…），因为 `hitl.ApprovalRequest` 大多数字段没有 JSON tag，Go 默认输出 Go 字段名。前端读大写是对的。
+>
+> 但内嵌的 `Decision` 是**例外**：`hitl.ApprovalDecision` 有 JSON tag，所以它返回小写的 `{"approved":…,"reason":…}`，于是同一个对象里大小写混用（`{"Status":"rejected","Decision":{"approved":false,"reason":"…"}}`）。前端必须读 `Decision.reason`。这个错误**Go 侧测不出来**——`encoding/json` 解码时大小写不敏感，写成 `json:"Reason"` 也照样解出 `reason`，所以契约测试改为断言 app.js 里的表达式本身（含 `Decision.reason`、不含 `Decision.Reason`）。
 
 ### 换版提示（已打开的标签页）
 
@@ -554,6 +556,7 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/approvals` | 待审批列表 |
+| GET | `/api/approvals/history` | 最近已处理的审批（每用户，最多 20 条，最新在前） |
 | GET | `/api/approvals/{id}` | 审批详情 |
 | POST | `/api/approvals/{id}/decision` | 审批决策（approve/reject） |
 
