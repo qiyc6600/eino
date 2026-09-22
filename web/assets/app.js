@@ -52,15 +52,18 @@ function updateLastMessage(threadId, role, content) {
     saveMessages(threadId, msgs);
 }
 
-function loadThreadList() {
+// The conversation list used to be kept here (localStorage, keyed per user).
+// It is now the server's: see refreshThreads. Only the *selection* is local —
+// which conversation this browser is looking at is a per-device preference, not
+// something to sync.
+function loadCurrentThread() {
     try {
-        const raw = localStorage.getItem(`threads_${currentUser.username}`);
-        return raw ? JSON.parse(raw) : [currentThread];
-    } catch (e) { return [currentThread]; }
+        return localStorage.getItem(`currentThread_${currentUser.username}`) || 't_default';
+    } catch (e) { return 't_default'; }
 }
 
-function saveThreadList(list) {
-    try { localStorage.setItem(`threads_${currentUser.username}`, JSON.stringify(list)); } catch (e) {}
+function saveCurrentThread() {
+    try { localStorage.setItem(`currentThread_${currentUser.username}`, currentThread); } catch (e) {}
 }
 
 // ========== API Helpers ==========
@@ -240,11 +243,8 @@ async function showMainApp(quiet = false) {
     refreshApprovals();
     refreshMemory();
     refreshDocuments();
-    threads = loadThreadList();
-    currentThread = threads[0] || 't_default';
-    renderThreads();
-    renderChat();
-    refreshTokenBar(currentThread);
+    currentThread = loadCurrentThread();
+    await refreshThreads();
     return true;
 }
 
@@ -269,35 +269,95 @@ function toolCountText() {
 }
 
 // ========== Threads ==========
+// The list comes from the server, not from localStorage. It used to be a
+// browser-local array of IDs, which let the page and the server disagree about
+// which conversations exist: clearing site data hid threads whose messages were
+// still stored, and a conversation created on another device never appeared.
+let threadTitles = {};
+
+function threadLabel(t) {
+    return threadTitles[t] || t;
+}
+
 function renderThreads() {
     const listDiv = document.getElementById('threadList');
-    listDiv.innerHTML = threads.map(t => `
+    listDiv.innerHTML = threads.map(t => {
+        const label = threadLabel(t);
+        // The ID stays reachable as a tooltip: it is what the API and the logs
+        // use, and a name is only a label.
+        const titleAttr = label !== t ? ` title="${escapeHtml(t)}"` : '';
+        return `
         <div class="thread-item ${t === currentThread ? 'active' : ''}" style="display:flex;justify-content:space-between;align-items:center;">
-            <span onclick="switchThread('${t}')" style="flex:1;cursor:pointer;">
-                ${t === currentThread ? '📝 ' : ''}${t}
+            <span onclick="switchThread('${t}')" style="flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"${titleAttr}>
+                ${t === currentThread ? '📝 ' : ''}${escapeHtml(label)}
             </span>
+            <span class="thread-rename" onclick="event.stopPropagation();renameThread('${t}')" title="重命名">✎</span>
             <span class="thread-delete" onclick="event.stopPropagation();deleteThread('${t}')" title="删除会话">✕</span>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
+}
+
+// refreshThreads replaces the local list with the server's, which is the
+// authority on which conversations exist.
+async function refreshThreads() {
+    try {
+        const list = await api('GET', '/api/chat/threads');
+        threads = (list || []).map(t => t.id);
+        threadTitles = {};
+        for (const t of list || []) {
+            if (t.title) threadTitles[t.id] = t.title;
+        }
+        if (!threads.includes(currentThread)) {
+            currentThread = threads[0] || 't_default';
+            saveCurrentThread();
+        }
+        renderThreads();
+        renderChat();
+        refreshTokenBar(currentThread);
+    } catch (e) {}
+}
+
+// renameThread saves the new name server-side, so it follows the account rather
+// than this browser.
+async function renameThread(threadId) {
+    const next = prompt('会话名称', threadLabel(threadId));
+    if (next === null) return;
+    const title = next.trim();
+    if (!title || title === threadLabel(threadId)) return;
+    try {
+        await api('PUT', '/api/chat/' + encodeURIComponent(threadId), { title });
+    } catch (e) {
+        alert('重命名失败：' + e.message);
+        return;
+    }
+    threadTitles[threadId] = title;
+    renderThreads();
 }
 
 function switchThread(threadId) {
     if (threadId === currentThread) return;
     currentThread = threadId;
+    saveCurrentThread();
     renderThreads();
     renderChat();
     refreshTokenBar(threadId);
 }
 
-function newThread() {
-    const tid = 't_' + Date.now().toString(36);
-    threads.push(tid);
-    saveThreadList(threads);
+async function newThread() {
+    // Created on the server so it has a real identity immediately: the sidebar
+    // lists what the server has, and a browser-only placeholder would vanish on
+    // the next refresh.
+    let tid;
+    try {
+        const created = await api('POST', '/api/chat/threads', {});
+        tid = created.threadId;
+    } catch (e) {
+        alert('新建会话失败：' + e.message);
+        return;
+    }
     saveMessages(tid, []);
     currentThread = tid;
-    renderThreads();
-    renderChat();
-    refreshTokenBar(tid);
+    await refreshThreads();
 }
 
 async function deleteThread(threadId) {
@@ -305,11 +365,7 @@ async function deleteThread(threadId) {
         alert('至少保留一个会话');
         return;
     }
-    if (!confirm(`确定删除会话 ${threadId} 吗？`)) return;
-
-    // Remove from local state
-    threads = threads.filter(t => t !== threadId);
-    saveThreadList(threads);
+    if (!confirm(`确定删除会话「${threadLabel(threadId)}」吗？`)) return;
 
     // Remove from localStorage
     localStorage.removeItem(cacheKey(threadId));
@@ -327,9 +383,7 @@ async function deleteThread(threadId) {
         currentThread = threads[0];
     }
 
-    renderThreads();
-    renderChat();
-    refreshTokenBar(currentThread);
+    await refreshThreads();
 }
 
 // ========== Chat Rendering ==========
@@ -591,6 +645,7 @@ async function sendMessage() {
 
     isStreaming = false;
     setStreamingControls(false);
+    refreshTitleIfNew();
 }
 
 // AbortController of the in-flight chat stream, so the stop button can cancel it.
@@ -795,7 +850,28 @@ async function chatStream(threadId, message) {
         streamAbort = null;
         setStreamProgress('');
         setStreamingControls(false);
+        refreshTitleIfNew();
     }
+}
+
+// refreshTitleIfNew picks up the name the server gave this conversation on its
+// first message. The sidebar is not otherwise refreshed after a chat, so without
+// this a brand-new conversation kept showing its ID until some unrelated action
+// reloaded the list. It only asks when the current thread has no name yet, which
+// is once per conversation.
+async function refreshTitleIfNew() {
+    if (!currentThread || threadTitles[currentThread]) return;
+    try {
+        const list = await api('GET', '/api/chat/threads');
+        let changed = false;
+        for (const t of list || []) {
+            if (t.title && threadTitles[t.id] !== t.title) {
+                threadTitles[t.id] = t.title;
+                changed = true;
+            }
+        }
+        if (changed) renderThreads();
+    } catch (e) {}
 }
 
 // Update the streaming message content in localStorage

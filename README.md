@@ -554,6 +554,18 @@ TEST_DATABASE_URL='postgres://agent:agent_dev_password@127.0.0.1:5432/agent?sslm
 | GET | `/api/agent/runs/{runId}/events` | 运行事件流 |
 | POST | `/api/agent/resume` | 恢复中断运行 |
 
+### 会话
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/chat/threads` | 会话列表，每项 `{id, title}`（`title` 无则省略） |
+| POST | `/api/chat/threads` | 新建会话 |
+| PUT | `/api/chat/{threadId}` | 重命名（`{title}`，必填，上限 60 字） |
+| DELETE | `/api/chat/{threadId}/delete` | 删除会话（连同它的名称） |
+| GET | `/api/chat/{threadId}/messages` | 会话消息 |
+| GET | `/api/chat/{threadId}/tokens` | 该会话的 token 用量 |
+
+会话名称由**首条用户消息**派生（首句、按显示宽度截断），存在记忆存储的保留键 `__title_<threadId>` 里——因此复用三种后端与用户隔离，不需要 schema 迁移，也不会出现在记忆列表里。名称是 ID 旁边的元数据：ID 是消息、检查点与会话级记忆的键，改名不碰它。派生是机械规则而非语义概括（不配模型就不做额外调用），所以**换个说法不会得到更好的标题**；用 LLM 取名是明确的未做项。
+
 ### 审批
 | 方法 | 路径 | 说明 |
 |------|------|------|

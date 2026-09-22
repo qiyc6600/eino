@@ -33,8 +33,12 @@ func wideRune(r rune) bool {
 	return false
 }
 
-// displayWidth counts the columns a string occupies.
-func displayWidth(s string) int {
+// DisplayWidth counts the columns a string occupies.
+// DisplayWidth counts the columns a string occupies.
+//
+// Exported because the title cutter needs the same judgement: a 16-character
+// Chinese title and a 16-character English one do not take the same room.
+func DisplayWidth(s string) int {
 	w := 0
 	for _, r := range s {
 		if wideRune(r) {
@@ -49,7 +53,7 @@ func displayWidth(s string) int {
 // padRight pads s to exactly cols display columns, truncating with an ellipsis when
 // it is longer so a long cell cannot push the borders out of line.
 func padRight(s string, cols int) string {
-	w := displayWidth(s)
+	w := DisplayWidth(s)
 	if w == cols {
 		return s
 	}
@@ -61,7 +65,7 @@ func padRight(s string, cols int) string {
 
 // padCenter centres s in cols display columns, biasing the extra space left.
 func padCenter(s string, cols int) string {
-	w := displayWidth(s)
+	w := DisplayWidth(s)
 	if w >= cols {
 		return padRight(s, cols)
 	}
@@ -96,14 +100,14 @@ func truncateToCols(s string, cols int) string {
 func columnWidths(headers []string, rows [][]string) []int {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = displayWidth(h)
+		widths[i] = DisplayWidth(h)
 	}
 	for _, row := range rows {
 		for i, cell := range row {
 			if i >= len(widths) {
 				break
 			}
-			if w := displayWidth(cell); w > widths[i] {
+			if w := DisplayWidth(cell); w > widths[i] {
 				widths[i] = w
 			}
 		}

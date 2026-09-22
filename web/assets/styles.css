@@ -292,6 +292,20 @@ body {
 .thread-delete:hover { color: #ef4444; background: #fef2f2; }
 .thread-item:hover .thread-delete { display: inline-block; }
 
+/* Same reveal-on-hover treatment as delete: the row stays quiet until the
+   pointer is on it, and a name is not something the row needs to advertise. */
+.thread-rename {
+    display: none;
+    color: #9ca3af;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1;
+}
+.thread-rename:hover { color: #4f46e5; background: #eef2ff; }
+.thread-item:hover .thread-rename { display: inline-block; }
+
 /* Chat Area */
 .chat-area {
     flex: 1;

@@ -43,9 +43,9 @@ func TestFormatOrderList_ColumnsLineUp(t *testing.T) {
 				t.Fatalf("expected a header, rules and rows, got %d table lines:\n%s", len(table), out)
 			}
 
-			want := displayWidth(table[0])
+			want := DisplayWidth(table[0])
 			for i, line := range table {
-				if got := displayWidth(line); got != want {
+				if got := DisplayWidth(line); got != want {
 					t.Errorf("line %d is %d columns, want %d (all lines must match for the "+
 						"borders to line up)\n%s", i, got, want, out)
 				}
@@ -106,8 +106,8 @@ func TestDisplayWidth(t *testing.T) {
 		{"（已取消）", 10}, // fullwidth punctuation is wide too
 	}
 	for _, c := range cases {
-		if got := displayWidth(c.in); got != c.want {
-			t.Errorf("displayWidth(%q) = %d, want %d", c.in, got, c.want)
+		if got := DisplayWidth(c.in); got != c.want {
+			t.Errorf("DisplayWidth(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
@@ -121,7 +121,7 @@ func TestPadRight(t *testing.T) {
 	if got := padRight("待处理", 8); got != "待处理  " {
 		t.Errorf("padRight(%q) = %q, want two spaces (6 columns + 2)", "待处理", got)
 	}
-	if got := padRight("abcdef", 4); displayWidth(got) != 4 {
-		t.Errorf("a long cell must be truncated to the column, got %q (%d columns)", got, displayWidth(got))
+	if got := padRight("abcdef", 4); DisplayWidth(got) != 4 {
+		t.Errorf("a long cell must be truncated to the column, got %q (%d columns)", got, DisplayWidth(got))
 	}
 }

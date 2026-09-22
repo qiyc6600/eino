@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/example/agent-eino-demo/internal/agent"
@@ -21,6 +24,39 @@ type AgentHandler struct {
 // NewAgentHandler creates a new AgentHandler.
 func NewAgentHandler(runner *agent.Runner, memorySvc *memory.Service) *AgentHandler {
 	return &AgentHandler{runner: runner, memorySvc: memorySvc}
+}
+
+// ensureThreadTitle gives a conversation its name the first time it is used, so
+// the sidebar shows something recognisable instead of "t_mf3k2j1a".
+//
+// It derives the title from the thread's first user message — not from the
+// message that happens to trigger this call — so a thread that predates titles
+// is named after what it is actually about. A thread that already has a title is
+// left alone: renaming is the user's, and re-deriving would overwrite it.
+//
+// Failures are logged, never returned: a missing title is a cosmetic loss, and
+// it must not stop the user's message from being answered.
+func (h *AgentHandler) ensureThreadTitle(ctx context.Context, userID, threadID, message string) {
+	if h.memorySvc == nil || threadID == "" {
+		return
+	}
+	if _, ok, err := h.memorySvc.ThreadTitle(ctx, userID, threadID); err != nil || ok {
+		return
+	}
+
+	title := ""
+	if msgs, err := h.runner.GetThreadMessagesContext(ctx, userID, threadID); err == nil {
+		title = agent.TitleFromFirstUserMessage(msgs)
+	}
+	if title == "" {
+		title = agent.DeriveThreadTitle(message)
+	}
+	if title == "" {
+		return
+	}
+	if err := h.memorySvc.SetThreadTitle(ctx, userID, threadID, title); err != nil {
+		log.Printf("thread %s left untitled: %v", threadID, err)
+	}
 }
 
 // ChatRequest is the request body for POST /api/agent/chat
@@ -59,6 +95,11 @@ func (h *AgentHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	// Copy-on-write: never mutate the shared AuthContext in place —
 	// the pointer is captured by goroutines (preference extraction, SSE).
 	ac = ac.WithThread(req.ThreadID)
+
+	// Name the conversation on its first message, before the run: the sidebar
+	// refreshes as soon as the run is listed, and a title that arrived with the
+	// answer would make the list flicker from ID to name.
+	h.ensureThreadTitle(r.Context(), ac.UserID, req.ThreadID, req.Message)
 
 	if req.Stream {
 		h.chatStream(w, r, ac, &req)
@@ -365,15 +406,102 @@ func (h *AgentHandler) ListThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	threads, err := h.runner.ListThreadsContext(r.Context(), ac.UserID)
+	ids, err := h.runner.ListThreadsContext(r.Context(), ac.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list threads")
 		return
 	}
-	if threads == nil {
-		threads = []string{}
+	if ids == nil {
+		ids = []string{}
 	}
-	writeJSON(w, http.StatusOK, threads)
+
+	// Titles are optional: a store that cannot keep them, or a thread that has
+	// none, still lists — the page falls back to showing the ID.
+	titles := map[string]string{}
+	if h.memorySvc != nil {
+		if fetched, err := h.memorySvc.ThreadTitles(r.Context(), ac.UserID); err == nil {
+			titles = fetched
+		}
+	}
+
+	type threadInfo struct {
+		ID    string `json:"id"`
+		Title string `json:"title,omitempty"`
+	}
+	result := make([]threadInfo, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, threadInfo{ID: id, Title: titles[id]})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// RenameThread handles PUT /api/chat/{threadId}
+//
+// The name is metadata beside the thread ID, never a replacement for it: the ID
+// keys the stored messages, the checkpoints and the thread-scoped memories, so
+// renaming must not touch it.
+func (h *AgentHandler) RenameThread(w http.ResponseWriter, r *http.Request) {
+	ac := auth.FromContext(r.Context())
+	if ac == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if h.memorySvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "thread titles are unavailable")
+		return
+	}
+
+	threadID := extractPathSuffix(r.URL.Path, "/api/chat/")
+	threadID = trimSuffix(threadID, "/rename")
+	if threadID == "" {
+		writeError(w, http.StatusBadRequest, "threadId is required")
+		return
+	}
+
+	var req struct {
+		Title string `json:"title"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		// Renaming to nothing is rejected rather than treated as "clear": a
+		// cleared title is re-derived on the next message, so the name would
+		// silently come back.
+		writeError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+	if runes := []rune(title); len(runes) > memory.MaxThreadTitleRunes {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("title must be at most %d characters", memory.MaxThreadTitleRunes))
+		return
+	}
+
+	// The thread must exist for this user, or a rename would create a title for
+	// a conversation that is not there.
+	ids, err := h.runner.ListThreadsContext(r.Context(), ac.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list threads")
+		return
+	}
+	found := false
+	for _, id := range ids {
+		if id == threadID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "thread not found")
+		return
+	}
+
+	if err := h.memorySvc.SetThreadTitle(r.Context(), ac.UserID, threadID, title); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save the title")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"threadId": threadID, "title": title})
 }
 
 // CreateThread handles POST /api/chat/threads
@@ -428,6 +556,14 @@ func (h *AgentHandler) DeleteThread(w http.ResponseWriter, r *http.Request) {
 	if !deleted {
 		writeError(w, http.StatusNotFound, "thread not found")
 		return
+	}
+	// The title is a reserved entry in the memory store, so deleting the thread
+	// does not remove it. Leaving it would accumulate a name for every deleted
+	// conversation, and reusing the ID later would resurrect the old name.
+	if h.memorySvc != nil {
+		if err := h.memorySvc.DeleteThreadTitle(r.Context(), ac.UserID, threadID); err != nil {
+			log.Printf("thread %s deleted but its title was not: %v", threadID, err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "threadId": threadID})
 }

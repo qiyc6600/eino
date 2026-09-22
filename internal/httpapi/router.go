@@ -255,6 +255,12 @@ func (r *Router) handleChatThreadSub(w http.ResponseWriter, req *http.Request) {
 		r.agentHandler.DeleteThread(w, req)
 		return
 	}
+	// PUT /api/chat/{threadId} — rename. Metadata only: the ID is the key for
+	// stored messages, checkpoints and thread-scoped memories.
+	if req.Method == http.MethodPut {
+		r.agentHandler.RenameThread(w, req)
+		return
+	}
 	if req.Method == http.MethodGet {
 		if strings.HasSuffix(req.URL.Path, "/tokens") {
 			// GET /api/chat/{threadId}/tokens
