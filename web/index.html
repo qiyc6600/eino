@@ -5,9 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent Eino Demo</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/assets/styles.css?v=13">
+    <!-- The build that served this page. The server substitutes it, so a running
+         tab can tell when the files it is executing are no longer the ones being
+         served — see checkForNewBuild in app.js. -->
+    <meta name="app-version" content="{{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/assets/styles.css?v={{ASSET_VERSION}}">
 </head>
 <body>
+    <!-- Shown when the server has been upgraded while this tab stayed open. The
+         page is running JS the server has replaced, so a bug fixed there can look
+         unfixed here until someone reloads by hand. -->
+    <div id="buildNotice" class="build-notice">
+        <span>服务端已更新，当前页面仍在运行旧版本</span>
+        <button onclick="location.reload()">刷新</button>
+    </div>
     <!-- Login Page -->
     <div id="loginPage" class="page active">
         <div class="login-container">
@@ -139,7 +150,7 @@
         </div>
     </div>
 
-    <script src="/assets/app.js?v=26"></script>
+    <script src="/assets/app.js?v={{ASSET_VERSION}}"></script>
 
     <!-- API Key Modal -->
     <div id="apiKeyModal" class="modal-overlay" style="display:none;">

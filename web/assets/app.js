@@ -111,6 +111,38 @@ function handleSessionExpired() {
     }
 }
 
+// ========== Build check ==========
+// The page is told which build served it (the meta tag the server substitutes),
+// and /healthz reports what the server is serving now. When the two differ, this
+// tab is executing JS the server has already replaced — and since a stale page
+// looks exactly like a broken one, a bug fixed server-side can appear unfixed
+// until someone reloads by hand. That happened once: an order table kept
+// overflowing its bubble in a tab that had been open across the fix.
+const BUILD_POLL_MS = 60000;
+
+function servedBuild() {
+    const meta = document.querySelector('meta[name="app-version"]');
+    return meta ? meta.getAttribute('content') : '';
+}
+
+async function checkForNewBuild() {
+    const mine = servedBuild();
+    // Not substituted means the page was opened outside the server (a file:// copy
+    // or a static preview), where there is nothing to compare against.
+    if (!mine || mine.indexOf('{{') !== -1) return;
+    try {
+        const resp = await fetch('/healthz', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.assets && data.assets !== mine) {
+            const notice = document.getElementById('buildNotice');
+            if (notice) notice.style.display = 'flex';
+        }
+    } catch (e) {
+        // Offline, or the server is restarting: not a reason to nag.
+    }
+}
+
 // ========== Login ==========
 async function doLogin() {
     const username = document.getElementById('loginUsername').value;
@@ -139,7 +171,11 @@ async function doLogout() {
 // ========== Bootstrap ==========
 // The session lives in an HttpOnly cookie, so a reload keeps the user signed in.
 // Quiet mode means a visitor without a session simply stays on the login page.
-document.addEventListener('DOMContentLoaded', () => { showMainApp(true); });
+document.addEventListener('DOMContentLoaded', () => {
+    showMainApp(true);
+    checkForNewBuild();
+    setInterval(checkForNewBuild, BUILD_POLL_MS);
+});
 
 // ========== Main App ==========
 // showMainApp reveals the main view. It probes the session before revealing

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +64,7 @@ func (r *Router) Handler() http.Handler {
 	// Static files (no auth required) — serve embedded web UI
 	staticFS, _ := fs.Sub(web.StaticFS, ".")
 	fileServer := http.FileServer(http.FS(staticFS))
+	indexHTML, _ := fs.ReadFile(staticFS, "index.html")
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		// Only serve static files for non-API paths
 		if strings.HasPrefix(req.URL.Path, "/api/") {
@@ -72,6 +75,25 @@ func (r *Router) Handler() http.Handler {
 		// after a server upgrade silently disables new frontend features.
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-App-Version", web.AssetVersion())
+
+		// index.html carries the version of the build that served it, so an open
+		// tab can notice that the server has moved on. No-cache stops the browser
+		// from reusing a stale copy, but nothing stops a *running* page from
+		// executing the JS it already loaded — which is how a fixed bug can appear
+		// unfixed until the tab is reloaded by hand.
+		if req.URL.Path == "/" || req.URL.Path == "/index.html" {
+			// Every occurrence: the meta tag and both asset URLs carry it, and a
+			// half-substituted page leaves the asset URLs literally pointing at
+			// "?v={{ASSET_VERSION}}".
+			page := strings.ReplaceAll(string(indexHTML), web.AssetVersionPlaceholder, web.AssetVersion())
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Content-Length", strconv.Itoa(len(page)))
+			if req.Method != http.MethodHead {
+				_, _ = io.WriteString(w, page)
+			}
+			return
+		}
 		fileServer.ServeHTTP(w, req)
 	})
 

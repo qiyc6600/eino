@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/example/agent-eino-demo/web"
 )
 
 const defaultReadinessTimeout = 2 * time.Second
@@ -29,7 +31,13 @@ func (h *HealthHandler) Live(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// The asset version rides along here because /healthz is unauthenticated and
+	// already exists: an open tab polls it to notice that the server has been
+	// upgraded underneath it, which needs no new route.
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"assets": web.AssetVersion(),
+	})
 }
 
 func (h *HealthHandler) Ready(w http.ResponseWriter, req *http.Request) {
