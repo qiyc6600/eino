@@ -86,7 +86,16 @@ async function api(method, path, body) {
         if (resp.status === 401 && !path.startsWith('/api/auth/login')) {
             handleSessionExpired();
         }
-        throw new Error(data.error || `HTTP ${resp.status}`);
+        const err = new Error(data.error || `HTTP ${resp.status}`);
+        err.status = resp.status;
+        // The server says how long a lockout lasts; without it the user sees a bare
+        // "too many login attempts" and cannot tell whether to wait or to go looking
+        // for a credential problem.
+        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
+        if (Number.isFinite(retryAfter) && retryAfter > 0) {
+            err.retryAfter = retryAfter;
+        }
+        throw err;
     }
     return data;
 }
@@ -157,8 +166,36 @@ async function doLogin() {
         if (notice) notice.textContent = '';
         showMainApp();
     } catch (e) {
-        alert('登录失败：' + e.message);
+        showLoginProblem(loginProblemText(e));
     }
+}
+
+// loginProblemText turns a login failure into something actionable. A lockout is
+// the case worth spelling out: the password may be perfectly correct, and the only
+// useful information is how long to wait.
+function loginProblemText(e) {
+    if (e && e.retryAfter) {
+        const secs = e.retryAfter;
+        const wait = secs < 60
+            ? `${secs} 秒`
+            : `${Math.ceil(secs / 60)} 分钟`;
+        return `尝试过于频繁，已暂时锁定登录，请在 ${wait}后重试`;
+    }
+    if (e && e.status === 401) {
+        return '用户名或密码错误';
+    }
+    return '登录失败：' + (e && e.message ? e.message : e);
+}
+
+// showLoginProblem reports a failed sign-in on the login page itself rather than in
+// a modal alert: a lockout is a state to wait out, not a message to dismiss.
+function showLoginProblem(text) {
+    const notice = document.getElementById('loginNotice');
+    if (notice) {
+        notice.textContent = text;
+        return;
+    }
+    alert(text);
 }
 
 async function doLogout() {

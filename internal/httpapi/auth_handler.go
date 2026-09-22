@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -37,6 +38,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	source, _, _ := net.SplitHostPort(r.RemoteAddr)
 	resp, err := h.authSvc.LoginWithSource(r.Context(), req.Username, req.Password, source)
 	if err != nil {
+		// Failed authentication is a security event, and it is also what an operator
+		// needs in order to explain a lockout: without this line the only trace of a
+		// tripped limiter is the 429 the user reports, with no record of what caused
+		// it or from where. The password is never logged.
+		log.Printf("login failed for %q from %s: %v", req.Username, source, err)
+
 		var limited *auth.LoginRateLimitError
 		if errors.As(err, &limited) {
 			seconds := int64((limited.RetryAfter + time.Second - 1) / time.Second)
