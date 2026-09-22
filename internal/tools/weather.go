@@ -61,7 +61,8 @@ func NewWeatherTool() RegisteredTool {
 	}
 }
 
-// httpClient with timeout
+// weatherHTTPClient is package-level so tests can substitute a stub transport;
+// without that seam the tool is untestable offline.
 var weatherHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 func executeWeather(identity *auth.ToolIdentity, argumentsInJSON string) ToolResult {
@@ -84,21 +85,28 @@ func executeWeather(identity *auth.ToolIdentity, argumentsInJSON string) ToolRes
 		if ctx.Err() != nil {
 			return SystemErrorResult("weather", ctx.Err().Error(), "")
 		}
-		// Fallback to mock data on API failure
-		return fallbackMockWeather(args.City, err)
+		// Report the failure rather than substituting invented numbers. This tool's
+		// entire value is "current, real-world conditions", so there is no honest
+		// degradation available: a fabricated 32°C returned as a success would be
+		// indistinguishable from real data to anything that branches on status, and
+		// the model would relay it as an observation.
+		return BusinessErrorResult("weather",
+			fmt.Sprintf("weather lookup failed for %s: %v", args.City, err))
 	}
 
 	return formatWeatherResult(args.City, resp)
 }
 
-// queryWttrIn calls the wttr.in JSON API.
-func queryWttrIn(city string) (*wttrInResponse, error) {
-	return queryWttrInContext(context.Background(), city)
-}
+// queryWttrInContext calls the wttr.in JSON API.
+//
+// lang=zh is not requested: wttr.in's translated fields (lang_zh) come back
+// untranslated in practice — verified across six cities — and the description
+// below is read from weatherDesc, which is English-only either way. Asking for a
+// translation that is never read would only mislead the next reader.
 func queryWttrInContext(ctx context.Context, city string) (*wttrInResponse, error) {
 	// URL-encode the city name to handle Chinese characters
 	encodedCity := url.PathEscape(city)
-	apiURL := fmt.Sprintf("https://wttr.in/%s?format=j1&lang=zh", encodedCity)
+	apiURL := fmt.Sprintf("https://wttr.in/%s?format=j1", encodedCity)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -180,29 +188,5 @@ func formatWeatherResult(city string, resp *wttrInResponse) ToolResult {
 		"wind_dir":   cond.Winddir16Point,
 		"wind_speed": cond.WindspeedKmph,
 		"source":     "wttr.in",
-	})
-}
-
-// fallbackMockWeather returns mock data when the real API is unavailable.
-func fallbackMockWeather(city string, apiErr error) ToolResult {
-	// Fallback mock data
-	weatherData := map[string]map[string]any{
-		"北京": {"temp": "32°C", "condition": "晴", "humidity": "45%"},
-		"上海": {"temp": "28°C", "condition": "多云", "humidity": "72%"},
-		"深圳": {"temp": "30°C", "condition": "阵雨", "humidity": "85%"},
-		"广州": {"temp": "31°C", "condition": "多云", "humidity": "78%"},
-		"武汉": {"temp": "35°C", "condition": "晴", "humidity": "60%"},
-	}
-
-	data, ok := weatherData[city]
-	if !ok {
-		data = map[string]any{"temp": "25°C", "condition": "晴", "humidity": "60%"}
-	}
-
-	content := fmt.Sprintf("%s天气（离线数据）：%s，温度 %s，湿度 %s\n⚠️ 实时天气API暂不可用: %v", city, data["condition"], data["temp"], data["humidity"], apiErr)
-	return SuccessResult("weather", content, map[string]any{
-		"city":   city,
-		"data":   data,
-		"source": "fallback_mock",
 	})
 }

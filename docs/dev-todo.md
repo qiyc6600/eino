@@ -55,6 +55,7 @@
 | 45 | 相关度阈值按 embedding 尺度自动取值 | 模块 05 | ✅ | 真实 embedding 的相关结果在 0.6–0.9，hash 伪嵌入低一个量级；用同一个 0.3 会让 hash 模式下的中文检索完全失效。新增 `VECTOR_MIN_SCORE`，未设置时按提供方自动取值（**hash → 0.02，真实 → 0.3**）。该阈值是**噪声下限而非相关性判据**：相关中文片段实测 0.043–0.19、无关中文片段 0.000，所以 0.02 保留全部相关召回并丢掉纯碰撞噪声；英文无关片段仍有约 0.11（任意两段英文都共用虚词），那里靠排序区分。维度与阈值的实测过程见 2026-09-22 记录 |
 | 46 | MCP 外部工具接入 | 模块 03 | ✅ | stdio 传输，适配层 `eino-ext/components/tool/mcp`（客户端 `mark3labs/mcp-go`）；启动时握手并发现工具，转成 `RegisteredTool` 注册。**注册插在 `WrapAllTools` 之前**，因此与内置工具走同一条 ACL 拦截；授权按角色配置（未授予的远端工具对所有人被拒，含 admin）；审批只认本地 `MCP_REQUIRE_APPROVAL`，不读远端 annotations；自动新增 `mcp_agent` 子 Agent 承载远端工具；单个服务器连不上只记日志不阻止启动，`Close()` 终止子进程。仓库自带 `cmd/mcp-demo-server` 供离线演示与测试 |
 | 47 | 审批面板显示已处理记录 | 模块 02 | ✅ | 面板此前只列**待审批**，一旦做出决定就空了。新增 `ListDecided`（接口 + 内存/文件管理器 + PostgreSQL，`status <> 'pending'` 按决定时间倒序）与 `GET /api/approvals/history`（每用户、上限 20、剔除 `State`/`Result`）；前端"最近处理"区显示工具名、批准/拒绝与原因 |
+| 48 | 天气工具失败时不再编造数据 | 模块 03 | ✅ | API 不可用时原本返回硬编码假数据（北京 32°C 晴…）**并标成成功**，调用方按状态分支看不见它。改为返回 `business_error` 并带上城市与原因；顺带删除死代码 `queryWttrIn` 与不生效的 `lang=zh`，补上此前完全没有的测试（`weather_test.go`，桩 transport） |
 
 ---
 
@@ -251,6 +252,17 @@
   **测试与注入验证**（三个测试，每处守卫都注入缺陷确认变红）：`TestIntegration_ApprovalHistory`（决定后出现在历史里、字段齐全、待审批列表同时为空、`State`/`Result` 已剔除）；`TestIntegration_ApprovalHistoryIsPerUser`（另一个用户看不到——**注入**：去掉 `userID` 过滤 → 报"visitor 看到了 admin 的审批历史"）；`TestPostgresApprovalHistory`（真实库上的倒序与上限，**注入**：SQL 的 `status <> 'pending'` 改成无条件 → 待审批项混进历史，测试变红）。契约测试的大小写断言同样做了注入验证：改回 `Decision.Reason` → 报 "the page reads Decision.Reason, but the server sends it lowercase"。
   **实机验证**（重建重启后种入两条决定）：`无待审批项` + `最近处理 | delete_order | 已批准 | 2026/9/22 11:38:49 · 确认删除 | delete_order | 已拒绝 | 2026/9/22 11:38:48 · 先别删，我要核对一下`——最新在前，原因正确显示；截图确认绿/红状态与时间格式。
   全量 `scripts/check.sh` 与带真实 PostgreSQL 的 `-race` 均通过。
+
+- 2026-09-22：天气工具不再编造数据（用户问"天气工具是真实的吗"，顺着查出这条降级路径）。
+  **先说结论**：`weather` 本身是**真实调用**（`https://wttr.in/<city>?format=j1`，免费无 key），实测 HTTP 200、1.4 秒返回真实观测；用户此前看到的那条 `Beijing，China / Smoky haze / 观测时间 05:31 PM` 就是真实数据。问题在**失败路径**。
+  **缺陷**：API 调用失败（超时、断网、非 200、解析失败、无数据）时，`fallbackMockWeather` 返回一张硬编码表（北京 32°C 晴、上海 28°C 多云…，其他城市一律 25°C 晴），并且是 **`SuccessResult`**。文本里确实有"（离线数据）"和"⚠️ 实时天气API暂不可用"两处标记，metadata 里也有 `source: fallback_mock`——但**结果状态是成功**，所以任何按成功/失败分支的调用方都看不见这次降级，模型拿到的是一个成功结果，不逐字读那行警告就会把 32°C 当实测值报出来。
+  **为什么改成错误而不是"更好的降级"**：判断降级是否正当只有一条标准——**替代品是否仍然在说真话**。项目里其他降级都满足它：摘要的规则兜底产出的仍是对真实对话的（更粗的）摘要，记忆整合的规则兜底仍基于真实条目，Resume 的线程重建仍从真实历史恢复。而天气工具的全部价值就是"此刻的真实情况"，硬编码 32°C 不是"降级后的答案"，是**另一个假答案**。所以这里没有诚实的降级空间，改为 `BusinessErrorResult("weather", "weather lookup failed for <city>: <cause>")`——**不是 `SystemErrorResult`**：上游 API 挂掉是可预期、可解释的情况，让整个 run 中止属于反应过度，交给模型说一句"查不到"才是恰当的。
+  **顺带**：`ctx.Err() != nil`（请求被取消）原本就**不降级**而是返回系统错误——这个判断是对的（取消意味着调用方已经不想要答案，此时给出任何答案都是错的），说明分界线原本就存在，只是画在了"取消 vs 失败"而不是"我还能不能说真话"上。
+  **另外两处清理**：① `queryWttrIn` 是死代码（无任何调用方，未被导出所以编译器不提醒）；② `lang=zh` 请求了一个从不读取、且实测无效的翻译——六个城市的 `lang_zh` 全部返回英文（`Smoky haze`/`Sunny`/`Clear`/`Patchy rain nearby` 一个都没翻译），代码读的是英文的 `weatherDesc`，所以这个参数只会误导下一个读者，已去掉。
+  **测试**：`internal/tools/weather.go` 此前**一个测试都没有**（208 行）。新增 `weather_test.go`，用可替换的 `weatherHTTPClient`（桩 transport）做到离线可测：成功路径断言输出里的每个值都来自响应（`26`/`44`/`Smoky haze`/`NW`/`02:32 AM` 这些值只存在于桩响应里，因此能证明不是包内常量）；失败路径表驱动五种失败（网络错误、上游 500、不可解析、无数据、取消）断言**必须报错且 Content 里不得出现任何天气内容**（`°C`/`温度`/`湿度`/`离线`）、且不得再出现 fallback 来源；另有参数校验与"城市无法解析"两组。
+  **注入验证**：把编造数据的降级加回去 → `TestWeather_FailuresNeverFabricateWeather` 的 4 个子用例全部变红（"a failed lookup must report an error"），取消那条仍通过——正是预期（取消路径在降级之前就返回了）。
+  实机：`curl` 直接打 API 确认去掉 `lang=zh` 后返回结构不变，且数据在变（26°C/02:32 AM → 28°C/04:02 AM，证明是实时数据）。全量 `check.sh` 通过。
+  **未做**：没给天气加缓存降级（"上一次成功观测 + 时间戳"是唯一诚实的降级形式），因为那会引入状态与过期策略，超出本次范围；运行中的实例需要重启才会生效。
 
 - 本文档原为 1960 行的详细开发计划文档，已在所有缺失项修复后精简为当前状态追踪格式。
 - 原始开发计划的实现方案已全部落地，详见上方"已完成项"列表。
